@@ -1,0 +1,431 @@
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+use crate::components::generic::{
+    dropdown::{DropdownAction, DropdownEvent, DropdownOption, MultiSelectDropdownState},
+    filtered_tree::{
+        FilteredTreeAction, FilteredTreeEvent, FilteredTreeState, FilteredTreeViewMode,
+    },
+    tree::{TreeItem, TreeRow},
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JiraIssueColumn {
+    IssueKey,
+    Summary,
+    IssueType,
+    Status,
+    Field { id: String, label: String },
+}
+
+impl JiraIssueColumn {
+    pub fn default_columns() -> Vec<Self> {
+        vec![Self::IssueKey, Self::Summary, Self::IssueType, Self::Status]
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::IssueKey => "Work",
+            Self::Summary => "Summary",
+            Self::IssueType => "Work type",
+            Self::Status => "Status",
+            Self::Field { label, .. } => label,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JiraFilteredTreeAction {
+    FilteredTree(FilteredTreeAction),
+    Dropdown(DropdownAction),
+    OpenColumns,
+    YankIssueUrlPrefix,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JiraFilteredTreeEvent {
+    Quit,
+    IssueUrlCopied(String),
+    IssueUrlCopyFailed(String),
+    ColumnsChanged(Vec<JiraIssueColumn>),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct JiraFilteredTreeState {
+    filtered_tree: FilteredTreeState,
+    jira_site: Option<String>,
+    column_dropdown: Option<MultiSelectDropdownState<JiraIssueColumn>>,
+    visible_columns: Vec<JiraIssueColumn>,
+    available_columns: Vec<JiraIssueColumn>,
+    pending_yank: bool,
+}
+
+impl JiraFilteredTreeState {
+    pub fn new(items: Vec<TreeItem>) -> Self {
+        let default_columns = JiraIssueColumn::default_columns();
+        let mut state = Self {
+            filtered_tree: FilteredTreeState::new(items),
+            jira_site: None,
+            column_dropdown: None,
+            visible_columns: default_columns.clone(),
+            available_columns: default_columns,
+            pending_yank: false,
+        };
+        state.sync_searchable_fields();
+        state
+    }
+
+    pub fn set_jira_site(&mut self, site: impl Into<String>) {
+        self.jira_site = Some(site.into());
+    }
+
+    pub fn set_items(&mut self, items: Vec<TreeItem>) {
+        self.filtered_tree.set_items(items);
+    }
+
+    pub fn set_available_columns(&mut self, columns: Vec<JiraIssueColumn>) {
+        if !columns.is_empty() {
+            self.available_columns = columns;
+        }
+    }
+
+    pub fn tick(&mut self, dt: std::time::Duration) {
+        self.filtered_tree.tick(dt);
+        if let Some(dropdown) = &mut self.column_dropdown {
+            dropdown.tick(dt);
+        }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.filtered_tree.is_animating()
+            || self
+                .column_dropdown
+                .as_ref()
+                .is_some_and(MultiSelectDropdownState::is_animating)
+    }
+
+    pub fn view_mode(&self) -> FilteredTreeViewMode {
+        self.filtered_tree.view_mode()
+    }
+
+    pub fn set_view_mode(&mut self, view_mode: FilteredTreeViewMode) {
+        self.filtered_tree.set_view_mode(view_mode);
+    }
+
+    pub fn items(&self) -> &[TreeItem] {
+        self.filtered_tree.items()
+    }
+
+    pub fn selected_item_index(&self) -> usize {
+        self.filtered_tree.selected_item_index()
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.filtered_tree.scroll_offset()
+    }
+
+    pub fn filter(&self) -> &str {
+        self.filtered_tree.filter()
+    }
+
+    pub fn filter_cursor(&self) -> usize {
+        self.filtered_tree.filter_cursor()
+    }
+
+    pub fn filter_state(&self) -> &crate::FilterState {
+        self.filtered_tree.filter_state()
+    }
+
+    pub fn is_filter_focused(&self) -> bool {
+        self.filtered_tree.is_filter_focused()
+    }
+
+    pub fn visible_rows(&self) -> Vec<TreeRow> {
+        self.filtered_tree.visible_rows()
+    }
+
+    pub fn visible_range(&self, height: usize) -> std::ops::Range<usize> {
+        self.filtered_tree.visible_range(height)
+    }
+
+    pub fn visible_columns(&self) -> &[JiraIssueColumn] {
+        &self.visible_columns
+    }
+
+    pub fn column_dropdown(&self) -> Option<&MultiSelectDropdownState<JiraIssueColumn>> {
+        self.column_dropdown.as_ref()
+    }
+
+    pub fn is_column_dropdown_open(&self) -> bool {
+        self.column_dropdown.is_some()
+    }
+
+    pub fn close_column_dropdown(&mut self) {
+        self.column_dropdown = None;
+    }
+    pub fn is_column_dropdown_filter_focused(&self) -> bool {
+        self.column_dropdown
+            .as_ref()
+            .is_some_and(MultiSelectDropdownState::is_filter_focused)
+    }
+
+    pub fn dispatch(&mut self, action: JiraFilteredTreeAction) -> Option<JiraFilteredTreeEvent> {
+        match action {
+            JiraFilteredTreeAction::FilteredTree(action) => {
+                self.pending_yank = false;
+                self.filtered_tree.dispatch(action);
+                None
+            }
+            JiraFilteredTreeAction::Dropdown(action) => self.dispatch_dropdown(action),
+            JiraFilteredTreeAction::OpenColumns => {
+                self.pending_yank = false;
+                self.toggle_columns();
+                None
+            }
+            JiraFilteredTreeAction::YankIssueUrlPrefix => self.dispatch_yank_prefix(),
+        }
+    }
+
+    pub fn dispatch_filter(
+        &mut self,
+        action: crate::FilterAction,
+    ) -> Option<JiraFilteredTreeEvent> {
+        self.filtered_tree
+            .dispatch_filter(action)
+            .map(|FilteredTreeEvent::Quit| JiraFilteredTreeEvent::Quit)
+    }
+
+    pub fn clear_transient_input(&mut self) {
+        self.filtered_tree.clear_transient_input();
+    }
+
+    fn dispatch_dropdown(&mut self, action: DropdownAction) -> Option<JiraFilteredTreeEvent> {
+        let dropdown = self.column_dropdown.as_mut()?;
+        match dropdown.dispatch(action) {
+            Some(DropdownEvent::Closed) => self.column_dropdown = None,
+            Some(DropdownEvent::Toggled(_)) => {
+                self.sync_visible_columns();
+                return Some(JiraFilteredTreeEvent::ColumnsChanged(
+                    self.visible_columns.clone(),
+                ));
+            }
+            None => {}
+        }
+        None
+    }
+
+    pub fn open_column_dropdown(&mut self) {
+        self.open_columns();
+    }
+
+    fn toggle_columns(&mut self) {
+        if self.column_dropdown.is_some() {
+            self.column_dropdown = None;
+        } else {
+            self.open_columns();
+        }
+    }
+
+    fn open_columns(&mut self) {
+        let options = self
+            .available_columns
+            .iter()
+            .cloned()
+            .map(|column| DropdownOption {
+                selected: self.visible_columns.contains(&column),
+                label: column.label().to_owned(),
+                value: column,
+            })
+            .collect();
+        self.column_dropdown =
+            Some(MultiSelectDropdownState::new(options).require_at_least_one_selection());
+    }
+
+    fn sync_visible_columns(&mut self) {
+        let Some(dropdown) = &self.column_dropdown else {
+            return;
+        };
+        let selected = dropdown
+            .options()
+            .iter()
+            .filter_map(|option| option.selected.then_some(option.value.clone()))
+            .collect::<Vec<_>>();
+        if !selected.is_empty() {
+            self.visible_columns = selected;
+            self.sync_searchable_fields();
+        }
+    }
+
+    fn sync_searchable_fields(&mut self) {
+        let field_ids = self
+            .visible_columns
+            .iter()
+            .map(|column| match column {
+                JiraIssueColumn::IssueKey => String::from("key"),
+                JiraIssueColumn::Summary => String::from("summary"),
+                JiraIssueColumn::IssueType => String::from("issuetype"),
+                JiraIssueColumn::Status => String::from("status"),
+                JiraIssueColumn::Field { id, .. } => id.clone(),
+            })
+            .collect();
+        self.filtered_tree.set_searchable_field_ids(Some(field_ids));
+    }
+
+    fn dispatch_yank_prefix(&mut self) -> Option<JiraFilteredTreeEvent> {
+        if self.pending_yank {
+            self.pending_yank = false;
+            Some(self.copy_issue_url())
+        } else {
+            self.pending_yank = true;
+            None
+        }
+    }
+
+    fn copy_issue_url(&self) -> JiraFilteredTreeEvent {
+        let Some(url) = self.selected_issue_url() else {
+            return JiraFilteredTreeEvent::IssueUrlCopyFailed(String::from(
+                "No selected issue or Jira site is available.",
+            ));
+        };
+
+        match copy_to_clipboard(&url) {
+            Ok(()) => JiraFilteredTreeEvent::IssueUrlCopied(url),
+            Err(error) => {
+                JiraFilteredTreeEvent::IssueUrlCopyFailed(format!("Could not copy {url}: {error}"))
+            }
+        }
+    }
+
+    fn selected_issue_url(&self) -> Option<String> {
+        let site = self.jira_site.as_ref()?.trim_end_matches('/');
+        let rows = self.filtered_tree.visible_rows();
+        let row = rows.get(self.filtered_tree.selected_item_index())?;
+        let issue = &self.filtered_tree.items()[row.item_index];
+
+        Some(format!("{site}/browse/{}", issue.id))
+    }
+}
+
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    for command in [
+        ClipboardCommand::new("wl-copy", &[]),
+        ClipboardCommand::new("xclip", &["-selection", "clipboard"]),
+        ClipboardCommand::new("xsel", &["--clipboard", "--input"]),
+    ] {
+        if command.copy(text).is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(String::from("no supported clipboard command found"))
+}
+
+struct ClipboardCommand<'a> {
+    program: &'a str,
+    args: &'a [&'a str],
+}
+
+impl<'a> ClipboardCommand<'a> {
+    const fn new(program: &'a str, args: &'a [&'a str]) -> Self {
+        Self { program, args }
+    }
+
+    fn copy(&self, text: &str) -> Result<(), String> {
+        let mut child = Command::new(self.program)
+            .args(self.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+
+        let Some(mut stdin) = child.stdin.take() else {
+            return Err(String::from("clipboard command did not open stdin"));
+        };
+
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|error| error.to_string())?;
+        drop(stdin);
+
+        child
+            .wait()
+            .map_err(|error| error.to_string())
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("clipboard command exited with {status}"))
+                }
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: &str) -> TreeItem {
+        TreeItem {
+            id: id.to_owned(),
+            label: String::from("Issue"),
+            status: String::from("To Do"),
+            kind: String::from("Task"),
+            parent_id: None,
+            field_values: std::collections::BTreeMap::new(),
+            root_order: 0,
+        }
+    }
+
+    #[test]
+    fn selected_issue_url_uses_configured_jira_site_and_issue_key() {
+        let mut tree = JiraFilteredTreeState::new(vec![item("KAN-20")]);
+        tree.set_jira_site("https://example.atlassian.net/");
+
+        assert_eq!(
+            tree.selected_issue_url().as_deref(),
+            Some("https://example.atlassian.net/browse/KAN-20")
+        );
+    }
+
+    #[test]
+    fn filter_uses_only_visible_jira_columns() {
+        let mut hidden_only = item("KAN-1");
+        hidden_only
+            .field_values
+            .insert(String::from("reporter"), String::from("Marlo Vlietstra"));
+        let mut assignee = item("KAN-2");
+        assignee
+            .field_values
+            .insert(String::from("assignee"), String::from("Marlo Vlietstra"));
+        let mut tree = JiraFilteredTreeState::new(vec![hidden_only, assignee]);
+        tree.set_available_columns(vec![
+            JiraIssueColumn::IssueKey,
+            JiraIssueColumn::Summary,
+            JiraIssueColumn::IssueType,
+            JiraIssueColumn::Status,
+            JiraIssueColumn::Field {
+                id: String::from("assignee"),
+                label: String::from("Assignee"),
+            },
+        ]);
+
+        tree.dispatch(JiraFilteredTreeAction::OpenColumns);
+        tree.dispatch(JiraFilteredTreeAction::Dropdown(DropdownAction::Filter(
+            crate::FilterAction::Exit,
+        )));
+        for _ in 0..4 {
+            tree.dispatch(JiraFilteredTreeAction::Dropdown(DropdownAction::MoveDown));
+        }
+        tree.dispatch(JiraFilteredTreeAction::Dropdown(
+            DropdownAction::ToggleSelected,
+        ));
+        for ch in "marlo vlietstra".chars() {
+            tree.dispatch_filter(crate::FilterAction::Text(ch));
+        }
+
+        let rows = tree.visible_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(tree.items()[rows[0].item_index].id, "KAN-2");
+    }
+}
