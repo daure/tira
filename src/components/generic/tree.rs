@@ -47,6 +47,7 @@ pub struct TreeState {
     selected_row: usize,
     selected_item_id: Option<String>,
     scroll: usize,
+    manual_scroll: bool,
     pending_goto_prefix: bool,
     scroll_animator: ScrollAnimator,
     searchable_field_ids: Option<Vec<String>>,
@@ -61,6 +62,7 @@ impl TreeState {
             selected_row: 0,
             selected_item_id,
             scroll: 0,
+            manual_scroll: false,
             pending_goto_prefix: false,
             scroll_animator: ScrollAnimator::new(),
             searchable_field_ids: None,
@@ -69,6 +71,20 @@ impl TreeState {
 
     pub fn items(&self) -> &[TreeItem] {
         &self.items
+    }
+
+    pub fn update_item_field(&mut self, item_id: &str, field_id: &str, value: Option<String>) {
+        let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) else {
+            return;
+        };
+        match value {
+            Some(value) => {
+                item.field_values.insert(field_id.to_owned(), value);
+            }
+            None => {
+                item.field_values.remove(field_id);
+            }
+        }
     }
 
     pub fn set_items(&mut self, items: Vec<TreeItem>) {
@@ -113,11 +129,27 @@ impl TreeState {
         self.selected_row = row.min(rows.len() - 1);
         self.sync_selected_item_id(&rows);
         self.scroll = self.selected_row.saturating_sub(HALF_PAGE_STEP as usize);
+        self.manual_scroll = false;
         self.scroll_animator.snap_to(self.scroll as f64);
     }
 
     pub fn scroll_offset(&self) -> usize {
         self.scroll
+    }
+
+    pub fn scroll_viewport(&mut self, delta: isize, filter: &str, height: usize) {
+        let row_count = self.rows(filter).len();
+        if row_count == 0 || height == 0 {
+            self.scroll = 0;
+            self.manual_scroll = false;
+            self.scroll_animator.snap_to(0.0);
+            return;
+        }
+        let viewport = height.min(row_count);
+        let max_scroll = row_count.saturating_sub(viewport);
+        self.scroll = self.scroll.saturating_add_signed(delta).min(max_scroll);
+        self.manual_scroll = true;
+        self.scroll_animator.snap_to(self.scroll as f64);
     }
 
     pub fn tick(&mut self, dt: std::time::Duration) {
@@ -142,18 +174,17 @@ impl TreeState {
         let max_scroll = row_count.saturating_sub(viewport);
         let selected = self.selected_row.min(row_count - 1);
         let mut offset = self.scroll.min(max_scroll);
-
-        if selected < offset {
-            offset = selected;
-        } else if selected >= offset + viewport {
-            offset = selected + 1 - viewport;
+        if !self.manual_scroll {
+            if selected < offset {
+                offset = selected;
+            } else if selected >= offset + viewport {
+                offset = selected + 1 - viewport;
+            }
         }
 
         self.scroll_animator.set_target(offset as f64);
-
         let animated_offset = self.scroll_animator.current().round() as usize;
         let animated_offset = animated_offset.min(max_scroll);
-
         let end = (animated_offset + viewport).min(row_count);
         animated_offset..end
     }
@@ -185,6 +216,7 @@ impl TreeState {
             self.selected_row = 0;
             self.selected_item_id = None;
             self.scroll = 0;
+            self.manual_scroll = false;
             self.scroll_animator.snap_to(0.0);
             return;
         }
@@ -198,6 +230,7 @@ impl TreeState {
             self.sync_selected_item_id(&rows);
         }
         self.scroll = self.scroll.min(rows.len() - 1);
+        self.manual_scroll = false;
         self.scroll_animator.snap_to(self.scroll as f64);
     }
 
@@ -218,6 +251,7 @@ impl TreeState {
             .min(max_index);
         self.sync_selected_item_id(&rows);
         self.scroll = self.selected_row.saturating_sub(HALF_PAGE_STEP as usize);
+        self.manual_scroll = false;
     }
 
     fn collapse_or_go_to_parent(&mut self, filter: &str) {

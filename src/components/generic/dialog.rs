@@ -38,10 +38,11 @@ impl<'a> Dialog<'a> {
 
     pub fn render(self, frame: &mut Frame<'_>, area: Rect) -> Rect {
         let dialog_area = self.area(area);
+        let title = Line::from(format!(" {} ", self.title));
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(self.border_style)
-            .title(Line::from(self.title));
+            .title(title);
         let inner = block.inner(dialog_area);
         let padded_inner = Rect {
             x: inner.x.saturating_add(1),

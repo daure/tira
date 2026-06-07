@@ -120,6 +120,24 @@ fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
                     let _ = tx.send(event);
                 });
             }
+            AppEffect::AssignIssue {
+                request_id,
+                issue_key,
+                assignee,
+                credentials,
+            } => {
+                let tx = event_tx.clone();
+                thread::spawn(move || {
+                    let account_id = assignee.as_ref().map(|user| user.account_id.as_str());
+                    let result = jira::assign_issue(&credentials, issue_key.as_str(), account_id);
+                    let _ = tx.send(AppEvent::IssueAssigned {
+                        request_id,
+                        issue_key,
+                        assignee,
+                        result,
+                    });
+                });
+            }
             AppEffect::SaveTheme(name) => {
                 let tx = event_tx.clone();
                 thread::spawn(move || {
@@ -133,14 +151,33 @@ fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
 }
 
 fn load_jira_project_data(credentials: &config::JiraCredentials) -> JiraProjectLoadResult {
-    let fields = jira::load_issue_fields(credentials);
-    let projects = jira::load_projects(credentials);
-    let issues = jira::load_project_issues(credentials);
+    let fields_credentials = credentials.clone();
+    let projects_credentials = credentials.clone();
+    let users_credentials = credentials.clone();
+    let issues_credentials = credentials.clone();
+
+    let fields_handle = thread::spawn(move || jira::load_issue_fields(&fields_credentials));
+    let projects_handle = thread::spawn(move || jira::load_projects(&projects_credentials));
+    let users_handle = thread::spawn(move || jira::load_assignable_users(&users_credentials));
+    let issues_handle = thread::spawn(move || jira::load_project_issues(&issues_credentials));
+
+    let fields = fields_handle.join().expect("jira fields thread panicked");
+    let projects = projects_handle
+        .join()
+        .expect("jira projects thread panicked");
+    let users = users_handle.join().expect("jira users thread panicked");
+    let issues = issues_handle.join().expect("jira issues thread panicked");
+
+    let mut logs = vec![fields.log.clone(), projects.log.clone()];
+    logs.extend(users.logs.clone());
+    logs.push(issues.log.clone());
 
     JiraProjectLoadResult {
-        logs: vec![fields.log.clone(), projects.log.clone(), issues.log.clone()],
+        logs,
         fields: fields.fields,
         projects: projects.projects,
+        users: users.users,
+        current_user: users.current_user,
         issues: issues.issues,
     }
 }

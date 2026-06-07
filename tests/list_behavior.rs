@@ -2,13 +2,22 @@ mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use tira::{App, KeyBindings};
+use tira::{App, JiraIssueColumn, KeyBindings};
 
 use support::{ctrl, issue, key, project, test_issues};
 
 fn left_click(column: u16, row: u16) -> MouseEvent {
     MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+fn scroll_down(column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind: MouseEventKind::ScrollDown,
         column,
         row,
         modifiers: KeyModifiers::NONE,
@@ -80,6 +89,18 @@ fn mouse_click_on_column_trigger_opens_column_dropdown() {
 }
 
 #[test]
+fn mouse_click_on_open_column_trigger_closes_column_dropdown() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(test_issues(3));
+
+    app.handle_mouse(left_click(90, 1), Rect::new(0, 0, 100, 20), &bindings);
+    assert!(app.is_column_dropdown_open());
+
+    app.handle_mouse(left_click(90, 1), Rect::new(0, 0, 100, 20), &bindings);
+    assert!(!app.is_column_dropdown_open());
+}
+
+#[test]
 fn mouse_click_on_tree_chevron_toggles_expansion() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(vec![
@@ -91,6 +112,76 @@ fn mouse_click_on_tree_chevron_toggles_expansion() {
     app.handle_mouse(left_click(1, 3), Rect::new(0, 0, 100, 20), &bindings);
 
     assert_eq!(app.visible_issue_rows().len(), 2);
+}
+
+#[test]
+fn mouse_wheel_scrolls_list_and_column_dropdown() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(test_issues(20));
+
+    app.handle_mouse(scroll_down(5, 3), Rect::new(0, 0, 100, 20), &bindings);
+    assert_eq!(app.selected_issue_index(), 0);
+    assert!(app.issue_scroll_offset() > 0);
+
+    app.handle_mouse(left_click(90, 1), Rect::new(0, 0, 100, 20), &bindings);
+    app.column_dropdown()
+        .expect("column dropdown")
+        .visible_range(4);
+    let before_selected = app
+        .column_dropdown()
+        .expect("column dropdown")
+        .selected_index();
+    let before_scroll = app
+        .column_dropdown()
+        .expect("column dropdown")
+        .scroll_offset();
+    app.handle_mouse(scroll_down(82, 4), Rect::new(0, 0, 100, 20), &bindings);
+    let dropdown = app.column_dropdown().expect("column dropdown");
+    assert_eq!(dropdown.selected_index(), before_selected);
+    assert!(dropdown.scroll_offset() >= before_scroll);
+}
+
+#[test]
+fn default_list_columns_use_fixed_order_and_column_selector_hides_fixed_columns() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(test_issues(5));
+
+    assert_eq!(
+        app.visible_issue_columns(),
+        &[
+            JiraIssueColumn::IssueKey,
+            JiraIssueColumn::Field {
+                id: String::from("priority"),
+                label: String::from("Priority"),
+            },
+            JiraIssueColumn::Summary,
+            JiraIssueColumn::Field {
+                id: String::from("assignee"),
+                label: String::from("Assignee"),
+            },
+            JiraIssueColumn::Status,
+            JiraIssueColumn::Field {
+                id: String::from("labels"),
+                label: String::from("Labels"),
+            },
+        ]
+    );
+
+    app.handle_key(key('c'), &bindings);
+    let labels = app
+        .column_dropdown()
+        .expect("column dropdown")
+        .options()
+        .iter()
+        .map(|option| option.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(!labels.contains(&"Work"));
+    assert!(!labels.contains(&"Priority"));
+    assert!(labels.contains(&"Assignee"));
+    assert!(!labels.contains(&"Summary"));
+    assert!(labels.contains(&"Status"));
+    assert!(labels.contains(&"Labels"));
 }
 
 #[test]
@@ -250,6 +341,24 @@ fn delete_key_deletes_character_after_cursor_in_filter() {
 }
 
 #[test]
+fn ctrl_enter_inside_filter_does_not_blur_filter() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![issue("KAN-1", "Catalog work", "Task", None)]);
+
+    // Focus and type
+    app.handle_key(key('/'), &bindings);
+    assert!(app.is_filter_focused());
+
+    // Press Ctrl+Enter
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
+    // Filter must remain focused!
+    assert!(app.is_filter_focused());
+}
+
+#[test]
 fn ctrl_slash_inside_filter_only_exits_focus() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(vec![
@@ -364,9 +473,12 @@ fn list_navigation_moves_selection_and_half_pages() {
 }
 
 #[test]
-fn ctrl_q_quits_app_always_but_q_does_not_when_typing() {
+fn only_ctrl_q_quits_app() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(Vec::new());
+
+    app.handle_key(key('q'), &bindings);
+    assert!(app.is_running());
 
     app.handle_key(key('/'), &bindings);
     assert!(app.is_filter_focused());
@@ -374,8 +486,17 @@ fn ctrl_q_quits_app_always_but_q_does_not_when_typing() {
     app.handle_key(key('q'), &bindings);
     assert!(app.is_filter_focused());
     assert_eq!(app.filter(), "q");
-    assert!(app.is_running());
 
     app.handle_key(ctrl('q'), &bindings);
     assert!(!app.is_running());
+
+    let configured_bindings = KeyBindings::from_toml_str(
+        r##"
+        [global]
+        quit = "q"
+        "##,
+    );
+    let mut configured_app = App::with_issues(Vec::new());
+    configured_app.handle_key(key('q'), &configured_bindings);
+    assert!(!configured_app.is_running());
 }

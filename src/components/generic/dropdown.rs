@@ -18,6 +18,7 @@ pub enum DropdownAction {
     MoveDown,
     HalfPageUp,
     HalfPageDown,
+    GoToStart,
     GoToEnd,
     GotoPrefix,
     ToggleSelected,
@@ -150,9 +151,26 @@ impl<T> MultiSelectDropdownState<T> {
         self.selected_index
     }
 
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll
+    }
+
     pub fn set_selected_index(&mut self, selected_index: usize) {
         self.selected_index = selected_index.min(self.options.len().saturating_sub(1));
         self.scroll_to_selection();
+    }
+
+    pub fn scroll_selection(&mut self, delta: isize) {
+        self.pending_goto_prefix = false;
+        self.move_selection(delta);
+    }
+
+    pub fn scroll_viewport(&mut self, delta: isize) {
+        let row_count = self.visible_row_count();
+        let viewport = self.last_viewport_height.get().min(row_count);
+        let max_scroll = row_count.saturating_sub(viewport);
+        self.scroll = self.scroll.saturating_add_signed(delta).min(max_scroll);
+        self.scroll_animator.snap_to(self.scroll as f64);
     }
 
     pub fn is_filter_focused(&self) -> bool {
@@ -289,32 +307,24 @@ impl<T> MultiSelectDropdownState<T> {
                 None
             }
             DropdownAction::HalfPageUp => {
-                if self.filter.is_focused() {
-                    return None;
-                }
                 self.pending_goto_prefix = false;
                 self.move_selection(-HALF_PAGE_STEP);
                 None
             }
             DropdownAction::HalfPageDown => {
-                if self.filter.is_focused() {
-                    return None;
-                }
                 self.pending_goto_prefix = false;
                 self.move_selection(HALF_PAGE_STEP);
                 None
             }
+            DropdownAction::GoToStart => {
+                self.go_to_start();
+                None
+            }
             DropdownAction::GoToEnd => {
-                if self.filter.is_focused() {
-                    return None;
-                }
                 self.go_to_end();
                 None
             }
             DropdownAction::GotoPrefix => {
-                if self.filter.is_focused() {
-                    return None;
-                }
                 self.handle_goto_prefix();
                 None
             }
@@ -378,6 +388,7 @@ impl<T> MultiSelectDropdownState<T> {
         } else {
             self.selected_index = 0;
             self.scroll = 0;
+            self.scroll_animator.snap_to(0.0);
         }
     }
 
@@ -390,6 +401,7 @@ impl<T> MultiSelectDropdownState<T> {
             self.selected_index = 0;
         }
         self.scroll = 0;
+        self.scroll_animator.snap_to(0.0);
     }
 
     fn handle_goto_prefix(&mut self) {
@@ -423,6 +435,7 @@ impl<T> MultiSelectDropdownState<T> {
         let row_count = rows.len() + usize::from(self.has_separator(&rows));
         if row_count == 0 {
             self.scroll = 0;
+            self.scroll_animator.snap_to(0.0);
             return;
         }
 
@@ -432,12 +445,18 @@ impl<T> MultiSelectDropdownState<T> {
             .iter()
             .position(|(index, _)| *index == self.selected_index)
             .unwrap_or(0);
-        let selected_position =
+        let selected_row =
             selected_position + usize::from(has_separator && selected_position >= selected_count);
         let viewport = self.last_viewport_height.get().max(1).min(row_count);
         let middle = viewport / 2;
         let max_scroll = row_count.saturating_sub(viewport);
-        self.scroll = selected_position.saturating_sub(middle).min(max_scroll);
+        self.scroll = if selected_row <= middle {
+            0
+        } else {
+            selected_row - middle
+        }
+        .min(max_scroll);
+        self.scroll_animator.snap_to(self.scroll as f64);
     }
 
     fn selected_option_position(&self) -> usize {
@@ -611,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn g_g_and_uppercase_g_jump_to_start_and_end() {
+    fn g_g_and_home_jump_to_start_and_end() {
         let mut dropdown = MultiSelectDropdownState::new(
             (0..4)
                 .map(|index| option(&format!("Field {index}"), false))
@@ -624,12 +643,12 @@ mod tests {
         dropdown.dispatch(DropdownAction::GotoPrefix);
         assert_eq!(dropdown.selected_index(), 3);
 
-        dropdown.dispatch(DropdownAction::GotoPrefix);
+        dropdown.dispatch(DropdownAction::GoToStart);
         assert_eq!(dropdown.selected_index(), 0);
     }
 
     #[test]
-    fn g_g_scrolls_toward_start_instead_of_snapping() {
+    fn g_g_and_uppercase_g_scroll_immediately() {
         let mut dropdown = MultiSelectDropdownState::new(
             (0..30)
                 .map(|index| option(&format!("Field {index}"), false))
@@ -638,16 +657,12 @@ mod tests {
 
         assert_eq!(dropdown.visible_range(5), 0..5);
         dropdown.dispatch(DropdownAction::GoToEnd);
-        assert_eq!(dropdown.visible_range(5), 0..5);
-        dropdown.tick(Duration::from_secs(2));
         assert_eq!(dropdown.visible_range(5), 25..30);
 
         dropdown.dispatch(DropdownAction::GotoPrefix);
+        assert_eq!(dropdown.selected_index(), 29);
         dropdown.dispatch(DropdownAction::GotoPrefix);
-
         assert_eq!(dropdown.selected_index(), 0);
-        assert_eq!(dropdown.visible_range(5), 25..30);
-        dropdown.tick(Duration::from_secs(2));
         assert_eq!(dropdown.visible_range(5), 0..5);
     }
 
@@ -772,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn single_step_navigation_keeps_scroll_until_selection_reaches_middle() {
+    fn single_step_navigation_snaps_scroll_when_selection_crosses_middle() {
         let mut dropdown = MultiSelectDropdownState::new(
             (0..20)
                 .map(|index| option(&format!("Field {index}"), false))
@@ -788,15 +803,12 @@ mod tests {
         assert_eq!(dropdown.visible_range(6), 0..6);
 
         dropdown.dispatch(DropdownAction::MoveDown);
-        assert_eq!(dropdown.visible_range(6), 0..6);
-        dropdown.tick(Duration::from_secs(2));
-
         assert_eq!(dropdown.selected_index(), 4);
         assert_eq!(dropdown.visible_range(6), 1..7);
     }
 
     #[test]
-    fn half_page_navigation_scrolls_selected_item_into_view() {
+    fn half_page_navigation_updates_scroll_immediately() {
         let mut dropdown = MultiSelectDropdownState::new(
             (0..20)
                 .map(|index| option(&format!("Field {index}"), false))
@@ -807,8 +819,6 @@ mod tests {
         dropdown.dispatch(DropdownAction::HalfPageDown);
 
         assert_eq!(dropdown.selected_index(), 10);
-        assert_eq!(dropdown.visible_range(5), 0..5);
-        dropdown.tick(Duration::from_secs(2));
         assert_eq!(dropdown.visible_range(5), 8..13);
     }
 }

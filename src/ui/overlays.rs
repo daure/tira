@@ -10,11 +10,11 @@ use crate::{
     App, KeyBindings,
     components::generic::dialog::Dialog,
     components::generic::notification::NotificationKind,
-    keymap::{HelpItem, HelpScope},
+    keymap::HelpScope,
     services::jira::CommandLogEntry,
 };
 
-use super::{chrome, layout};
+use super::{chrome, layout, scrollbar};
 
 pub fn render_command_log_dialog(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let entries = app.command_log_entries();
@@ -35,10 +35,21 @@ pub fn render_command_log_dialog(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
-    let items = keybindings.help_items(app.screen(), app.active_tab());
+    let items = keybindings.help_items(app.screen(), app.active_tab(), app.is_any_dropdown_open());
     let selected = app.help_selected().min(items.len().saturating_sub(1));
-    let width = area.width.min(96).max(48);
-    let height = area.height.min(18).max(10);
+    let binding_width = items
+        .iter()
+        .map(|item| item.binding.chars().count())
+        .max()
+        .unwrap_or(0);
+    let summary_width = items
+        .iter()
+        .map(|item| item.summary.chars().count())
+        .max()
+        .unwrap_or(0);
+    let content_width = binding_width + 2 + summary_width;
+    let width = area.width.min((content_width + 5) as u16).max(48);
+    let height = area.height.min(20).max(12);
     let inner = Dialog::new("Keyboard help", width, height)
         .border_style(Style::default().fg(app.theme().border_fg()))
         .y_offset(area.height.saturating_sub(height) / 2)
@@ -51,33 +62,134 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
             ratatui::layout::Constraint::Length(3),
         ])
         .areas(inner);
-    let [local_area, global_area] = ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Horizontal)
-        .constraints([
-            ratatui::layout::Constraint::Percentage(58),
-            ratatui::layout::Constraint::Percentage(42),
-        ])
-        .areas(list_area);
+    let list_content_area = list_area;
+    let scrollbar_area = Rect {
+        x: list_area.x + list_area.width + 1,
+        y: list_area.y,
+        width: 1,
+        height: list_area.height,
+    };
 
-    render_help_scope(
-        frame,
-        local_area,
-        app,
-        "Local",
-        &items,
-        selected,
-        HelpScope::Local,
-    );
-    render_help_scope(
-        frame,
-        global_area,
-        app,
-        "Global",
-        &items,
-        selected,
-        HelpScope::Global,
+    let local_count = items
+        .iter()
+        .filter(|item| item.scope == HelpScope::Local)
+        .count();
+    let global_count = items
+        .iter()
+        .filter(|item| item.scope == HelpScope::Global)
+        .count();
+    let total_lines = 1 + local_count + 1 + 1 + global_count;
+
+    let selected_line = if items[selected].scope == HelpScope::Local {
+        let index_in_local = items[..selected]
+            .iter()
+            .filter(|item| item.scope == HelpScope::Local)
+            .count();
+        1 + index_in_local
+    } else {
+        let index_in_global = items[..selected]
+            .iter()
+            .filter(|item| item.scope == HelpScope::Global)
+            .count();
+        1 + local_count + 2 + index_in_global
+    };
+
+    let viewport = list_content_area.height as usize;
+    let mut scroll = 0;
+    if total_lines > viewport {
+        let max_scroll = total_lines.saturating_sub(viewport);
+        let middle = viewport / 2;
+        scroll = if selected_line <= middle {
+            0
+        } else {
+            selected_line - middle
+        };
+        scroll = scroll.min(max_scroll);
+    }
+
+    // binding_width is already defined at the top
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![Span::styled(
+        "── Local ──",
+        Style::default()
+            .fg(app.theme().success_fg())
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    for (index, item) in items.iter().enumerate() {
+        if item.scope == HelpScope::Local {
+            let is_selected = index == selected;
+            let row_style = if is_selected {
+                Style::default().bg(app.theme().selected_bg())
+            } else {
+                Style::default()
+            };
+            let binding = format!("{:width$}", item.binding, width = binding_width);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    binding,
+                    row_style
+                        .fg(app.theme().accent_fg())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ", row_style),
+                Span::styled(
+                    item.summary.as_str(),
+                    row_style.fg(app.theme().status_text()),
+                ),
+            ]));
+        }
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(vec![Span::styled(
+        "── Global ──",
+        Style::default()
+            .fg(app.theme().success_fg())
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    for (index, item) in items.iter().enumerate() {
+        if item.scope == HelpScope::Global {
+            let is_selected = index == selected;
+            let row_style = if is_selected {
+                Style::default().bg(app.theme().selected_bg())
+            } else {
+                Style::default()
+            };
+            let binding = format!("{:width$}", item.binding, width = binding_width);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    binding,
+                    row_style
+                        .fg(app.theme().accent_fg())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ", row_style),
+                Span::styled(
+                    item.summary.as_str(),
+                    row_style.fg(app.theme().status_text()),
+                ),
+            ]));
+        }
+    }
+
+    let scroll_u16 = scroll as u16;
+    frame.render_widget(
+        Paragraph::new(lines).scroll((scroll_u16, 0)),
+        list_content_area,
     );
 
+    if total_lines > viewport {
+        scrollbar::render_range(
+            frame,
+            scrollbar_area,
+            total_lines,
+            scroll..scroll + viewport,
+            app.theme(),
+        );
+    }
     if let Some(item) = items.get(selected) {
         let lines = vec![
             Line::from(vec![
@@ -119,58 +231,6 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
         frame.render_widget(Paragraph::new(lines), desc_inner);
     }
 }
-
-fn render_help_scope(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &App,
-    title: &str,
-    items: &[HelpItem],
-    selected: usize,
-    scope: HelpScope,
-) {
-    let scoped = items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| item.scope == scope)
-        .collect::<Vec<_>>();
-    let binding_width = scoped
-        .iter()
-        .map(|(_, item)| item.binding.chars().count())
-        .max()
-        .unwrap_or(0);
-    let mut lines = vec![Line::from(vec![Span::styled(
-        format!("── {} ──", title),
-        Style::default()
-            .fg(app.theme().success_fg())
-            .add_modifier(Modifier::BOLD),
-    )])];
-    for (index, item) in scoped {
-        let is_selected = index == selected;
-        let row_style = if is_selected {
-            Style::default().bg(app.theme().selected_bg())
-        } else {
-            Style::default()
-        };
-        let binding = format!("{:width$}", item.binding, width = binding_width);
-        lines.push(Line::from(vec![
-            Span::styled(
-                binding,
-                row_style
-                    .fg(app.theme().accent_fg())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", row_style),
-            Span::styled(
-                item.summary.as_str(),
-                row_style.fg(app.theme().status_text()),
-            ),
-        ]));
-    }
-
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
 pub fn render_notifications(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let notification_width = area.width.min(54);
     if notification_width < 20 {

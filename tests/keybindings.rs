@@ -2,7 +2,9 @@ mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tira::{
-    Action, App, JiraFilteredTreeAction, KeyBindings, Screen, TabAction, ui::theme::ThemeName,
+    Action, App, AppEffect, AppEvent, JiraFilteredTreeAction, KeyBindings, Screen, TabAction,
+    services::jira::{CommandLogEntry, UserSummary},
+    ui::theme::ThemeName,
 };
 
 use support::{ctrl, key, shift};
@@ -127,6 +129,141 @@ fn leader_tab_keys_jump_to_named_tabs() {
 }
 
 #[test]
+fn assignee_shortcut_opens_selector_and_assignment_event_updates_issue() {
+    let bindings = KeyBindings::default();
+    let marlo = UserSummary {
+        account_id: String::from("account-1"),
+        display_name: String::from("Marlo Vlietstra"),
+    };
+    let mut app = App::with_issues_projects_and_users(
+        vec![support::issue("KAN-1", "Catalog work", "Task", None)],
+        Vec::new(),
+        vec![marlo.clone()],
+        "KAN",
+    );
+
+    app.handle_key(key('a'), &bindings);
+    assert!(app.is_assignee_dropdown_open());
+    assert!(app.is_assignee_dropdown_filter_focused());
+
+    app.handle_key(ctrl('j'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
+
+    let effects = app.take_effects();
+    assert_eq!(effects.len(), 1);
+    let AppEffect::AssignIssue {
+        issue_key,
+        assignee,
+        ..
+    } = &effects[0]
+    else {
+        panic!("expected assign issue effect");
+    };
+    assert_eq!(issue_key, "KAN-1");
+    assert_eq!(assignee.as_ref(), Some(&marlo));
+
+    app.handle_event(AppEvent::IssueAssigned {
+        request_id: 1,
+        issue_key: issue_key.clone(),
+        assignee: assignee.clone(),
+        result: Ok(CommandLogEntry {
+            timestamp: String::from("10:00:00"),
+            method: "PUT",
+            path: String::from("/issue/KAN-1/assignee"),
+            status: String::from("204"),
+            duration_ms: 12,
+        }),
+    });
+
+    assert_eq!(
+        app.issues()[0]
+            .field_values
+            .get("assignee")
+            .map(String::as_str),
+        Some("Marlo Vlietstra")
+    );
+}
+
+#[test]
+fn assignee_selector_can_unassign_existing_assignee() {
+    let bindings = KeyBindings::default();
+    let marlo = UserSummary {
+        account_id: String::from("account-1"),
+        display_name: String::from("Marlo Vlietstra"),
+    };
+    let mut issue = support::issue("KAN-1", "Catalog work", "Task", None);
+    issue
+        .field_values
+        .insert(String::from("assignee"), String::from("Marlo Vlietstra"));
+    let mut app = App::with_issues_projects_and_users(vec![issue], Vec::new(), vec![marlo], "KAN");
+
+    app.handle_key(key('a'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        &bindings,
+    );
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
+
+    let effects = app.take_effects();
+    let AppEffect::AssignIssue {
+        issue_key,
+        assignee,
+        ..
+    } = &effects[0]
+    else {
+        panic!("expected assign issue effect");
+    };
+    assert_eq!(issue_key, "KAN-1");
+    assert_eq!(assignee, &None);
+}
+
+#[test]
+fn assign_to_me_and_unassign_shortcuts_queue_assignment_effects() {
+    let bindings = KeyBindings::default();
+    let marlo = UserSummary {
+        account_id: String::from("account-1"),
+        display_name: String::from("Marlo Vlietstra"),
+    };
+    let mut app = App::with_issues_projects_and_users(
+        vec![support::issue("KAN-1", "Catalog work", "Task", None)],
+        Vec::new(),
+        vec![marlo.clone()],
+        "KAN",
+    );
+
+    app.handle_key(key('i'), &bindings);
+    let effects = app.take_effects();
+    let AppEffect::AssignIssue {
+        issue_key,
+        assignee,
+        ..
+    } = &effects[0]
+    else {
+        panic!("expected assign issue effect");
+    };
+    assert_eq!(issue_key, "KAN-1");
+    assert_eq!(assignee.as_ref(), Some(&marlo));
+
+    app.handle_key(key('u'), &bindings);
+    let effects = app.take_effects();
+    let AppEffect::AssignIssue {
+        issue_key,
+        assignee,
+        ..
+    } = &effects[0]
+    else {
+        panic!("expected unassign issue effect");
+    };
+    assert_eq!(issue_key, "KAN-1");
+    assert_eq!(assignee, &None);
+}
+#[test]
 fn old_global_project_theme_log_keys_are_unbound() {
     let bindings = KeyBindings::default();
 
@@ -154,24 +291,24 @@ fn help_items_use_configured_leader_bindings() {
         "##,
     );
 
-    let items = bindings.help_items(Screen::Main, "List");
+    let items = bindings.help_items(Screen::Main, "List", false);
 
-    assert!(items.iter().any(|item| item.binding == "Ctrl+G O"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+G M"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+G N"));
-    assert!(items.iter().any(|item| item.binding == "R"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+G B"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+G L"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+G T"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+G F"));
+    assert!(items.iter().any(|item| item.binding == "Ctrl+g o"));
+    assert!(items.iter().any(|item| item.binding == "Ctrl+g m"));
+    assert!(items.iter().any(|item| item.binding == "Ctrl+g n"));
+    assert!(items.iter().any(|item| item.binding == "r"));
+    assert!(items.iter().any(|item| item.binding == "Ctrl+g b"));
+    assert!(items.iter().any(|item| item.binding == "Ctrl+g l"));
+    assert!(items.iter().any(|item| item.binding == "Ctrl+g t"));
+    assert!(items.iter().any(|item| item.binding == "Ctrl+g f"));
 }
 
 #[test]
 fn reload_help_entry_is_list_local_only() {
     let bindings = KeyBindings::default();
 
-    let list_items = bindings.help_items(Screen::Main, "List");
-    let board_items = bindings.help_items(Screen::Main, "Board");
+    let list_items = bindings.help_items(Screen::Main, "List", false);
+    let board_items = bindings.help_items(Screen::Main, "Board", false);
 
     assert!(list_items.iter().any(|item| item.summary == "Reload list"));
     assert!(!board_items.iter().any(|item| item.summary == "Reload list"));
@@ -180,7 +317,7 @@ fn reload_help_entry_is_list_local_only() {
 #[test]
 fn copy_help_entry_shows_yy_and_respects_custom_binding() {
     let bindings = KeyBindings::default();
-    let list_items = bindings.help_items(Screen::Main, "List");
+    let list_items = bindings.help_items(Screen::Main, "List", false);
     let copy_item = list_items
         .iter()
         .find(|item| item.summary == "Copy issue URL")
@@ -193,7 +330,7 @@ fn copy_help_entry_shows_yy_and_respects_custom_binding() {
         yank_issue_url = "x"
         "##,
     );
-    let custom_list_items = custom_bindings.help_items(Screen::Main, "List");
+    let custom_list_items = custom_bindings.help_items(Screen::Main, "List", false);
     let custom_copy_item = custom_list_items
         .iter()
         .find(|item| item.summary == "Copy issue URL")
@@ -265,26 +402,54 @@ fn ctrl_j_and_ctrl_k_navigate_dropdown_options_while_filter_is_focused() {
 
     assert!(app.is_theme_dropdown_filter_focused());
 
-    let dropdown = app.theme_dropdown().expect("theme dropdown");
-    assert_eq!(dropdown.selected_index(), 0);
+    let initial = app
+        .theme_dropdown()
+        .expect("theme dropdown")
+        .selected_index();
 
-    // Ctrl+J should move selection down
     app.handle_key(
         KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
         &bindings,
     );
     assert!(app.is_theme_dropdown_filter_focused());
     let dropdown = app.theme_dropdown().expect("theme dropdown");
-    assert_eq!(dropdown.selected_index(), 1);
+    assert!(dropdown.selected_index() > initial);
 
-    // Ctrl+K should move selection up
     app.handle_key(
         KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
         &bindings,
     );
     assert!(app.is_theme_dropdown_filter_focused());
     let dropdown = app.theme_dropdown().expect("theme dropdown");
-    assert_eq!(dropdown.selected_index(), 0);
+    assert_eq!(dropdown.selected_index(), initial);
+}
+
+#[test]
+fn help_dialog_during_dropdown_does_not_close_dropdown_and_shows_dropdown_help() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(Vec::new());
+
+    // Open theme picker
+    app.handle_key(ctrl('x'), &bindings);
+    app.handle_key(key('s'), &bindings);
+    assert!(app.is_theme_dropdown_open());
+
+    // Press ? to open help
+    app.handle_key(key('?'), &bindings);
+    assert!(app.is_help_open());
+    // Dropdown MUST remain open!
+    assert!(app.is_theme_dropdown_open());
+
+    // The help items should contain dropdown-specific help
+    let items = bindings.help_items(app.screen(), app.active_tab(), app.is_any_dropdown_open());
+    assert!(items.iter().any(|item| item.summary == "Toggle selection"));
+    assert!(items.iter().any(|item| item.summary == "Do selection"));
+
+    // Close help
+    app.handle_key(key('?'), &bindings);
+    assert!(!app.is_help_open());
+    // Dropdown is still open
+    assert!(app.is_theme_dropdown_open());
 }
 
 #[test]
@@ -303,11 +468,9 @@ fn configured_theme_picker_switches_theme() {
     app.handle_key(ctrl('g'), &bindings);
     app.handle_key(shift('t'), &bindings);
     assert!(app.is_theme_dropdown_open());
-
-    app.handle_key(
-        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-        &bindings,
-    );
+    app.handle_key(key('c'), &bindings);
+    app.handle_key(key('a'), &bindings);
+    app.handle_key(key('t'), &bindings);
     app.handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
@@ -366,10 +529,9 @@ fn theme_picker_previews_focus_and_reverts_when_closed() {
 
     app.handle_key(ctrl('x'), &bindings);
     app.handle_key(key('s'), &bindings);
-    app.handle_key(
-        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-        &bindings,
-    );
+    app.handle_key(key('c'), &bindings);
+    app.handle_key(key('a'), &bindings);
+    app.handle_key(key('t'), &bindings);
     assert_eq!(app.theme().name(), ThemeName::Catppuccin);
 
     app.handle_key(

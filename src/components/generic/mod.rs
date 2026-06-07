@@ -1,9 +1,12 @@
+pub mod avatar;
 pub mod dialog;
 pub mod dropdown;
 pub mod filter;
 pub mod filtered_tree;
 pub mod input;
+pub mod label;
 pub mod notification;
+pub mod priority;
 pub mod scroll_animator;
 pub mod tabs;
 pub mod tree;

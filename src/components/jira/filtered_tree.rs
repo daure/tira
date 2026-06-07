@@ -20,15 +20,45 @@ pub enum JiraIssueColumn {
 
 impl JiraIssueColumn {
     pub fn default_columns() -> Vec<Self> {
-        vec![Self::IssueKey, Self::Summary, Self::IssueType, Self::Status]
+        let mut columns = Self::fixed_columns();
+        columns.push(Self::Field {
+            id: String::from("assignee"),
+            label: String::from("Assignee"),
+        });
+        columns.push(Self::Status);
+        columns.push(Self::labels_column());
+        columns
     }
 
+    pub fn fixed_columns() -> Vec<Self> {
+        vec![
+            Self::IssueKey,
+            Self::Field {
+                id: String::from("priority"),
+                label: String::from("Priority"),
+            },
+            Self::Summary,
+        ]
+    }
+
+    pub fn labels_column() -> Self {
+        Self::Field {
+            id: String::from("labels"),
+            label: String::from("Labels"),
+        }
+    }
+
+    pub fn is_fixed(&self) -> bool {
+        matches!(self, Self::IssueKey | Self::Summary)
+            || matches!(self, Self::Field { id, .. } if id == "priority")
+    }
     pub fn label(&self) -> &str {
         match self {
             Self::IssueKey => "Work",
             Self::Summary => "Summary",
             Self::IssueType => "Work type",
             Self::Status => "Status",
+            Self::Field { id, label } if id == "priority" => "",
             Self::Field { label, .. } => label,
         }
     }
@@ -63,12 +93,17 @@ pub struct JiraFilteredTreeState {
 impl JiraFilteredTreeState {
     pub fn new(items: Vec<TreeItem>) -> Self {
         let default_columns = JiraIssueColumn::default_columns();
+        let available_columns = default_columns
+            .iter()
+            .filter(|column| !column.is_fixed())
+            .cloned()
+            .collect::<Vec<_>>();
         let mut state = Self {
             filtered_tree: FilteredTreeState::new(items),
             jira_site: None,
             column_dropdown: None,
-            visible_columns: default_columns.clone(),
-            available_columns: default_columns,
+            visible_columns: default_columns,
+            available_columns,
             pending_yank: false,
         };
         state.sync_searchable_fields();
@@ -83,9 +118,17 @@ impl JiraFilteredTreeState {
         self.filtered_tree.set_items(items);
     }
 
+    pub fn update_assignee(&mut self, issue_key: &str, assignee_name: Option<String>) {
+        self.filtered_tree
+            .update_item_field(issue_key, "assignee", assignee_name);
+    }
+
     pub fn set_available_columns(&mut self, columns: Vec<JiraIssueColumn>) {
         if !columns.is_empty() {
-            self.available_columns = columns;
+            self.available_columns = columns
+                .into_iter()
+                .filter(|column| !column.is_fixed())
+                .collect();
         }
     }
 
@@ -132,6 +175,10 @@ impl JiraFilteredTreeState {
         self.filtered_tree.scroll_offset()
     }
 
+    pub fn scroll_viewport(&mut self, delta: isize, height: usize) {
+        self.filtered_tree.scroll_viewport(delta, height);
+    }
+
     pub fn filter(&self) -> &str {
         self.filtered_tree.filter()
     }
@@ -162,6 +209,12 @@ impl JiraFilteredTreeState {
 
     pub fn column_dropdown(&self) -> Option<&MultiSelectDropdownState<JiraIssueColumn>> {
         self.column_dropdown.as_ref()
+    }
+
+    pub fn column_dropdown_scroll_offset(&self) -> Option<usize> {
+        self.column_dropdown
+            .as_ref()
+            .map(MultiSelectDropdownState::scroll_offset)
     }
 
     pub fn is_column_dropdown_open(&self) -> bool {
@@ -195,6 +248,12 @@ impl JiraFilteredTreeState {
             self.sync_visible_columns();
         }
     }
+    pub fn scroll_column_dropdown(&mut self, delta: isize) {
+        if let Some(dropdown) = &mut self.column_dropdown {
+            dropdown.scroll_viewport(delta);
+        }
+    }
+
     pub fn dispatch(&mut self, action: JiraFilteredTreeAction) -> Option<JiraFilteredTreeEvent> {
         match action {
             JiraFilteredTreeAction::FilteredTree(action) => {
@@ -251,7 +310,6 @@ impl JiraFilteredTreeState {
             self.open_columns();
         }
     }
-
     fn open_columns(&mut self) {
         let options = self
             .available_columns
@@ -259,7 +317,7 @@ impl JiraFilteredTreeState {
             .cloned()
             .map(|column| DropdownOption {
                 selected: self.visible_columns.contains(&column),
-                label: column.label().to_owned(),
+                label: Self::selector_label(&column),
                 value: column,
             })
             .collect();
@@ -279,12 +337,18 @@ impl JiraFilteredTreeState {
             .iter()
             .filter_map(|option| option.selected.then_some(option.value.clone()))
             .collect::<Vec<_>>();
-        if !selected.is_empty() {
-            self.visible_columns = selected;
-            self.sync_searchable_fields();
-        }
+        self.visible_columns = JiraIssueColumn::fixed_columns();
+        self.visible_columns.extend(selected);
+        self.sync_searchable_fields();
     }
 
+    fn selector_label(column: &JiraIssueColumn) -> String {
+        match column {
+            JiraIssueColumn::Field { id, .. } if id == "priority" => String::from("Priority"),
+            JiraIssueColumn::Field { id, .. } if id == "assignee" => String::from("Assignee"),
+            _ => column.label().to_owned(),
+        }
+    }
     fn sync_searchable_fields(&mut self) {
         let field_ids = self
             .visible_columns
@@ -374,16 +438,6 @@ mod tests {
             },
         ]);
 
-        tree.dispatch(JiraFilteredTreeAction::OpenColumns);
-        tree.dispatch(JiraFilteredTreeAction::Dropdown(DropdownAction::Filter(
-            crate::FilterAction::Exit,
-        )));
-        for _ in 0..4 {
-            tree.dispatch(JiraFilteredTreeAction::Dropdown(DropdownAction::MoveDown));
-        }
-        tree.dispatch(JiraFilteredTreeAction::Dropdown(
-            DropdownAction::ToggleSelected,
-        ));
         for ch in "marlo vlietstra".chars() {
             tree.dispatch_filter(crate::FilterAction::Text(ch));
         }

@@ -5,17 +5,17 @@ use crate::{App, KeyBindings};
 use super::selector;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
-    let Some(dropdown) = app.quick_switcher() else {
+    let Some(dropdown) = app.assignee_dropdown() else {
         return;
     };
     selector::render_single_select(
         frame,
         area,
-        "Quick switcher",
+        "Assignee",
         dropdown,
         app.theme(),
         keybindings,
-        34,
+        32,
         10,
         !app.is_help_open() && !app.is_command_log_open(),
     );

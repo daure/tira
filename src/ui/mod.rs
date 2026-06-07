@@ -1,9 +1,11 @@
+mod assignee_selector;
 pub mod chrome;
 pub mod layout;
 mod overlays;
 mod project_switcher;
 mod quick_switcher;
 pub(crate) mod scrollbar;
+pub(crate) mod selector;
 mod setup;
 pub(crate) mod style;
 pub mod theme;
@@ -34,6 +36,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
         Screen::Main => render_main(frame, inner, app, keybindings),
     }
 
+    frame.render_widget(
+        chrome::status_bar(app, keybindings, status_area.width),
+        status_area,
+    );
+    quick_switcher::render(frame, inner, app, keybindings);
+    theme_picker::render(frame, inner, app, keybindings);
+    project_switcher::render(frame, inner, app, keybindings);
+    assignee_selector::render(frame, inner, app, keybindings);
+
     if app.is_command_log_open() {
         overlays::render_command_log_dialog(frame, inner, app);
     }
@@ -42,14 +53,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
     }
 
     overlays::render_notifications(frame, inner, app);
-
-    frame.render_widget(
-        chrome::status_bar(app, keybindings, status_area.width),
-        status_area,
-    );
-    quick_switcher::render(frame, inner, app);
-    theme_picker::render(frame, inner, app);
-    project_switcher::render(frame, inner, app);
 }
 fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
     match app.active_tab() {

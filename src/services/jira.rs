@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::JiraCredentials;
 
@@ -26,6 +26,18 @@ pub struct FieldSummary {
 pub struct ProjectSummary {
     pub key: String,
     pub name: String,
+}
+
+impl crate::ui::selector::HasShortcut for ProjectSummary {
+    fn shortcut(&self, _keybindings: &crate::KeyBindings) -> Option<String> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSummary {
+    pub account_id: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +68,13 @@ pub struct JiraFieldsResult {
 pub struct JiraProjectsResult {
     pub projects: Result<Vec<ProjectSummary>, JiraError>,
     pub log: CommandLogEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JiraUsersResult {
+    pub users: Result<Vec<UserSummary>, JiraError>,
+    pub current_user: Result<UserSummary, JiraError>,
+    pub logs: Vec<CommandLogEntry>,
 }
 
 pub fn load_project_issues(credentials: &JiraCredentials) -> JiraLoadResult {
@@ -274,7 +293,177 @@ pub fn load_projects(credentials: &JiraCredentials) -> JiraProjectsResult {
         },
     }
 }
+pub fn load_assignable_users(credentials: &JiraCredentials) -> JiraUsersResult {
+    let assignable = load_users_endpoint(
+        credentials,
+        "GET",
+        "/user/assignable/search",
+        Some([("project", credentials.default_project.trim())].as_slice()),
+    );
+    let current = load_users_endpoint(credentials, "GET", "/myself", None);
 
+    JiraUsersResult {
+        users: assignable.users,
+        current_user: current.current_user,
+        logs: vec![assignable.log, current.log],
+    }
+}
+
+struct AssignableLoad {
+    users: Result<Vec<UserSummary>, JiraError>,
+    current_user: Result<UserSummary, JiraError>,
+    log: CommandLogEntry,
+}
+
+fn load_users_endpoint(
+    credentials: &JiraCredentials,
+    method: &'static str,
+    path: &str,
+    query: Option<&[(&str, &str)]>,
+) -> AssignableLoad {
+    let site = credentials.site.trim().trim_end_matches('/');
+    let timestamp = current_time_string();
+    let url = match query {
+        Some(query) => Url::parse_with_params(&format!("{site}/rest/api/3{path}"), query),
+        None => Url::parse(&format!("{site}/rest/api/3{path}")),
+    };
+    let url = match url {
+        Ok(url) => url,
+        Err(error) => {
+            let error = JiraError(format!("Invalid Jira site URL: {error}"));
+            return AssignableLoad {
+                users: Err(error.clone()),
+                current_user: Err(error),
+                log: failed_log(timestamp, method, path),
+            };
+        }
+    };
+    let started_at = Instant::now();
+    let response = reqwest::blocking::Client::new()
+        .get(url.clone())
+        .basic_auth(credentials.email.trim(), Some(credentials.api_key.trim()))
+        .send();
+    let duration_ms = started_at.elapsed().as_millis();
+    let log_path = log_path(&url);
+
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let log = CommandLogEntry {
+                timestamp,
+                method,
+                path: log_path,
+                status: status.as_u16().to_string(),
+                duration_ms,
+            };
+            if !status.is_success() {
+                let error = JiraError(format!("Jira returned HTTP {status}"));
+                return AssignableLoad {
+                    users: Err(error.clone()),
+                    current_user: Err(error),
+                    log,
+                };
+            }
+
+            if path == "/myself" {
+                let current_user = response
+                    .json::<AssignableUser>()
+                    .map_err(|error| {
+                        JiraError(format!("Jira current user could not be read: {error}"))
+                    })
+                    .map(UserSummary::from);
+                AssignableLoad {
+                    users: Ok(Vec::new()),
+                    current_user,
+                    log,
+                }
+            } else {
+                let users = response
+                    .json::<Vec<AssignableUser>>()
+                    .map_err(|error| JiraError(format!("Jira users could not be read: {error}")))
+                    .map(|payload| payload.into_iter().map(UserSummary::from).collect());
+                AssignableLoad {
+                    users,
+                    current_user: Err(JiraError(String::from("Current Jira user not loaded"))),
+                    log,
+                }
+            }
+        }
+        Err(error) => {
+            let error = JiraError(format!("Jira users request failed: {error}"));
+            AssignableLoad {
+                users: Err(error.clone()),
+                current_user: Err(error),
+                log: CommandLogEntry {
+                    timestamp,
+                    method,
+                    path: log_path,
+                    status: String::from("ERR"),
+                    duration_ms,
+                },
+            }
+        }
+    }
+}
+
+pub fn assign_issue(
+    credentials: &JiraCredentials,
+    issue_key: &str,
+    account_id: Option<&str>,
+) -> Result<CommandLogEntry, (JiraError, CommandLogEntry)> {
+    let site = credentials.site.trim().trim_end_matches('/');
+    let method = "PUT";
+    let path = format!("/issue/{issue_key}/assignee");
+    let timestamp = current_time_string();
+    let url = match Url::parse(&format!("{site}/rest/api/3{path}")) {
+        Ok(url) => url,
+        Err(error) => {
+            return Err((
+                JiraError(format!("Invalid Jira site URL: {error}")),
+                failed_log(timestamp, method, path.as_str()),
+            ));
+        }
+    };
+    let started_at = Instant::now();
+
+    let response = reqwest::blocking::Client::new()
+        .put(url.clone())
+        .basic_auth(credentials.email.trim(), Some(credentials.api_key.trim()))
+        .json(&AssignIssuePayload { account_id })
+        .send();
+
+    let duration_ms = started_at.elapsed().as_millis();
+    let log_path = log_path(&url);
+
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let log = CommandLogEntry {
+                timestamp,
+                method,
+                path: log_path,
+                status: status.as_u16().to_string(),
+                duration_ms,
+            };
+
+            if status.is_success() {
+                Ok(log)
+            } else {
+                Err((JiraError(format!("Jira returned HTTP {status}")), log))
+            }
+        }
+        Err(error) => Err((
+            JiraError(format!("Jira assignment request failed: {error}")),
+            CommandLogEntry {
+                timestamp,
+                method,
+                path: log_path,
+                status: String::from("ERR"),
+                duration_ms,
+            },
+        )),
+    }
+}
 fn failed_log(timestamp: String, method: &'static str, path: &str) -> CommandLogEntry {
     CommandLogEntry {
         timestamp,
@@ -310,6 +499,27 @@ fn current_time_string() -> String {
     format!("{hours:02}:{minutes:02}:{secs:02}")
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssignableUser {
+    account_id: String,
+    display_name: String,
+}
+
+impl From<AssignableUser> for UserSummary {
+    fn from(user: AssignableUser) -> Self {
+        Self {
+            account_id: user.account_id,
+            display_name: user.display_name,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssignIssuePayload<'a> {
+    account_id: Option<&'a str>,
+}
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
     issues: Vec<SearchIssue>,

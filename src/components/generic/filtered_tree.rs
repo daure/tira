@@ -41,6 +41,11 @@ impl FilteredTreeState {
         self.tree.items()
     }
 
+    pub fn update_item_field(&mut self, item_id: &str, field_id: &str, value: Option<String>) {
+        self.tree.update_item_field(item_id, field_id, value);
+        self.tree.clamp_selection(self.filter.value());
+    }
+
     pub fn set_items(&mut self, items: Vec<TreeItem>) {
         self.tree.set_items(items);
         self.tree.clamp_selection(self.filter.value());
@@ -81,6 +86,11 @@ impl FilteredTreeState {
 
     pub fn scroll_offset(&self) -> usize {
         self.tree.scroll_offset()
+    }
+
+    pub fn scroll_viewport(&mut self, delta: isize, height: usize) {
+        self.tree
+            .scroll_viewport(delta, self.filter.value(), height);
     }
 
     pub fn filter(&self) -> &str {

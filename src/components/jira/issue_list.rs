@@ -9,7 +9,8 @@ use ratatui::{
 use crate::{
     App, JiraIssueColumn, KeyBindings, TreeRow,
     components::generic::{
-        dropdown::DropdownVisibleOption, filter, filtered_tree::FilteredTreeViewMode,
+        avatar, dropdown::DropdownVisibleOption, filter, filtered_tree::FilteredTreeViewMode,
+        label, priority,
     },
     ui::{layout, scrollbar, style, theme::prefers_plain_icons},
 };
@@ -123,12 +124,13 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 JiraIssueColumn::IssueType => type_width,
                 JiraIssueColumn::Status => status_width,
                 JiraIssueColumn::Field { id, label } => {
-                    layout::max_column_width(&rows, label.as_str(), |row| {
+                    let header_label = if id == "priority" { "" } else { label.as_str() };
+                    layout::max_column_width(&rows, header_label, |row| {
                         prefix
                             + app.issues()[row.item_index]
                                 .field_values
                                 .get(id)
-                                .map_or(0, |value| value.chars().count())
+                                .map_or(0, |value| field_display_width(id, value))
                     })
                 }
                 JiraIssueColumn::Summary => 0,
@@ -183,16 +185,10 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
                             app.filter(),
                             row_style,
                         ),
-                        JiraIssueColumn::Field { id, .. } => {
-                            item.field_values.get(id).map_or_else(Vec::new, |value| {
-                                style::highlighted_spans(
-                                    app.theme(),
-                                    value,
-                                    app.filter(),
-                                    row_style,
-                                )
-                            })
-                        }
+                        JiraIssueColumn::Field { id, .. } => item
+                            .field_values
+                            .get(id)
+                            .map_or_else(Vec::new, |value| field_spans(app, id, value, row_style)),
                     };
                     Cell::from(Line::from(with_tree_prefix(
                         app.theme(),
@@ -211,6 +207,7 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
             JiraIssueColumn::Summary => "Summary",
             JiraIssueColumn::IssueType => "Work type",
             JiraIssueColumn::Status => "Status",
+            JiraIssueColumn::Field { id, label } if id == "priority" => "",
             JiraIssueColumn::Field { label, .. } => label.as_str(),
         };
         if index == 0 && has_expandable {
@@ -437,6 +434,24 @@ fn column_trigger(
         Span::raw(" columns"),
     ]))
     .alignment(Alignment::Right)
+}
+
+fn field_spans(app: &App, field_id: &str, value: &str, base_style: Style) -> Vec<Span<'static>> {
+    match field_id {
+        "priority" => priority::spans(app.theme(), value, app.filter(), base_style, true),
+        "assignee" | "reporter" => avatar::bubble_only_spans(app.theme(), value),
+        "labels" => label::spans(app.theme(), value, app.filter(), base_style),
+        _ => style::highlighted_spans_owned(app.theme(), value, app.filter(), base_style),
+    }
+}
+
+fn field_display_width(field_id: &str, value: &str) -> usize {
+    match field_id {
+        "priority" => priority::display_width(value, true),
+        "assignee" | "reporter" => avatar::bubble_width(value),
+        "labels" => label::display_width(value),
+        _ => value.chars().count(),
+    }
 }
 
 fn with_tree_prefix<'a>(

@@ -39,13 +39,20 @@ fn column_picker_yank_and_expansion_keys_apply_to_issue_list() {
         &bindings,
     );
     app.handle_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        &bindings,
+    );
+    app.handle_key(
         KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
         &bindings,
     );
     assert!(app.is_column_dropdown_open());
     assert!(
         !app.visible_issue_columns()
-            .contains(&tira::JiraIssueColumn::Summary)
+            .contains(&tira::JiraIssueColumn::Field {
+                id: String::from("labels"),
+                label: String::from("Labels"),
+            })
     );
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);

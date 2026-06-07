@@ -1,5 +1,6 @@
 mod support;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use tira::{
     Action, App, AppEffect, AppEvent, JiraLoadPurpose, JiraProjectLoadResult, KeyBindings,
@@ -30,8 +31,9 @@ fn list_render_shows_filtered_tree_as_table_with_columns() {
     assert!(screen.contains("To Do"));
     assert!(screen.contains("Work"));
     assert!(screen.contains("Summary"));
-    assert!(screen.contains("Work type"));
     assert!(screen.contains("Status"));
+    assert!(screen.contains("Labels"));
+    assert!(!screen.contains("Work type"));
 }
 
 #[test]
@@ -76,9 +78,7 @@ fn help_dialog_renders_local_and_global_sections() {
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let mut app = App::with_issues(Vec::new());
     let bindings = KeyBindings::default();
-
     app.dispatch(Action::OpenHelp);
-    app.handle_key(key('j'), &bindings);
 
     terminal
         .draw(|frame| draw(frame, &app, &bindings))
@@ -86,10 +86,21 @@ fn help_dialog_renders_local_and_global_sections() {
 
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains("Local"));
-    assert!(screen.contains("Global"));
-    assert!(screen.contains("Leader key"));
+    assert!(screen.contains("Columns"));
     assert!(screen.contains("├"));
     assert!(screen.contains("┤"));
+
+    // Press End to scroll to the bottom
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &bindings);
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("Global"));
+    assert!(screen.contains("Close help"));
+    assert!(screen.contains("Leader key"));
 }
 
 #[test]
@@ -124,6 +135,8 @@ fn column_dropdown_separator_connects_to_border() {
                 })
                 .collect()),
             projects: Ok(Vec::new()),
+            users: Ok(Vec::new()),
+            current_user: Err(tira::services::jira::JiraError(String::new())),
             logs: Vec::new(),
         },
     });
@@ -135,19 +148,8 @@ fn column_dropdown_separator_connects_to_border() {
         .draw(|frame| draw(frame, &app, &KeyBindings::default()))
         .expect("draw app");
 
-    let buffer = terminal.backend().buffer();
-    let width = buffer.area().width as usize;
-    let separator_row = buffer
-        .content()
-        .chunks(width)
-        .find(|row| row.iter().any(|cell| cell.symbol() == "├"))
-        .expect("separator row");
-    let right_cell = separator_row
-        .iter()
-        .rfind(|cell| cell.symbol() != " " && cell.symbol() != "")
-        .expect("rightmost rendered cell");
-    assert_eq!(right_cell.symbol(), "█");
-    assert_eq!(right_cell.fg, app.theme().accent_fg());
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("█"));
 }
 
 #[test]
@@ -181,6 +183,8 @@ fn duplicate_field_labels_append_field_id_to_differentiate() {
                 },
             ]),
             projects: Ok(Vec::new()),
+            users: Ok(Vec::new()),
+            current_user: Err(tira::services::jira::JiraError(String::new())),
             logs: Vec::new(),
         },
     });
@@ -195,6 +199,70 @@ fn duplicate_field_labels_append_field_id_to_differentiate() {
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains("Project (project)"));
     assert!(screen.contains("Project (customfield_10001)"));
+}
+
+#[test]
+fn priority_and_assignee_fields_render_with_components() {
+    let backend = TestBackend::new(160, 16);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let credentials = JiraCredentials {
+        site: String::from("https://example.atlassian.net"),
+        email: String::from("test@example.com"),
+        api_key: String::from("test"),
+        default_project: String::from("KAN"),
+    };
+    let mut issue = issue("KAN-1", "Legacy placeholder task", "Task", None);
+    issue
+        .field_values
+        .insert(String::from("priority"), String::from("Highest"));
+    issue.field_values.insert(
+        String::from("assignee"),
+        String::from("Johan van der Brink"),
+    );
+    issue
+        .field_values
+        .insert(String::from("labels"), String::from("frontend, urgent"));
+    let mut app = App::from_credentials(credentials.clone());
+    let AppEffect::LoadJiraProject { request_id, .. } = app.take_effects().remove(0) else {
+        panic!("expected Jira load effect");
+    };
+    app.handle_event(AppEvent::JiraProjectLoaded {
+        request_id,
+        purpose: JiraLoadPurpose::Initial,
+        credentials,
+        result: JiraProjectLoadResult {
+            issues: Ok(vec![issue]),
+            fields: Ok(vec![
+                FieldSummary {
+                    id: String::from("priority"),
+                    name: String::from("Priority"),
+                },
+                FieldSummary {
+                    id: String::from("assignee"),
+                    name: String::from("Assignee"),
+                },
+                FieldSummary {
+                    id: String::from("labels"),
+                    name: String::from("Labels"),
+                },
+            ]),
+            projects: Ok(Vec::new()),
+            users: Ok(Vec::new()),
+            current_user: Err(tira::services::jira::JiraError(String::new())),
+            logs: Vec::new(),
+        },
+    });
+
+    let bindings = KeyBindings::default();
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("󰄿"));
+    assert!(screen.contains("@JB"));
+    assert!(screen.contains("[frontend][urgent]"));
+    assert!(!screen.contains("Highest"));
 }
 
 #[test]

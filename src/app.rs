@@ -16,7 +16,9 @@ use crate::{
     },
     config::JiraCredentials,
     keymap::KeyBindings,
-    services::jira::{CommandLogEntry, FieldSummary, IssueSummary, JiraError, ProjectSummary},
+    services::jira::{
+        CommandLogEntry, FieldSummary, IssueSummary, JiraError, ProjectSummary, UserSummary,
+    },
     ui::theme::{Theme, ThemeChoice, ThemeName},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -40,6 +42,10 @@ pub enum Action {
     QuickSwitcher(crate::components::generic::dropdown::DropdownAction),
     ToggleThemeDropdown,
     ThemeDropdown(crate::components::generic::dropdown::DropdownAction),
+    ToggleAssigneeDropdown,
+    AssigneeDropdown(crate::components::generic::dropdown::DropdownAction),
+    AssignSelectedToMe,
+    UnassignSelected,
     GoToBoard,
     GoToList,
     GoToTimeline,
@@ -59,6 +65,12 @@ pub enum AppEffect {
     },
     CopyToClipboard(String),
     SaveTheme(ThemeName),
+    AssignIssue {
+        request_id: u64,
+        issue_key: String,
+        assignee: Option<UserSummary>,
+        credentials: JiraCredentials,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +92,12 @@ pub enum AppEvent {
         url: String,
         error: String,
     },
+    IssueAssigned {
+        request_id: u64,
+        issue_key: String,
+        assignee: Option<UserSummary>,
+        result: Result<CommandLogEntry, (JiraError, CommandLogEntry)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +113,8 @@ pub struct JiraProjectLoadResult {
     pub issues: Result<Vec<IssueSummary>, JiraError>,
     pub fields: Result<Vec<FieldSummary>, JiraError>,
     pub projects: Result<Vec<ProjectSummary>, JiraError>,
+    pub users: Result<Vec<UserSummary>, JiraError>,
+    pub current_user: Result<UserSummary, JiraError>,
     pub logs: Vec<CommandLogEntry>,
 }
 
@@ -110,6 +130,7 @@ enum DropdownKind {
     QuickSwitcher,
     ProjectSwitcher,
     ThemePicker,
+    AssigneePicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +143,18 @@ pub enum QuickAction {
     List,
     Timeline,
     Filters,
+}
+
+impl crate::ui::selector::HasShortcut for QuickAction {
+    fn shortcut(&self, keybindings: &crate::KeyBindings) -> Option<String> {
+        Some(keybindings.quick_action_shortcut_label(*self))
+    }
+}
+
+impl crate::ui::selector::HasShortcut for Option<UserSummary> {
+    fn shortcut(&self, _keybindings: &crate::KeyBindings) -> Option<String> {
+        None
+    }
 }
 
 impl QuickAction {
@@ -317,6 +350,9 @@ pub struct App {
     help_open: bool,
     help_selected: usize,
     projects: Vec<ProjectSummary>,
+    users: Vec<UserSummary>,
+    current_user: Option<UserSummary>,
+    assignee_dropdown: Option<MultiSelectDropdownState<Option<UserSummary>>>,
     project_dropdown: Option<MultiSelectDropdownState<ProjectSummary>>,
     theme_dropdown: Option<MultiSelectDropdownState<ThemeChoice>>,
     quick_switcher: Option<MultiSelectDropdownState<QuickAction>>,
@@ -326,6 +362,7 @@ pub struct App {
     theme: Theme,
     active_load_request_id: Option<u64>,
     next_request_id: u64,
+    pending_assignment_requests: std::collections::BTreeMap<String, u64>,
 }
 
 impl Default for App {
@@ -351,6 +388,9 @@ impl App {
             status: status.into(),
             notifications: Vec::new(),
             projects: Vec::new(),
+            users: Vec::new(),
+            current_user: None,
+            assignee_dropdown: None,
             project_dropdown: None,
             theme_dropdown: None,
             quick_switcher: None,
@@ -359,9 +399,10 @@ impl App {
             help_open: false,
             help_selected: 0,
             pending_effects: Vec::new(),
-            active_load_request_id: None,
             theme: Theme::default(),
+            active_load_request_id: None,
             next_request_id: 1,
+            pending_assignment_requests: std::collections::BTreeMap::new(),
         }
     }
 
@@ -381,6 +422,9 @@ impl App {
             status: String::from("Jira issues loaded"),
             notifications: Vec::new(),
             projects: Vec::new(),
+            users: Vec::new(),
+            current_user: None,
+            assignee_dropdown: None,
             project_dropdown: None,
             help_open: false,
             theme_dropdown: None,
@@ -389,9 +433,10 @@ impl App {
             leader_pending: false,
             help_selected: 0,
             pending_effects: Vec::new(),
-            active_load_request_id: None,
             theme: Theme::default(),
+            active_load_request_id: None,
             next_request_id: 1,
+            pending_assignment_requests: std::collections::BTreeMap::new(),
         }
     }
 
@@ -409,6 +454,18 @@ impl App {
             default_project: current_project,
         });
         app.projects = projects;
+        app
+    }
+
+    pub fn with_issues_projects_and_users(
+        issues: Vec<IssueSummary>,
+        projects: Vec<ProjectSummary>,
+        users: Vec<UserSummary>,
+        current_project: impl Into<String>,
+    ) -> Self {
+        let mut app = Self::with_issues_and_projects(issues, projects, current_project);
+        app.current_user = users.first().cloned();
+        app.users = users;
         app
     }
 
@@ -455,6 +512,9 @@ impl App {
         if let Some(dropdown) = &mut self.quick_switcher {
             dropdown.tick(dt);
         }
+        if let Some(dropdown) = &mut self.assignee_dropdown {
+            dropdown.tick(dt);
+        }
         for notification in &mut self.notifications {
             notification.tick(dt);
         }
@@ -474,6 +534,10 @@ impl App {
                 .is_some_and(MultiSelectDropdownState::is_animating)
             || self
                 .quick_switcher
+                .as_ref()
+                .is_some_and(MultiSelectDropdownState::is_animating)
+            || self
+                .assignee_dropdown
                 .as_ref()
                 .is_some_and(MultiSelectDropdownState::is_animating)
             || self.notifications.iter().any(Notification::is_animating)
@@ -524,6 +588,50 @@ impl App {
                     format!("Could not copy {url}: {error}"),
                 ))
             }
+            AppEvent::IssueAssigned {
+                request_id,
+                issue_key,
+                assignee,
+                result,
+            } => self.apply_issue_assignment(request_id, issue_key, assignee, result),
+        }
+    }
+
+    fn apply_issue_assignment(
+        &mut self,
+        request_id: u64,
+        issue_key: String,
+        assignee: Option<UserSummary>,
+        result: Result<CommandLogEntry, (JiraError, CommandLogEntry)>,
+    ) {
+        if self.pending_assignment_requests.get(issue_key.as_str()) != Some(&request_id) {
+            match result {
+                Ok(log) => self.command_log.push(log),
+                Err((_error, log)) => self.command_log.push(log),
+            }
+            return;
+        }
+
+        self.pending_assignment_requests.remove(issue_key.as_str());
+        match result {
+            Ok(log) => {
+                self.command_log.push(log);
+                let assignee_name = assignee.as_ref().map(|user| user.display_name.clone());
+                self.filtered_tree
+                    .update_assignee(issue_key.as_str(), assignee_name.clone());
+                self.status = match assignee_name {
+                    Some(name) => format!("{issue_key} assigned to {name}."),
+                    None => format!("{issue_key} unassigned."),
+                };
+            }
+            Err((error, log)) => {
+                self.command_log.push(log);
+                self.status = format!("Could not update {issue_key}: {}", error.0);
+                self.notifications.push(Notification::error(
+                    "Assignee not updated",
+                    format!("Could not update {issue_key}: {}", error.0),
+                ));
+            }
         }
     }
 
@@ -553,6 +661,7 @@ impl App {
             return;
         }
         self.active_load_request_id = None;
+
         self.command_log.extend(result.logs);
 
         if let Ok(fields) = result.fields {
@@ -573,8 +682,30 @@ impl App {
             ));
         }
 
+        let users = result.users;
+        let current_user = result.current_user;
         match result.issues {
             Ok(issues) => {
+                if let Ok(users) = users {
+                    self.users = users;
+                } else {
+                    self.users.clear();
+                    self.notifications.push(Notification::error(
+                        "Jira users not loaded",
+                        "Assignee selector is unavailable until reload succeeds.",
+                    ));
+                }
+
+                if let Ok(current_user) = current_user {
+                    self.current_user = Some(current_user);
+                } else {
+                    self.current_user = None;
+                    self.notifications.push(Notification::error(
+                        "Current Jira user not loaded",
+                        "Assign-to-me shortcut is unavailable until reload succeeds.",
+                    ));
+                }
+
                 self.credentials = Some(credentials);
                 if let Some(credentials) = &self.credentials {
                     self.filtered_tree.set_jira_site(credentials.site.clone());
@@ -600,18 +731,26 @@ impl App {
     }
 
     fn apply_available_columns(&mut self, fields: Vec<FieldSummary>) {
-        let mut columns = JiraIssueColumn::default_columns();
+        let mut columns = vec![
+            JiraIssueColumn::Field {
+                id: String::from("assignee"),
+                label: String::from("Assignee"),
+            },
+            JiraIssueColumn::Status,
+            JiraIssueColumn::labels_column(),
+            JiraIssueColumn::IssueType,
+        ];
         let mut name_counts = std::collections::HashMap::new();
-        name_counts.insert(String::from("Key"), 1);
-        name_counts.insert(String::from("Summary"), 1);
-        name_counts.insert(String::from("Work type"), 1);
+        name_counts.insert(String::from("Assignee"), 1);
         name_counts.insert(String::from("Status"), 1);
+        name_counts.insert(String::from("Labels"), 1);
+        name_counts.insert(String::from("Work type"), 1);
 
         let mut candidate_fields = Vec::new();
         for field in fields {
             let is_known = matches!(
                 field.id.as_str(),
-                "key" | "summary" | "issuetype" | "status"
+                "key" | "summary" | "issuetype" | "status" | "priority" | "labels"
             );
             if !is_known {
                 *name_counts.entry(field.name.clone()).or_insert(0) += 1;
@@ -697,6 +836,20 @@ impl App {
         self.filtered_tree.is_column_dropdown_filter_focused()
     }
 
+    pub fn assignee_dropdown(&self) -> Option<&MultiSelectDropdownState<Option<UserSummary>>> {
+        self.assignee_dropdown.as_ref()
+    }
+
+    pub fn is_assignee_dropdown_open(&self) -> bool {
+        self.assignee_dropdown.is_some()
+    }
+
+    pub fn is_assignee_dropdown_filter_focused(&self) -> bool {
+        self.assignee_dropdown
+            .as_ref()
+            .is_some_and(MultiSelectDropdownState::is_filter_focused)
+    }
+
     pub fn project_dropdown(&self) -> Option<&MultiSelectDropdownState<ProjectSummary>> {
         self.project_dropdown.as_ref()
     }
@@ -721,6 +874,14 @@ impl App {
         self.quick_switcher.is_some()
     }
 
+    pub fn is_any_dropdown_open(&self) -> bool {
+        self.is_column_dropdown_open()
+            || self.is_assignee_dropdown_open()
+            || self.is_project_dropdown_open()
+            || self.is_theme_dropdown_open()
+            || self.is_quick_switcher_open()
+    }
+
     pub fn is_quick_switcher_filter_focused(&self) -> bool {
         self.quick_switcher
             .as_ref()
@@ -738,15 +899,16 @@ impl App {
     }
 
     pub fn is_theme_dropdown_filter_focused(&self) -> bool {
-        self.theme_dropdown
-            .as_ref()
-            .is_some_and(MultiSelectDropdownState::is_filter_focused)
+        self.theme_dropdown.as_ref().is_some_and(
+            crate::components::generic::dropdown::MultiSelectDropdownState::is_filter_focused,
+        )
     }
 
     pub fn is_input_focused(&self) -> bool {
         self.screen == Screen::Setup
             || self.is_filter_focused()
             || self.is_column_dropdown_filter_focused()
+            || self.is_assignee_dropdown_filter_focused()
             || self.is_project_dropdown_filter_focused()
             || self.is_theme_dropdown_filter_focused()
             || self.is_quick_switcher_filter_focused()
@@ -798,6 +960,7 @@ impl App {
             Screen::Main if self.quick_switcher.is_some() => true,
             Screen::Main if self.project_dropdown.is_some() => true,
             Screen::Main if self.theme_dropdown.is_some() => true,
+            Screen::Main if self.assignee_dropdown.is_some() => true,
             Screen::Main if self.filtered_tree.is_column_dropdown_open() => true,
             Screen::Main if self.filtered_tree.is_filter_focused() => true,
             _ => false,
@@ -823,6 +986,7 @@ impl App {
                 || self.is_column_dropdown_filter_focused()
                 || self.is_project_dropdown_filter_focused()
                 || self.is_theme_dropdown_filter_focused()
+                || self.is_assignee_dropdown_filter_focused()
                 || self.is_quick_switcher_filter_focused();
             let is_navigation_shortcut = (key.code == KeyCode::Char('j')
                 || key.code == KeyCode::Char('k'))
@@ -848,6 +1012,16 @@ impl App {
                 key,
                 keybindings,
                 self.is_quick_switcher_filter_focused(),
+                KeyBindings::project_dropdown_action_for,
+            )));
+            return;
+        }
+
+        if self.assignee_dropdown.is_some() {
+            self.dispatch(Action::AssigneeDropdown(self.dropdown_key_action(
+                key,
+                keybindings,
+                self.is_assignee_dropdown_filter_focused(),
                 KeyBindings::project_dropdown_action_for,
             )));
             return;
@@ -885,6 +1059,22 @@ impl App {
                     if is_ctrl_space || is_ctrl_enter {
                         JiraFilteredTreeAction::Dropdown(
                             crate::components::generic::dropdown::DropdownAction::ToggleSelected,
+                        )
+                    } else if key.code == KeyCode::PageUp {
+                        JiraFilteredTreeAction::Dropdown(
+                            crate::components::generic::dropdown::DropdownAction::HalfPageUp,
+                        )
+                    } else if key.code == KeyCode::PageDown {
+                        JiraFilteredTreeAction::Dropdown(
+                            crate::components::generic::dropdown::DropdownAction::HalfPageDown,
+                        )
+                    } else if key.code == KeyCode::Home {
+                        JiraFilteredTreeAction::Dropdown(
+                            crate::components::generic::dropdown::DropdownAction::GoToStart,
+                        )
+                    } else if key.code == KeyCode::End {
+                        JiraFilteredTreeAction::Dropdown(
+                            crate::components::generic::dropdown::DropdownAction::GoToEnd,
                         )
                     } else if key.code == KeyCode::Esc
                         || key.code == KeyCode::Char('[')
@@ -929,12 +1119,43 @@ impl App {
                     self.dispatch_filter(action);
                 }
             }
-            Screen::Main => self.dispatch(keybindings.jira_filtered_tree_action_for(key)),
+            Screen::Main => {
+                let action = keybindings.jira_filtered_tree_action_for(key);
+                if self.active_tab() != "List" && !matches!(action, Action::Tabs(_)) {
+                    return;
+                }
+                self.dispatch(action);
+            }
         }
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect, keybindings: &KeyBindings) {
-        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        if self.help_open {
+            let scroll_delta = match mouse.kind {
+                MouseEventKind::ScrollUp => Some(-1),
+                MouseEventKind::ScrollDown => Some(1),
+                _ => None,
+            };
+            if let Some(delta) = scroll_delta {
+                let items = keybindings.help_items(
+                    self.screen(),
+                    self.active_tab(),
+                    self.is_any_dropdown_open(),
+                );
+                self.move_help_selection(delta, items.len());
+            }
+            return;
+        }
+        if self.command_log_open {
+            return;
+        }
+        let scroll_delta = match mouse.kind {
+            MouseEventKind::ScrollUp => Some(-1),
+            MouseEventKind::ScrollDown => Some(1),
+            _ => None,
+        };
+        let is_left_click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+        if !is_left_click && scroll_delta.is_none() {
             return;
         }
 
@@ -952,6 +1173,19 @@ impl App {
             self.theme(),
         );
         let inner = outer.inner(frame_area);
+        if let Some(delta) = scroll_delta {
+            if self.handle_open_dropdown_scroll(point, inner, delta) {
+                return;
+            }
+        }
+        if self.screen == Screen::Main
+            && self.active_tab() == "List"
+            && self.filtered_tree.is_column_dropdown_open()
+            && self.is_column_trigger_point(inner, point, keybindings)
+        {
+            self.close_dropdown(DropdownKind::JiraColumns);
+            return;
+        }
         if self.handle_open_dropdown_mouse(point, inner) {
             return;
         }
@@ -1024,6 +1258,13 @@ impl App {
             FilteredTreeViewMode::List => content_main.height as usize,
             FilteredTreeViewMode::Table => content_main.height.saturating_sub(1) as usize,
         };
+        if let Some(delta) = scroll_delta {
+            self.filtered_tree.scroll_viewport(delta, viewport_height);
+            return;
+        }
+        if !is_left_click {
+            return;
+        }
         let visible_range = self.visible_issue_range(viewport_height);
         let visible_pos = point.1.saturating_sub(rows_start_y) as usize;
         let selected = visible_range.start.saturating_add(visible_pos);
@@ -1044,6 +1285,118 @@ impl App {
         }
     }
 
+    fn handle_open_dropdown_scroll(&mut self, point: (u16, u16), area: Rect, delta: isize) -> bool {
+        if self.quick_switcher.is_some() {
+            return self.scroll_centered_dropdown(point, area, DropdownKind::QuickSwitcher, delta);
+        }
+        if self.theme_dropdown.is_some() {
+            return self.scroll_centered_dropdown(point, area, DropdownKind::ThemePicker, delta);
+        }
+        if self.project_dropdown.is_some() {
+            return self.scroll_centered_dropdown(
+                point,
+                area,
+                DropdownKind::ProjectSwitcher,
+                delta,
+            );
+        }
+        if self.assignee_dropdown.is_some() {
+            return self.scroll_centered_dropdown(point, area, DropdownKind::AssigneePicker, delta);
+        }
+        if self.filtered_tree.is_column_dropdown_open() {
+            return self.scroll_column_dropdown(point, area, delta);
+        }
+        false
+    }
+
+    fn scroll_centered_dropdown(
+        &mut self,
+        point: (u16, u16),
+        area: Rect,
+        kind: DropdownKind,
+        delta: isize,
+    ) -> bool {
+        let (width, rows) = match kind {
+            DropdownKind::QuickSwitcher => self
+                .quick_switcher
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 34, 10)),
+            DropdownKind::ThemePicker => self
+                .theme_dropdown
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 34, 12)),
+            DropdownKind::ProjectSwitcher => self
+                .project_dropdown
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 32, 10)),
+            DropdownKind::AssigneePicker => self
+                .assignee_dropdown
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 32, 10)),
+            DropdownKind::JiraColumns => None,
+        }
+        .unwrap_or((0, 0));
+        if width == 0 || rows == 0 {
+            return false;
+        }
+
+        let rect = centered_rect(area, width, rows + 3);
+        if !contains_point(rect, point) {
+            return true;
+        }
+        self.scroll_dropdown(kind, delta);
+        true
+    }
+
+    fn scroll_column_dropdown(&mut self, point: (u16, u16), area: Rect, delta: isize) -> bool {
+        let Some(dropdown) = self.column_dropdown() else {
+            return false;
+        };
+        let longest = dropdown
+            .options()
+            .iter()
+            .map(|option| option.label.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let width = area.width.min((longest + 6).max(20));
+        let height = area.height.min(16);
+        let rect = Rect {
+            x: area.x + area.width.saturating_sub(width + 1),
+            y: area.y + 1,
+            width,
+            height,
+        };
+        if !contains_point(rect, point) {
+            return true;
+        }
+        self.filtered_tree.scroll_column_dropdown(delta);
+        true
+    }
+
+    fn is_column_trigger_point(
+        &self,
+        inner: Rect,
+        point: (u16, u16),
+        keybindings: &KeyBindings,
+    ) -> bool {
+        let [filter_row, _content_area] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .areas(inner);
+        let trigger_width = 9u16.saturating_add(keybindings.open_columns_label().len() as u16);
+        let [_filter_area, trigger_area] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(trigger_width),
+            ])
+            .areas(filter_row);
+        contains_point(trigger_area, point)
+    }
+
     fn handle_open_dropdown_mouse(&mut self, point: (u16, u16), area: Rect) -> bool {
         if self.quick_switcher.is_some() {
             return self.handle_centered_dropdown_mouse(point, area, DropdownKind::QuickSwitcher);
@@ -1053,6 +1406,9 @@ impl App {
         }
         if self.project_dropdown.is_some() {
             return self.handle_centered_dropdown_mouse(point, area, DropdownKind::ProjectSwitcher);
+        }
+        if self.assignee_dropdown.is_some() {
+            return self.handle_centered_dropdown_mouse(point, area, DropdownKind::AssigneePicker);
         }
         if self.filtered_tree.is_column_dropdown_open() {
             return self.handle_column_dropdown_mouse(point, area);
@@ -1077,6 +1433,10 @@ impl App {
                 .map(|dropdown| dropdown_dimensions(dropdown, area, 34, 12)),
             DropdownKind::ProjectSwitcher => self
                 .project_dropdown
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 32, 10)),
+            DropdownKind::AssigneePicker => self
+                .assignee_dropdown
                 .as_ref()
                 .map(|dropdown| dropdown_dimensions(dropdown, area, 32, 10)),
             DropdownKind::JiraColumns => None,
@@ -1131,6 +1491,13 @@ impl App {
                         );
                     }
                 }
+                DropdownKind::AssigneePicker => {
+                    if let Some(dropdown) = &mut self.assignee_dropdown {
+                        dropdown.dispatch(
+                            crate::components::generic::dropdown::DropdownAction::FocusFilter,
+                        );
+                    }
+                }
                 DropdownKind::JiraColumns => {}
             }
             return true;
@@ -1143,6 +1510,32 @@ impl App {
         let row = point.1.saturating_sub(options_area.y) as usize;
         self.click_dropdown_option(kind, row, options_area.height as usize);
         true
+    }
+
+    fn scroll_dropdown(&mut self, kind: DropdownKind, delta: isize) {
+        match kind {
+            DropdownKind::QuickSwitcher => {
+                if let Some(dropdown) = &mut self.quick_switcher {
+                    dropdown.scroll_viewport(delta);
+                }
+            }
+            DropdownKind::ThemePicker => {
+                if let Some(dropdown) = &mut self.theme_dropdown {
+                    dropdown.scroll_viewport(delta);
+                }
+            }
+            DropdownKind::ProjectSwitcher => {
+                if let Some(dropdown) = &mut self.project_dropdown {
+                    dropdown.scroll_viewport(delta);
+                }
+            }
+            DropdownKind::AssigneePicker => {
+                if let Some(dropdown) = &mut self.assignee_dropdown {
+                    dropdown.scroll_viewport(delta);
+                }
+            }
+            DropdownKind::JiraColumns => {}
+        }
     }
 
     fn click_dropdown_option(&mut self, kind: DropdownKind, row: usize, height: usize) {
@@ -1178,6 +1571,18 @@ impl App {
                     dropdown.set_selected_index(index);
                 }
                 self.dispatch_project_dropdown(
+                    crate::components::generic::dropdown::DropdownAction::ToggleSelected,
+                );
+            }
+            DropdownKind::AssigneePicker => {
+                let Some(index) = dropdown_index_at(self.assignee_dropdown.as_ref(), row, height)
+                else {
+                    return;
+                };
+                if let Some(dropdown) = &mut self.assignee_dropdown {
+                    dropdown.set_selected_index(index);
+                }
+                self.dispatch_assignee_dropdown(
                     crate::components::generic::dropdown::DropdownAction::ToggleSelected,
                 );
             }
@@ -1245,7 +1650,11 @@ impl App {
 
     fn handle_help_key(&mut self, key: KeyEvent, keybindings: &KeyBindings) {
         let item_count = keybindings
-            .help_items(self.screen(), self.active_tab())
+            .help_items(
+                self.screen(),
+                self.active_tab(),
+                self.is_any_dropdown_open(),
+            )
             .len();
         match keybindings.help_dialog_action_for(key) {
             crate::keymap::HelpDialogAction::Close => self.close_dialog(DialogKind::Help),
@@ -1295,6 +1704,18 @@ impl App {
                     FilterAction::Submit,
                 );
             }
+            if key.code == KeyCode::PageUp {
+                return crate::components::generic::dropdown::DropdownAction::HalfPageUp;
+            }
+            if key.code == KeyCode::PageDown {
+                return crate::components::generic::dropdown::DropdownAction::HalfPageDown;
+            }
+            if key.code == KeyCode::Home {
+                return crate::components::generic::dropdown::DropdownAction::GoToStart;
+            }
+            if key.code == KeyCode::End {
+                return crate::components::generic::dropdown::DropdownAction::GoToEnd;
+            }
             if key.code == KeyCode::Esc
                 || key.code == KeyCode::Char('[') && key.modifiers.contains(KeyModifiers::CONTROL)
             {
@@ -1323,6 +1744,9 @@ impl App {
             Action::ToggleQuickSwitcher => self.toggle_dropdown(DropdownKind::QuickSwitcher),
             Action::ToggleProjectDropdown => self.toggle_dropdown(DropdownKind::ProjectSwitcher),
             Action::ToggleThemeDropdown => self.toggle_dropdown(DropdownKind::ThemePicker),
+            Action::ToggleAssigneeDropdown => self.toggle_dropdown(DropdownKind::AssigneePicker),
+            Action::AssignSelectedToMe => self.assign_selected_to_me(),
+            Action::UnassignSelected => self.queue_selected_assignment(None),
             Action::GoToBoard => self.select_tab("Board"),
             Action::GoToList => self.select_tab("List"),
             Action::GoToTimeline => self.select_tab("Timeline"),
@@ -1332,6 +1756,7 @@ impl App {
             Action::QuickSwitcher(action) => self.dispatch_quick_switcher(action),
             Action::ProjectDropdown(action) => self.dispatch_project_dropdown(action),
             Action::ThemeDropdown(action) => self.dispatch_theme_dropdown(action),
+            Action::AssigneeDropdown(action) => self.dispatch_assignee_dropdown(action),
             Action::CloseCommandLog => self.close_dialog(DialogKind::CommandLog),
             Action::Quit => self.running = false,
             Action::None => self.filtered_tree.clear_transient_input(),
@@ -1460,7 +1885,11 @@ impl App {
     }
 
     fn open_dialog(&mut self, dialog: DialogKind) {
-        self.close_overlays();
+        if !matches!(dialog, DialogKind::Help) {
+            self.close_overlays();
+        } else {
+            self.command_log_open = false;
+        }
         match dialog {
             DialogKind::CommandLog => self.command_log_open = true,
             DialogKind::Help => {
@@ -1504,6 +1933,7 @@ impl App {
             DropdownKind::QuickSwitcher => self.open_quick_switcher(),
             DropdownKind::ProjectSwitcher => self.open_project_dropdown(),
             DropdownKind::ThemePicker => self.open_theme_dropdown(),
+            DropdownKind::AssigneePicker => self.open_assignee_dropdown(),
         }
     }
 
@@ -1513,6 +1943,7 @@ impl App {
             DropdownKind::QuickSwitcher => self.quick_switcher = None,
             DropdownKind::ProjectSwitcher => self.project_dropdown = None,
             DropdownKind::ThemePicker => self.close_theme_dropdown_without_selection(),
+            DropdownKind::AssigneePicker => self.assignee_dropdown = None,
         }
     }
 
@@ -1522,6 +1953,7 @@ impl App {
             DropdownKind::QuickSwitcher => self.quick_switcher.is_some(),
             DropdownKind::ProjectSwitcher => self.project_dropdown.is_some(),
             DropdownKind::ThemePicker => self.theme_dropdown.is_some(),
+            DropdownKind::AssigneePicker => self.assignee_dropdown.is_some(),
         }
     }
 
@@ -1529,6 +1961,7 @@ impl App {
         self.quick_switcher = None;
         self.close_theme_dropdown_without_selection();
         self.project_dropdown = None;
+        self.assignee_dropdown = None;
         self.filtered_tree.close_column_dropdown();
     }
 
@@ -1591,6 +2024,42 @@ impl App {
             })
             .collect();
         self.project_dropdown = Some(
+            MultiSelectDropdownState::new(options)
+                .single_select()
+                .focus_selected()
+                .with_filter_focused(),
+        );
+    }
+
+    fn open_assignee_dropdown(&mut self) {
+        let Some(issue_key) = self.selected_issue_key().map(str::to_owned) else {
+            self.status = String::from("No issue selected.");
+            return;
+        };
+        let current_assignee = self
+            .issues()
+            .iter()
+            .find(|item| item.id == issue_key)
+            .and_then(|item| item.field_values.get("assignee"))
+            .cloned();
+
+        if self.users.is_empty() && current_assignee.is_none() {
+            self.status = String::from("No assignable Jira users available.");
+            return;
+        }
+
+        self.close_overlays();
+        let mut options = vec![DropdownOption {
+            selected: current_assignee.is_none(),
+            label: String::from("Unassigned"),
+            value: None,
+        }];
+        options.extend(self.users.iter().cloned().map(|user| DropdownOption {
+            selected: current_assignee.as_deref() == Some(user.display_name.as_str()),
+            label: user.display_name.clone(),
+            value: Some(user),
+        }));
+        self.assignee_dropdown = Some(
             MultiSelectDropdownState::new(options)
                 .single_select()
                 .focus_selected()
@@ -1746,6 +2215,69 @@ impl App {
             self.filtered_tree.clear_transient_input();
             self.close_overlays();
         }
+    }
+
+    fn dispatch_assignee_dropdown(
+        &mut self,
+        action: crate::components::generic::dropdown::DropdownAction,
+    ) {
+        let Some(dropdown) = &mut self.assignee_dropdown else {
+            return;
+        };
+        match dropdown.dispatch(action) {
+            Some(DropdownEvent::Closed) => {
+                self.assignee_dropdown = None;
+            }
+            Some(DropdownEvent::Toggled(index)) => self.commit_assignee_index(index),
+            None => {}
+        }
+    }
+
+    fn commit_assignee_index(&mut self, index: usize) {
+        let Some(assignee) = self
+            .assignee_dropdown
+            .as_ref()
+            .and_then(|dropdown| dropdown.options().get(index))
+            .map(|option| option.value.clone())
+        else {
+            return;
+        };
+        self.assignee_dropdown = None;
+        self.queue_selected_assignment(assignee);
+    }
+
+    fn assign_selected_to_me(&mut self) {
+        let Some(current_user) = self.current_user.clone() else {
+            self.status = String::from("Current Jira user is not loaded.");
+            return;
+        };
+        self.queue_selected_assignment(Some(current_user));
+    }
+
+    fn queue_selected_assignment(&mut self, assignee: Option<UserSummary>) {
+        let Some(issue_key) = self.selected_issue_key().map(str::to_owned) else {
+            self.status = String::from("No issue selected.");
+            return;
+        };
+        let Some(credentials) = self.credentials.clone() else {
+            self.status = String::from("No Jira credentials available for assignment.");
+            return;
+        };
+
+        self.status = match assignee.as_ref() {
+            Some(user) => format!("Assigning {issue_key} to {}...", user.display_name),
+            None => format!("Unassigning {issue_key}..."),
+        };
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending_assignment_requests
+            .insert(issue_key.clone(), request_id);
+        self.pending_effects.push(AppEffect::AssignIssue {
+            request_id,
+            issue_key,
+            assignee,
+            credentials,
+        });
     }
     fn dispatch_project_dropdown(
         &mut self,

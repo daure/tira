@@ -3,7 +3,7 @@ use std::{env, fs, io, path::PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    app::{Action, Screen, SetupAction},
+    app::{Action, QuickAction, Screen, SetupAction},
     components::{
         generic::{
             dropdown::DropdownAction, filter::FilterAction, filtered_tree::FilteredTreeAction,
@@ -83,6 +83,9 @@ struct TreeKeyBindings {
     expand_all: KeySpec,
     open_columns: KeySpec,
     yank_issue_url: KeySpec,
+    open_assignee: KeySpec,
+    assign_to_me: KeySpec,
+    unassign: KeySpec,
     go_to_end: KeySpec,
     go_to_start_prefix: KeySpec,
     focus_filter: KeySpec,
@@ -167,6 +170,9 @@ impl Default for TreeKeyBindings {
             expand_all: KeySpec::shifted('z'),
             open_columns: KeySpec::plain('c'),
             yank_issue_url: KeySpec::plain('y'),
+            open_assignee: KeySpec::plain('a'),
+            assign_to_me: KeySpec::plain('i'),
+            unassign: KeySpec::plain('u'),
             go_to_end: KeySpec::code_with_modifiers(KeyCode::Char('g'), KeyModifiers::SHIFT),
             go_to_start_prefix: KeySpec::plain('g'),
             focus_filter: KeySpec::plain('/'),
@@ -179,7 +185,7 @@ impl Default for KeyBindings {
         Self {
             tabs: TabsKeyBindings::default(),
             tree: TreeKeyBindings::default(),
-            quit: KeySpec::plain('q'),
+            quit: KeySpec::code_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL),
             reload_list: KeySpec::plain('r'),
             leader: KeySpec::code_with_modifiers(KeyCode::Char('x'), KeyModifiers::CONTROL),
             leader_command_log: KeySpec::plain('c'),
@@ -340,6 +346,19 @@ impl KeyBindings {
             "yank_issue_url",
             &mut bindings.tree.yank_issue_url,
         );
+        set_key(
+            &value,
+            "tree",
+            "open_assignee",
+            &mut bindings.tree.open_assignee,
+        );
+        set_key(
+            &value,
+            "tree",
+            "assign_to_me",
+            &mut bindings.tree.assign_to_me,
+        );
+        set_key(&value, "tree", "unassign", &mut bindings.tree.unassign);
         set_key(&value, "tree", "go_to_end", &mut bindings.tree.go_to_end);
         set_key(
             &value,
@@ -376,9 +395,7 @@ impl KeyBindings {
             Some(Action::ToggleQuickSwitcher)
         } else if self.reload_list.matches(key) {
             Some(Action::ReloadList)
-        } else if self.quit.matches(key)
-            || (key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL))
-        {
+        } else if self.quit.matches(key) {
             Some(Action::Quit)
         } else {
             None
@@ -416,6 +433,12 @@ impl KeyBindings {
             Action::Tabs(TabAction::Next)
         } else if self.tree.open_columns.matches(key) {
             Action::JiraFilteredTree(JiraFilteredTreeAction::OpenColumns)
+        } else if self.tree.open_assignee.matches(key) {
+            Action::ToggleAssigneeDropdown
+        } else if self.tree.assign_to_me.matches(key) {
+            Action::AssignSelectedToMe
+        } else if self.tree.unassign.matches(key) {
+            Action::UnassignSelected
         } else if self.tree.yank_issue_url.matches(key) {
             Action::JiraFilteredTree(JiraFilteredTreeAction::YankIssueUrlPrefix)
         } else if let Some(action) = self.filtered_tree_action_for(key) {
@@ -430,9 +453,9 @@ impl KeyBindings {
             Some(FilteredTreeAction::Tree(TreeAction::MoveUp))
         } else if self.tree.move_down.matches(key) {
             Some(FilteredTreeAction::Tree(TreeAction::MoveDown))
-        } else if self.tree.half_page_up.matches(key) {
+        } else if self.tree.half_page_up.matches(key) || key.code == KeyCode::PageUp {
             Some(FilteredTreeAction::Tree(TreeAction::HalfPageUp))
-        } else if self.tree.half_page_down.matches(key) {
+        } else if self.tree.half_page_down.matches(key) || key.code == KeyCode::PageDown {
             Some(FilteredTreeAction::Tree(TreeAction::HalfPageDown))
         } else if self.tree.collapse.matches(key) {
             Some(FilteredTreeAction::Tree(TreeAction::Collapse))
@@ -446,8 +469,10 @@ impl KeyBindings {
             Some(FilteredTreeAction::Tree(TreeAction::CollapseAll))
         } else if self.tree.expand_all.matches(key) {
             Some(FilteredTreeAction::Tree(TreeAction::ExpandAll))
-        } else if self.tree.go_to_end.matches(key) {
+        } else if self.tree.go_to_end.matches(key) || key.code == KeyCode::End {
             Some(FilteredTreeAction::Tree(TreeAction::GoToEnd))
+        } else if key.code == KeyCode::Home {
+            Some(FilteredTreeAction::Tree(TreeAction::GoToStart))
         } else if self.tree.go_to_start_prefix.matches(key) {
             Some(FilteredTreeAction::Tree(TreeAction::GotoPrefix))
         } else if self.tree.focus_filter.matches(key) {
@@ -497,6 +522,23 @@ impl KeyBindings {
         self.open_help.label()
     }
 
+    pub fn quick_action_shortcut_label(&self, action: QuickAction) -> String {
+        match action {
+            QuickAction::CommandLog => self.leader_shortcut_label(&self.leader_command_log),
+            QuickAction::ThemePicker => self.leader_shortcut_label(&self.leader_theme),
+            QuickAction::ProjectPicker => self.leader_shortcut_label(&self.leader_project),
+            QuickAction::ReloadList => self.reload_list.label(),
+            QuickAction::Board => self.leader_shortcut_label(&self.leader_board),
+            QuickAction::List => self.leader_shortcut_label(&self.leader_list),
+            QuickAction::Timeline => self.leader_shortcut_label(&self.leader_timeline),
+            QuickAction::Filters => self.leader_shortcut_label(&self.leader_filters),
+        }
+    }
+
+    fn leader_shortcut_label(&self, binding: &KeySpec) -> String {
+        format!("{} {}", self.leader.label(), binding.label())
+    }
+
     pub fn setup_hint_text(&self) -> String {
         format!(
             "{} next field | {} previous field | {} load issues | {} quit",
@@ -509,9 +551,10 @@ impl KeyBindings {
 
     pub fn list_hint_text(&self) -> String {
         format!(
-            "{} search | {} columns | {} leader | {} quick | {} help",
+            "{} search | {} columns | {} assignee | {} leader | {} quick | {} help",
             self.tree.focus_filter.label(),
             self.tree.open_columns.label(),
+            self.tree.open_assignee.label(),
             self.leader.label(),
             self.quick_switcher.label(),
             self.open_help.label()
@@ -535,107 +578,209 @@ impl KeyBindings {
         }
     }
 
-    pub fn help_items(&self, screen: Screen, active_tab: &str) -> Vec<HelpItem> {
+    pub fn help_items(
+        &self,
+        screen: Screen,
+        active_tab: &str,
+        dropdown_open: bool,
+    ) -> Vec<HelpItem> {
         let mut items = Vec::new();
-        match screen {
-            Screen::Setup => {
-                items.push(self.help_item(
-                    HelpScope::Local,
-                    self.setup_next_field.label(),
-                    "Next field",
-                    "Move focus to the next setup field.",
-                ));
-                items.push(self.help_item(
-                    HelpScope::Local,
-                    self.setup_previous_field.label(),
-                    "Previous field",
-                    "Move focus to the previous setup field.",
-                ));
-                items.push(self.help_item(
-                    HelpScope::Local,
-                    self.setup_submit.label(),
-                    "Load issues",
-                    "Save credentials and load Jira issues.",
-                ));
-                items.push(self.help_item(
-                    HelpScope::Local,
-                    self.setup_quit.label(),
-                    "Quit",
-                    "Exit without saving setup data.",
-                ));
-            }
-            Screen::Main => {
-                items.push(self.help_item(
-                    HelpScope::Local,
-                    format!("{}/{}", self.tabs.previous.label(), self.tabs.next.label()),
-                    "Switch tabs",
-                    "Move between the top-level Jira tabs.",
-                ));
-                if active_tab == "List" {
+
+        if dropdown_open {
+            items.push(self.help_item(
+                HelpScope::Local,
+                format!(
+                    "{} / {}",
+                    self.dropdown.toggle_selected.label(),
+                    "Ctrl+Space"
+                ),
+                "Toggle selection",
+                "Toggle current option (multi-select) or select it (single-select).",
+            ));
+            items.push(self.help_item(
+                HelpScope::Local,
+                "Ctrl+Enter".to_string(),
+                "Do selection",
+                "Select and submit the current option from the search input.",
+            ));
+            items.push(self.help_item(
+                HelpScope::Local,
+                "Ctrl+J / Ctrl+K".to_string(),
+                "Navigate search options",
+                "Move option selection down/up while typing in the search input.",
+            ));
+            items.push(self.help_item(
+                HelpScope::Local,
+                self.dropdown.focus_filter.label(),
+                "Focus search",
+                "Focus the search input to filter options.",
+            ));
+            items.push(self.help_item(
+                HelpScope::Local,
+                "Ctrl+C".to_string(),
+                "Clear search",
+                "Clear the search input text.",
+            ));
+            items.push(self.help_item(
+                HelpScope::Local,
+                "Esc".to_string(),
+                "Clear / Close",
+                "Clear search input focus (first press) and close the dropdown (second press).",
+            ));
+            items.push(self.help_item(
+                HelpScope::Local,
+                "j / k / Down / Up".to_string(),
+                "Move selection",
+                "Move selection down/up when search is not focused.",
+            ));
+            items.push(self.help_item(
+                HelpScope::Local,
+                "gg / G / Home / End".to_string(),
+                "Start / End",
+                "Jump to the first or last option.",
+            ));
+            items.push(self.help_item(
+                HelpScope::Local,
+                "ctrl+u / ctrl+d / PageUp / PageDown".to_string(),
+                "Scroll page",
+                "Page up/down through options.",
+            ));
+        } else {
+            match screen {
+                Screen::Setup => {
                     items.push(self.help_item(
                         HelpScope::Local,
-                        self.tree.focus_filter.label(),
-                        "Search issues",
-                        "Focus the issue filter and narrow the current list.",
+                        self.setup_next_field.label(),
+                        "Next field",
+                        "Move focus to the next setup field.",
                     ));
                     items.push(self.help_item(
                         HelpScope::Local,
-                        format!(
-                            "{}/{}",
-                            self.tree.move_up.label(),
-                            self.tree.move_down.label()
-                        ),
-                        "Move selection",
-                        format!(
-                            "Move selection ({} / {} for half page).",
-                            self.tree.half_page_up.label(),
-                            self.tree.half_page_down.label()
-                        ),
+                        self.setup_previous_field.label(),
+                        "Previous field",
+                        "Move focus to the previous setup field.",
                     ));
                     items.push(self.help_item(
                         HelpScope::Local,
-                        format!(
-                            "{}/{}",
-                            self.tree.collapse.label(),
-                            self.tree.expand.label()
-                        ),
-                        "Collapse / expand",
-                        "Collapse a branch or expand the selected parent row.",
+                        self.setup_submit.label(),
+                        "Load issues",
+                        "Save credentials and load Jira issues.",
                     ));
                     items.push(self.help_item(
                         HelpScope::Local,
-                        self.tree.toggle_expand.label(),
-                        "Toggle branch",
-                        "Expand or collapse the selected tree row.",
+                        self.setup_quit.label(),
+                        "Quit",
+                        "Exit without saving setup data.",
                     ));
+                }
+                Screen::Main => {
                     items.push(self.help_item(
                         HelpScope::Local,
-                        self.tree.open_columns.label(),
-                        "Columns",
-                        "Open the column picker for the issue table.",
+                        format!("{}/{}", self.tabs.previous.label(), self.tabs.next.label()),
+                        "Switch tabs",
+                        "Move between the top-level Jira tabs.",
                     ));
-                    let yank_label = self.tree.yank_issue_url.label();
-                    let yank_binding = if yank_label.len() == 1 {
-                        format!("{}{}", yank_label.to_lowercase(), yank_label.to_lowercase())
-                    } else {
-                        format!("{} {}", yank_label, yank_label)
-                    };
-                    items.push(self.help_item(
-                        HelpScope::Local,
-                        yank_binding,
-                        "Copy issue URL",
-                        "Copy the selected Jira issue URL to the clipboard.",
-                    ));
-                    items.push(self.help_item(
-                        HelpScope::Local,
-                        self.reload_list.label(),
-                        "Reload list",
-                        "Reload issues for the active Jira project.",
-                    ));
+                    if active_tab == "List" {
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.focus_filter.label(),
+                            "Search issues",
+                            "Focus the issue filter and narrow the current list.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            format!(
+                                "{}/{}",
+                                self.tree.move_up.label(),
+                                self.tree.move_down.label()
+                            ),
+                            "Move selection",
+                            format!(
+                                "Move selection ({} / {} / PageUp / PageDown for paging, Home / End for edges).",
+                                self.tree.half_page_up.label(),
+                                self.tree.half_page_down.label()
+                            ),
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            "gg / G / Home / End".to_string(),
+                            "Start / End",
+                            "Jump to the first or last visible issue.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            "ctrl+u / ctrl+d / PageUp / PageDown".to_string(),
+                            "Scroll page",
+                            "Move through the issue list by half pages.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            format!(
+                                "{}/{}",
+                                self.tree.collapse.label(),
+                                self.tree.expand.label()
+                            ),
+                            "Collapse / expand",
+                            "Collapse a branch or expand the selected parent row.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.toggle_expand.label(),
+                            "Toggle branch",
+                            "Expand or collapse the selected tree row.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.open_columns.label(),
+                            "Columns",
+                            "Open the column picker for the issue table.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.open_assignee.label(),
+                            "Assign",
+                            "Open the assignee selector for the selected issue.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.assign_to_me.label(),
+                            "Assign to me",
+                            "Assign the selected issue to the current Jira user.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.unassign.label(),
+                            "Unassign",
+                            "Clear the selected issue assignee.",
+                        ));
+                        let yank_label = self.tree.yank_issue_url.label();
+                        let yank_binding = if yank_label.len() == 1 {
+                            format!("{}{}", yank_label.to_lowercase(), yank_label.to_lowercase())
+                        } else {
+                            format!("{} {}", yank_label, yank_label)
+                        };
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            yank_binding,
+                            "Copy issue URL",
+                            "Copy the selected Jira issue URL to the clipboard.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.reload_list.label(),
+                            "Reload list",
+                            "Reload issues for the active Jira project.",
+                        ));
+                    }
                 }
             }
         }
+        self.append_global_help_items(&mut items);
 
+        items
+    }
+
+    fn append_global_help_items(&self, items: &mut Vec<HelpItem>) {
         items.push(self.help_item(
             HelpScope::Global,
             self.leader.label(),
@@ -709,8 +854,6 @@ impl KeyBindings {
             "Close help",
             "Close the keyboard help dialog.",
         ));
-
-        items
     }
 
     fn help_item(
@@ -737,12 +880,14 @@ impl KeyBindings {
             DropdownAction::Close
         } else if self.dropdown.focus_filter.matches(key) {
             DropdownAction::FocusFilter
-        } else if self.dropdown.half_page_up.matches(key) {
+        } else if self.dropdown.half_page_up.matches(key) || key.code == KeyCode::PageUp {
             DropdownAction::HalfPageUp
-        } else if self.dropdown.half_page_down.matches(key) {
+        } else if self.dropdown.half_page_down.matches(key) || key.code == KeyCode::PageDown {
             DropdownAction::HalfPageDown
-        } else if self.dropdown.last.matches(key) {
+        } else if self.dropdown.last.matches(key) || key.code == KeyCode::End {
             DropdownAction::GoToEnd
+        } else if key.code == KeyCode::Home {
+            DropdownAction::GoToStart
         } else if self.dropdown.first.matches(key) {
             DropdownAction::GotoPrefix
         } else if self.dropdown.submit.matches(key) || self.dropdown.toggle_selected.matches(key) {
@@ -795,7 +940,7 @@ impl KeyBindings {
         if self.quit.matches(key) {
             FilterAction::Quit
         } else if is_escape_key(key)
-            || key.code == KeyCode::Enter
+            || (key.code == KeyCode::Enter && !key.modifiers.contains(KeyModifiers::CONTROL))
             || key.code == KeyCode::Char('/') && key.modifiers.contains(KeyModifiers::CONTROL)
             || is_ctrl_left_bracket(key)
         {
@@ -926,7 +1071,7 @@ impl KeySpec {
     pub fn label(self) -> String {
         let key = match self.code {
             KeyCode::Char(' ') => String::from("Space"),
-            KeyCode::Char(c) => c.to_ascii_uppercase().to_string(),
+            KeyCode::Char(c) => c.to_string(),
             KeyCode::Esc => String::from("Esc"),
             KeyCode::Enter => String::from("Enter"),
             KeyCode::Tab => String::from("Tab"),
