@@ -1,14 +1,14 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
 
-use crate::{App, CredentialField};
+use crate::{App, CredentialField, KeyBindings};
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
     let form = app.setup_form();
     let active_field = form.active_field();
     let mut lines = Vec::with_capacity(8);
@@ -16,7 +16,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     lines.push(Line::from(Span::styled(
         "Jira connection",
         Style::default()
-            .fg(Color::Green)
+            .fg(app.theme().accent_fg())
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::raw(""));
@@ -35,10 +35,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         };
 
         lines.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(Color::Green)),
+            Span::styled(marker, Style::default().fg(app.theme().accent_fg())),
             Span::styled(
                 format!("{:12}", field.label()),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(app.theme().subtle_fg()),
             ),
             Span::raw(display_value),
         ]));
@@ -46,8 +46,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "Tab next field | Shift+Tab previous field | Enter load issues | Ctrl+C quit",
-        Style::default().fg(Color::DarkGray),
+        keybindings.setup_hint_text(),
+        Style::default().fg(app.theme().muted_fg()),
     )));
 
     frame.render_widget(Paragraph::new(lines), area);

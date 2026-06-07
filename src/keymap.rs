@@ -21,6 +21,8 @@ pub struct KeyBindings {
     reload_list: KeySpec,
     toggle_command_log: KeySpec,
     switch_project: KeySpec,
+    switch_theme: KeySpec,
+    open_help: KeySpec,
     setup_next_field: KeySpec,
     setup_previous_field: KeySpec,
     setup_submit: KeySpec,
@@ -45,7 +47,8 @@ struct TreeKeyBindings {
     toggle_expand: KeySpec,
     collapse_all: KeySpec,
     expand_all: KeySpec,
-    copy_issue_url: KeySpec,
+    open_columns: KeySpec,
+    yank_issue_url: KeySpec,
     go_to_end: KeySpec,
     go_to_start_prefix: KeySpec,
     focus_filter: KeySpec,
@@ -72,7 +75,8 @@ impl Default for TreeKeyBindings {
             toggle_expand: KeySpec::plain(' '),
             collapse_all: KeySpec::plain('z'),
             expand_all: KeySpec::shifted('z'),
-            copy_issue_url: KeySpec::plain('c'),
+            open_columns: KeySpec::plain('c'),
+            yank_issue_url: KeySpec::plain('y'),
             go_to_end: KeySpec::code_with_modifiers(KeyCode::Char('g'), KeyModifiers::SHIFT),
             go_to_start_prefix: KeySpec::plain('g'),
             focus_filter: KeySpec::plain('/'),
@@ -89,6 +93,8 @@ impl Default for KeyBindings {
             reload_list: KeySpec::shifted('r'),
             toggle_command_log: KeySpec::shifted('l'),
             switch_project: KeySpec::shifted('p'),
+            switch_theme: KeySpec::code_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            open_help: KeySpec::plain('?'),
             setup_next_field: KeySpec::code(KeyCode::Tab),
             setup_previous_field: KeySpec::code(KeyCode::BackTab),
             setup_submit: KeySpec::code(KeyCode::Enter),
@@ -132,6 +138,8 @@ impl KeyBindings {
             "switch_project",
             &mut bindings.switch_project,
         );
+        set_key(&value, "global", "switch_theme", &mut bindings.switch_theme);
+        set_key(&value, "global", "open_help", &mut bindings.open_help);
         set_key(&value, "tabs", "previous_tab", &mut bindings.tabs.previous);
         set_key(&value, "tabs", "next_tab", &mut bindings.tabs.next);
         set_key(&value, "tree", "move_up", &mut bindings.tree.move_up);
@@ -166,8 +174,20 @@ impl KeyBindings {
         set_key(
             &value,
             "tree",
+            "open_columns",
+            &mut bindings.tree.open_columns,
+        );
+        set_key(
+            &value,
+            "tree",
             "copy_issue_url",
-            &mut bindings.tree.copy_issue_url,
+            &mut bindings.tree.yank_issue_url,
+        );
+        set_key(
+            &value,
+            "tree",
+            "yank_issue_url",
+            &mut bindings.tree.yank_issue_url,
         );
         set_key(&value, "tree", "go_to_end", &mut bindings.tree.go_to_end);
         set_key(
@@ -197,10 +217,14 @@ impl KeyBindings {
     }
 
     pub fn global_action_for(&self, key: KeyEvent) -> Option<Action> {
-        if self.toggle_command_log.matches(key) {
+        if self.open_help.matches(key) {
+            Some(Action::OpenHelp)
+        } else if self.toggle_command_log.matches(key) {
             Some(Action::ToggleCommandLog)
         } else if self.switch_project.matches(key) {
             Some(Action::ToggleProjectDropdown)
+        } else if self.switch_theme.matches(key) {
+            Some(Action::ToggleThemeDropdown)
         } else if self.reload_list.matches(key) {
             Some(Action::ReloadList)
         } else if self.quit.matches(key)
@@ -221,9 +245,9 @@ impl KeyBindings {
             Action::Tabs(TabAction::Previous)
         } else if self.tabs.next.matches(key) {
             Action::Tabs(TabAction::Next)
-        } else if self.tree.copy_issue_url.matches(key) {
+        } else if self.tree.open_columns.matches(key) {
             Action::JiraFilteredTree(JiraFilteredTreeAction::OpenColumns)
-        } else if key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
+        } else if self.tree.yank_issue_url.matches(key) {
             Action::JiraFilteredTree(JiraFilteredTreeAction::YankIssueUrlPrefix)
         } else if let Some(action) = self.filtered_tree_action_for(key) {
             Action::JiraFilteredTree(JiraFilteredTreeAction::FilteredTree(action))
@@ -276,12 +300,49 @@ impl KeyBindings {
         }
     }
 
+    pub fn help_dialog_action_for(&self, key: KeyEvent) -> Action {
+        if self.open_help.matches(key) || is_escape_key(key) {
+            Action::CloseHelp
+        } else {
+            Action::None
+        }
+    }
+
+    pub fn open_columns_label(&self) -> String {
+        self.tree.open_columns.label()
+    }
+
+    pub fn open_help_label(&self) -> String {
+        self.open_help.label()
+    }
+
+    pub fn setup_hint_text(&self) -> String {
+        format!(
+            "{} next field | {} previous field | {} load issues | {} quit",
+            self.setup_next_field.label(),
+            self.setup_previous_field.label(),
+            self.setup_submit.label(),
+            self.setup_quit.label()
+        )
+    }
+
+    pub fn list_hint_text(&self) -> String {
+        format!(
+            "{} search | {} columns | {} project | {} theme | {} help",
+            self.tree.focus_filter.label(),
+            self.tree.open_columns.label(),
+            self.switch_project.label(),
+            self.switch_theme.label(),
+            self.open_help.label()
+        )
+    }
+
     pub fn column_dropdown_context_action_for(
         &self,
         key: KeyEvent,
     ) -> Option<JiraFilteredTreeAction> {
         self.tree
-            .copy_issue_url
+            .open_columns
             .matches(key)
             .then_some(JiraFilteredTreeAction::OpenColumns)
     }
@@ -291,6 +352,10 @@ impl KeyBindings {
             JiraFilteredTreeAction::Dropdown(action) => action,
             _ => DropdownAction::None,
         }
+    }
+
+    pub fn theme_dropdown_action_for(&self, key: KeyEvent) -> DropdownAction {
+        self.project_dropdown_action_for(key)
     }
 
     pub fn dropdown_action_for(&self, key: KeyEvent) -> JiraFilteredTreeAction {
@@ -374,6 +439,10 @@ impl KeyBindings {
 
     #[allow(clippy::collapsible_if)]
     pub fn setup_action_for(&self, key: KeyEvent) -> SetupAction {
+        if self.setup_quit.matches(key) {
+            return SetupAction::Quit;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('a') => return SetupAction::MoveCursorStart,
@@ -462,6 +531,38 @@ impl KeySpec {
 
     fn matches(self, key: KeyEvent) -> bool {
         self == KeySpec::from(key)
+    }
+
+    pub fn label(self) -> String {
+        let key = match self.code {
+            KeyCode::Char(' ') => String::from("Space"),
+            KeyCode::Char(c) => c.to_ascii_uppercase().to_string(),
+            KeyCode::Esc => String::from("Esc"),
+            KeyCode::Enter => String::from("Enter"),
+            KeyCode::Tab => String::from("Tab"),
+            KeyCode::BackTab => String::from("Shift+Tab"),
+            KeyCode::Backspace => String::from("Backspace"),
+            KeyCode::Delete => String::from("Delete"),
+            KeyCode::Left => String::from("Left"),
+            KeyCode::Right => String::from("Right"),
+            KeyCode::Up => String::from("Up"),
+            KeyCode::Down => String::from("Down"),
+            KeyCode::Home => String::from("Home"),
+            KeyCode::End => String::from("End"),
+            _ => format!("{:?}", self.code),
+        };
+
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            format!("Ctrl+{key}")
+        } else if self.modifiers.contains(KeyModifiers::ALT) {
+            format!("Alt+{key}")
+        } else if self.modifiers.contains(KeyModifiers::SHIFT)
+            && !matches!(self.code, KeyCode::BackTab)
+        {
+            format!("Shift+{key}")
+        } else {
+            key
+        }
     }
 }
 

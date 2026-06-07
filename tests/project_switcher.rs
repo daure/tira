@@ -90,7 +90,9 @@ fn project_switcher_renders_focus_and_checkmark() {
     );
 
     app.handle_key(shift('p'), &bindings);
-    terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
 
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains("KAN  Kanban"));
@@ -114,7 +116,9 @@ fn project_switcher_filter_focus_shows_insert_mode_in_status_bar() {
     app.handle_key(key('/'), &bindings);
     assert!(app.is_project_dropdown_filter_focused());
 
-    terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
     let (_, bottom_row) = rendered_text(&terminal);
     assert!(bottom_row.contains("INSERT"));
 }

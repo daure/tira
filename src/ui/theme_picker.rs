@@ -1,9 +1,8 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem},
+    text::Line,
+    widgets::{Clear, List, ListItem},
 };
 
 use crate::{
@@ -11,10 +10,10 @@ use crate::{
     components::generic::{dropdown::DropdownVisibleOption, filter},
 };
 
-use super::style;
+use super::{project_switcher, style};
 
 pub fn render(frame: &mut Frame<'_>, status_area: Rect, app: &App) {
-    let Some(dropdown) = app.project_dropdown() else {
+    let Some(dropdown) = app.theme_dropdown() else {
         return;
     };
     let longest_option = dropdown
@@ -23,8 +22,8 @@ pub fn render(frame: &mut Frame<'_>, status_area: Rect, app: &App) {
         .map(|option| option.label.chars().count())
         .max()
         .unwrap_or(0) as u16;
-    let width = status_area.width.min((longest_option + 6).max(24));
-    let visible_rows = dropdown.visible_row_count().min(10) as u16;
+    let width = status_area.width.min((longest_option + 6).max(28));
+    let visible_rows = dropdown.visible_row_count().min(6) as u16;
     let height = (visible_rows + 3).max(5);
     if width < 20 || status_area.y < height {
         return;
@@ -36,7 +35,7 @@ pub fn render(frame: &mut Frame<'_>, status_area: Rect, app: &App) {
         width,
         height,
     };
-    let block = dropdown_block("Project", app.theme());
+    let block = project_switcher::dropdown_block("Theme", app.theme());
     let inner = block.inner(dropdown_area);
 
     frame.render_widget(Clear, dropdown_area);
@@ -73,7 +72,9 @@ pub fn render(frame: &mut Frame<'_>, status_area: Rect, app: &App) {
         .into_iter()
         .filter_map(|entry| match entry {
             DropdownVisibleOption::Separator => None,
-            DropdownVisibleOption::NoResults => Some(no_results_item(app.theme())),
+            DropdownVisibleOption::NoResults => {
+                Some(project_switcher::no_results_item(app.theme()))
+            }
             DropdownVisibleOption::Option { index, option } => {
                 let is_focused = index == dropdown.selected_index();
                 let row_style = style::selected_row_style(app.theme(), is_focused);
@@ -97,30 +98,4 @@ pub fn render(frame: &mut Frame<'_>, status_area: Rect, app: &App) {
         let cursor_x = filter_text_area.x + dropdown.filter_cursor() as u16;
         frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, filter_text_area.y));
     }
-}
-
-pub(crate) fn dropdown_block(
-    title: &'static str,
-    theme: &crate::ui::theme::Theme,
-) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border_fg()))
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                title,
-                Style::default()
-                    .fg(theme.accent_fg())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]))
-}
-
-pub(crate) fn no_results_item(theme: &crate::ui::theme::Theme) -> ListItem<'static> {
-    ListItem::new(Line::from(Span::styled(
-        "No results",
-        Style::default().fg(theme.muted_fg()),
-    )))
 }

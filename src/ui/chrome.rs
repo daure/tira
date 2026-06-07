@@ -1,85 +1,113 @@
 extern crate chrono;
 
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
 
-use crate::{App, app::APP_TABS, components::generic::tabs};
+use crate::{App, KeyBindings, app::APP_TABS, components::generic::tabs};
 
 pub fn tabbed_frame(
     active_tab: usize,
     view_mode: tabs::TabsViewMode,
+    theme: &crate::ui::theme::Theme,
 ) -> ratatui::widgets::Block<'static> {
-    tabs::tabbed_frame(APP_TABS, active_tab, view_mode)
+    tabs::tabbed_frame(APP_TABS, active_tab, view_mode, theme)
 }
 
-pub fn status_bar(app: &App, width: u16) -> Paragraph<'_> {
+pub fn status_bar(app: &App, keybindings: &KeyBindings, width: u16) -> Paragraph<'static> {
+    let theme = app.theme();
     let (mode_str, mode_bg) = if app.is_input_focused() {
-        (" INSERT ", Color::Green)
+        (" INSERT ", theme.status_input_bg())
     } else {
-        (" NORMAL ", Color::Rgb(240, 220, 140)) // Yellow
+        (" NORMAL ", theme.status_normal_bg())
     };
-    let mode_fg = Color::Black;
 
-    let bar_bg = Color::Rgb(20, 20, 20); // Dark background for status bar
     let sep_right = "";
     let sep_left = "";
-
     let left_spans = vec![
         Span::styled(
             mode_str,
             Style::default()
-                .fg(mode_fg)
+                .fg(theme.status_mode_fg())
                 .bg(mode_bg)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(sep_right, Style::default().fg(mode_bg).bg(bar_bg)),
+        Span::styled(
+            sep_right,
+            Style::default().fg(mode_bg).bg(theme.status_bar_bg()),
+        ),
     ];
 
+    let active_context = format!(
+        " {} · {} · {} ",
+        app.active_tab(),
+        app.status(),
+        status_hint(app, keybindings)
+    );
     let time_str = format!("  {} ", chrono::Local::now().format("%H:%M"));
-    let time_bg = Color::Rgb(240, 220, 140); // Yellow
-    let time_fg = Color::Black;
-
     let project = app.current_project();
     let project_str = if project.is_empty() {
         String::from(" - ")
     } else {
         format!(" {} ", project)
     };
-    let project_bg = Color::Rgb(150, 100, 200); // Purple/magenta
-    let project_fg = Color::White;
 
     let right_spans = vec![
-        Span::styled(sep_left, Style::default().fg(project_bg).bg(bar_bg)),
+        Span::styled(
+            sep_left,
+            Style::default()
+                .fg(theme.status_project_bg())
+                .bg(theme.status_bar_bg()),
+        ),
         Span::styled(
             project_str,
             Style::default()
-                .fg(project_fg)
-                .bg(project_bg)
+                .fg(theme.status_project_fg())
+                .bg(theme.status_project_bg())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(sep_left, Style::default().fg(time_bg).bg(project_bg)),
+        Span::styled(
+            sep_left,
+            Style::default()
+                .fg(theme.status_time_bg())
+                .bg(theme.status_project_bg()),
+        ),
         Span::styled(
             time_str,
             Style::default()
-                .fg(time_fg)
-                .bg(time_bg)
+                .fg(theme.status_time_fg())
+                .bg(theme.status_time_bg())
                 .add_modifier(Modifier::BOLD),
         ),
     ];
 
     let left_len: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
     let right_len: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
+    let context_width = (width as usize).saturating_sub(left_len + right_len);
+    let context_text = super::layout::truncate_with_ellipsis(&active_context, context_width);
+    let middle_spaces = context_width.saturating_sub(context_text.chars().count());
 
-    let total_width = width as usize;
-    let middle_spaces = total_width.saturating_sub(left_len + right_len);
-    let middle_span = Span::styled(" ".repeat(middle_spaces), Style::default().bg(bar_bg));
+    let mut spans = left_spans;
+    spans.push(Span::styled(
+        context_text,
+        Style::default()
+            .fg(theme.status_text())
+            .bg(theme.status_bar_bg()),
+    ));
+    spans.push(Span::styled(
+        " ".repeat(middle_spaces),
+        Style::default().bg(theme.status_bar_bg()),
+    ));
+    spans.extend(right_spans);
 
-    let mut final_spans = left_spans;
-    final_spans.push(middle_span);
-    final_spans.extend(right_spans);
+    Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.status_bar_bg()))
+}
 
-    Paragraph::new(Line::from(final_spans)).style(Style::default().bg(bar_bg))
+fn status_hint(app: &App, keybindings: &KeyBindings) -> String {
+    match app.screen() {
+        crate::Screen::Setup => keybindings.setup_hint_text(),
+        crate::Screen::Main => keybindings.list_hint_text(),
+    }
 }

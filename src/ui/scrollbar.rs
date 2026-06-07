@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -15,7 +15,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, viewport_height: u16, app: &App
     }
 
     let visible_range = app.visible_issue_range(viewport_height as usize);
-    render_range(frame, area, rows.len(), visible_range);
+    render_range(frame, area, rows.len(), visible_range, app.theme());
 }
 
 pub fn render_range(
@@ -23,6 +23,7 @@ pub fn render_range(
     area: Rect,
     row_count: usize,
     visible_range: std::ops::Range<usize>,
+    theme: &crate::ui::theme::Theme,
 ) {
     if area.width == 0 || area.height == 0 || row_count == 0 {
         return;
@@ -46,9 +47,9 @@ pub fn render_range(
 
     let lines = (0..track_height).map(|index| {
         let symbol = if (thumb_start..thumb_start + thumb_height).contains(&index) {
-            Span::styled("█", Style::default().fg(Color::Green))
+            Span::styled("█", Style::default().fg(theme.accent_fg()))
         } else {
-            Span::styled("│", Style::default().fg(Color::DarkGray))
+            Span::styled("│", Style::default().fg(theme.border_fg()))
         };
         Line::from(symbol)
     });

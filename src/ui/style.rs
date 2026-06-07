@@ -1,29 +1,31 @@
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Span,
 };
 
 use crate::{
     TreeItem,
     components::{generic::tree, jira::work_item_key},
+    ui::theme::Theme,
 };
 
-pub fn selected_row_style(is_selected: bool) -> Style {
+pub fn selected_row_style(theme: &Theme, is_selected: bool) -> Style {
     if is_selected {
         Style::default()
-            .fg(Color::Green)
+            .fg(theme.selected_fg())
+            .bg(theme.selected_bg())
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     }
 }
 
-pub fn dropdown_option_label_style(is_selected: bool, is_focused: bool) -> Style {
+pub fn dropdown_option_label_style(theme: &Theme, is_selected: bool, is_focused: bool) -> Style {
     if is_focused {
-        selected_row_style(true)
+        selected_row_style(theme, true)
     } else if is_selected {
         Style::default()
-            .fg(Color::White)
+            .fg(theme.selected_alt_fg())
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -31,6 +33,7 @@ pub fn dropdown_option_label_style(is_selected: bool, is_focused: bool) -> Style
 }
 
 pub fn single_select_dropdown_spans(
+    theme: &Theme,
     label: &str,
     filter: &str,
     is_selected: bool,
@@ -50,30 +53,51 @@ pub fn single_select_dropdown_spans(
         + checkmark.chars().count();
     let gap = row_width.saturating_sub(used_width);
 
-    let mut spans = vec![Span::styled(chevron, selected_row_style(is_focused))];
-    spans.extend(highlighted_spans_owned(&label, filter, label_style));
+    let mut spans = vec![Span::styled(chevron, selected_row_style(theme, is_focused))];
+    spans.extend(highlighted_spans_owned(theme, &label, filter, label_style));
     spans.push(Span::raw(" ".repeat(gap + gap_before_checkmark)));
     let checkmark_style = if is_focused {
-        selected_row_style(true)
+        selected_row_style(theme, true)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme.selected_alt_fg())
     };
     spans.push(Span::styled(checkmark, checkmark_style));
     spans
 }
 
-pub fn code_cell_spans<'a>(item: &'a TreeItem, filter: &str, base_style: Style) -> Vec<Span<'a>> {
-    work_item_key::spans(&item.id, &item.kind, filter, base_style.fg(Color::Blue))
+pub fn code_cell_spans<'a>(
+    theme: &Theme,
+    item: &'a TreeItem,
+    filter: &str,
+    base_style: Style,
+) -> Vec<Span<'a>> {
+    work_item_key::spans(
+        theme,
+        &item.id,
+        &item.kind,
+        filter,
+        base_style.fg(theme.key_fg()),
+    )
 }
 
-pub fn highlighted_spans_owned(text: &str, filter: &str, base_style: Style) -> Vec<Span<'static>> {
-    highlighted_spans(text, filter, base_style)
+pub fn highlighted_spans_owned(
+    theme: &Theme,
+    text: &str,
+    filter: &str,
+    base_style: Style,
+) -> Vec<Span<'static>> {
+    highlighted_spans(theme, text, filter, base_style)
         .into_iter()
         .map(|span| Span::styled(span.content.into_owned(), span.style))
         .collect()
 }
 
-pub fn highlighted_spans<'a>(text: &'a str, filter: &str, base_style: Style) -> Vec<Span<'a>> {
+pub fn highlighted_spans<'a>(
+    theme: &Theme,
+    text: &'a str,
+    filter: &str,
+    base_style: Style,
+) -> Vec<Span<'a>> {
     let indices = tree::fuzzy_indices(text, filter);
     if indices.is_empty() {
         return vec![Span::styled(text, base_style)];
@@ -92,7 +116,9 @@ pub fn highlighted_spans<'a>(text: &'a str, filter: &str, base_style: Style) -> 
             matched.next();
         }
         let next_style = if is_match {
-            Style::default().fg(Color::Black).bg(Color::Yellow)
+            Style::default()
+                .fg(theme.highlight_fg())
+                .bg(theme.highlight_bg())
         } else {
             base_style
         };

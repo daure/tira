@@ -1,13 +1,13 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table},
 };
 
 use crate::{
-    App, JiraIssueColumn, TreeRow,
+    App, JiraIssueColumn, KeyBindings, TreeRow,
     components::generic::{
         dropdown::DropdownVisibleOption, filter, filtered_tree::FilteredTreeViewMode,
     },
@@ -17,7 +17,7 @@ use crate::{
 const NERD_COLLAPSED_ICON: &str = "";
 const NERD_EXPANDED_ICON: &str = "";
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
     let [filter_area, content_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -27,7 +27,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .areas(content_area);
 
-    render_filter(frame, filter_area, app);
+    render_filter(frame, filter_area, app, keybindings);
 
     match app.filtered_tree_view_mode() {
         FilteredTreeViewMode::List => render_filtered_tree_list(frame, content_main, app),
@@ -54,17 +54,23 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn render_filtered_tree_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let rows = app.visible_issue_rows();
     if rows.is_empty() {
-        render_empty_list(frame, area);
+        render_empty_list(frame, area, app);
         return;
     }
     let visible_range = app.visible_issue_range(area.height as usize);
     let items = visible_range.clone().map(|row_index| {
         let row = &rows[row_index];
         let item = &app.issues()[row.item_index];
-        let row_style = style::selected_row_style(row_index == app.selected_issue_index());
-        let mut spans = tree_control_spans(row);
+        let row_style =
+            style::selected_row_style(app.theme(), row_index == app.selected_issue_index());
+        let mut spans = tree_control_spans(app.theme(), row);
         spans.push(Span::raw(" "));
-        spans.extend(style::code_cell_spans(item, app.filter(), row_style));
+        spans.extend(style::code_cell_spans(
+            app.theme(),
+            item,
+            app.filter(),
+            row_style,
+        ));
         ListItem::new(Line::from(spans))
     });
 
@@ -74,7 +80,7 @@ fn render_filtered_tree_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let rows = app.visible_issue_rows();
     if rows.is_empty() {
-        render_empty_list(frame, area);
+        render_empty_list(frame, area, app);
         return;
     }
 
@@ -140,7 +146,8 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map(|row_index| {
             let row = &rows[row_index];
             let item = &app.issues()[row.item_index];
-            let row_style = style::selected_row_style(row_index == app.selected_issue_index());
+            let row_style =
+                style::selected_row_style(app.theme(), row_index == app.selected_issue_index());
             let cells = columns
                 .iter()
                 .enumerate()
@@ -148,26 +155,43 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     let is_first = column_index == 0;
                     let spans = match column {
                         JiraIssueColumn::IssueKey => {
-                            style::code_cell_spans(item, app.filter(), row_style)
+                            style::code_cell_spans(app.theme(), item, app.filter(), row_style)
                         }
                         JiraIssueColumn::Summary => {
                             let truncated =
                                 layout::truncate_with_ellipsis(&item.label, description_width);
-                            style::highlighted_spans_owned(&truncated, app.filter(), row_style)
+                            style::highlighted_spans_owned(
+                                app.theme(),
+                                &truncated,
+                                app.filter(),
+                                row_style,
+                            )
                         }
-                        JiraIssueColumn::IssueType => {
-                            style::highlighted_spans(&item.kind, app.filter(), row_style)
-                        }
-                        JiraIssueColumn::Status => {
-                            style::highlighted_spans(&item.status, app.filter(), row_style)
-                        }
+                        JiraIssueColumn::IssueType => style::highlighted_spans(
+                            app.theme(),
+                            &item.kind,
+                            app.filter(),
+                            row_style,
+                        ),
+                        JiraIssueColumn::Status => style::highlighted_spans(
+                            app.theme(),
+                            &item.status,
+                            app.filter(),
+                            row_style,
+                        ),
                         JiraIssueColumn::Field { id, .. } => {
                             item.field_values.get(id).map_or_else(Vec::new, |value| {
-                                style::highlighted_spans(value, app.filter(), row_style)
+                                style::highlighted_spans(
+                                    app.theme(),
+                                    value,
+                                    app.filter(),
+                                    row_style,
+                                )
                             })
                         }
                     };
                     Cell::from(Line::from(with_tree_prefix(
+                        app.theme(),
                         spans,
                         row,
                         is_first && has_expandable,
@@ -193,7 +217,7 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }))
     .style(
         Style::default()
-            .fg(Color::Gray)
+            .fg(app.theme().muted_fg())
             .add_modifier(Modifier::BOLD),
     );
     let widths = columns
@@ -212,10 +236,10 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
-fn render_empty_list(frame: &mut Frame<'_>, area: Rect) {
+fn render_empty_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let empty = Paragraph::new("No issues found.")
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Gray));
+        .style(Style::default().fg(app.theme().muted_fg()));
     frame.render_widget(empty, area);
 }
 fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -240,7 +264,7 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
         width,
         height,
     };
-    let block = dropdown_block("Columns");
+    let block = dropdown_block("Columns", app.theme());
     let inner = block.inner(dropdown_area);
 
     frame.render_widget(Clear, dropdown_area);
@@ -270,11 +294,11 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .areas(filter_area);
 
     frame.render_widget(
-        filter::render_icon(dropdown.filter_state()),
+        filter::render_icon(dropdown.filter_state(), app.theme()),
         filter_icon_area,
     );
     frame.render_widget(
-        filter::render_text(dropdown.filter_state()),
+        filter::render_text(dropdown.filter_state(), app.theme()),
         filter_text_area,
     );
 
@@ -285,21 +309,23 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map(|entry| match entry {
             DropdownVisibleOption::Separator => ListItem::new(Line::from(Span::styled(
                 separator.clone(),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme().border_fg()),
             ))),
-            DropdownVisibleOption::NoResults => no_results_item(),
+            DropdownVisibleOption::NoResults => no_results_item(app.theme()),
             DropdownVisibleOption::Option { index, option } => {
                 let is_focused = index == dropdown.selected_index();
-                let row_style = style::selected_row_style(is_focused);
-                let label_style = style::dropdown_option_label_style(option.selected, is_focused);
+                let row_style = style::selected_row_style(app.theme(), is_focused);
+                let label_style =
+                    style::dropdown_option_label_style(app.theme(), option.selected, is_focused);
                 let icon = if option.selected { "" } else { "" };
                 let icon_style = if dropdown.is_option_toggle_enabled(index) {
-                    Style::default().fg(Color::Rgb(100, 150, 240))
+                    Style::default().fg(app.theme().accent_fg())
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(app.theme().muted_fg())
                 };
                 let mut spans = vec![Span::styled(icon, icon_style), Span::raw(" ")];
                 spans.extend(style::highlighted_spans_owned(
+                    app.theme(),
                     option.label.as_str(),
                     dropdown.filter(),
                     label_style,
@@ -314,6 +340,7 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
         scrollbar_area,
         dropdown.visible_row_count(),
         dropdown.visible_range(options_area.height as usize),
+        app.theme(),
     );
 
     if dropdown.is_filter_focused() {
@@ -321,9 +348,8 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
         frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, filter_text_area.y));
     }
 }
-
-fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let trigger_width = 15;
+fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
+    let trigger_width = 9u16.saturating_add(keybindings.open_columns_label().len() as u16);
     let [filter_area, trigger_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(1), Constraint::Length(trigger_width)])
@@ -333,9 +359,15 @@ fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .areas(filter_area);
 
-    frame.render_widget(filter::render_icon(app.filter_state()), icon_area);
-    frame.render_widget(filter::render_text(app.filter_state()), text_area);
-    frame.render_widget(column_trigger(), trigger_area);
+    frame.render_widget(
+        filter::render_icon(app.filter_state(), app.theme()),
+        icon_area,
+    );
+    frame.render_widget(
+        filter::render_text(app.filter_state(), app.theme()),
+        text_area,
+    );
+    frame.render_widget(column_trigger(keybindings, app.theme()), trigger_area);
 
     if app.is_filter_focused() {
         let cursor_x = text_area.x + app.filter_cursor() as u16;
@@ -343,15 +375,22 @@ fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 }
 
-fn column_trigger() -> Paragraph<'static> {
+fn column_trigger(
+    keybindings: &KeyBindings,
+    theme: &crate::ui::theme::Theme,
+) -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
-        Span::styled("c", Style::default().fg(Color::Rgb(100, 150, 240))),
-        Span::raw("olumns"),
+        Span::styled(
+            keybindings.open_columns_label(),
+            Style::default().fg(theme.accent_fg()),
+        ),
+        Span::raw(" columns"),
     ]))
     .alignment(Alignment::Right)
 }
 
 fn with_tree_prefix<'a>(
+    theme: &crate::ui::theme::Theme,
     mut spans: Vec<Span<'a>>,
     row: &TreeRow,
     include_prefix: bool,
@@ -360,7 +399,7 @@ fn with_tree_prefix<'a>(
         return spans;
     }
 
-    let mut prefixed = tree_control_spans(row)
+    let mut prefixed = tree_control_spans(theme, row)
         .into_iter()
         .map(|span| Span::styled(span.content.into_owned(), span.style))
         .collect::<Vec<_>>();
@@ -369,7 +408,7 @@ fn with_tree_prefix<'a>(
     prefixed
 }
 
-fn tree_control_spans(row: &TreeRow) -> Vec<Span<'static>> {
+fn tree_control_spans(theme: &crate::ui::theme::Theme, row: &TreeRow) -> Vec<Span<'static>> {
     let indent = "  ".repeat(row.depth);
     let indicator = if row.expandable {
         if row.expanded {
@@ -382,29 +421,29 @@ fn tree_control_spans(row: &TreeRow) -> Vec<Span<'static>> {
     };
     vec![
         Span::raw(indent),
-        Span::styled(indicator, Style::default().fg(Color::DarkGray)),
+        Span::styled(indicator, Style::default().fg(theme.border_fg())),
     ]
 }
 
-fn dropdown_block(title: &'static str) -> Block<'static> {
+fn dropdown_block(title: &'static str, theme: &crate::ui::theme::Theme) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(theme.border_fg()))
         .title(Line::from(vec![
             Span::raw(" "),
             Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme.accent_fg())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
         ]))
 }
 
-fn no_results_item() -> ListItem<'static> {
+fn no_results_item(theme: &crate::ui::theme::Theme) -> ListItem<'static> {
     ListItem::new(Line::from(Span::styled(
         "No results",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted_fg()),
     )))
 }

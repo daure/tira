@@ -1,33 +1,26 @@
 use std::{
     io,
+    sync::mpsc,
+    thread,
     time::{Duration, Instant},
 };
 
-use crossterm::{
-    event::{self, Event},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::CrosstermBackend};
-use tira::{App, KeyBindings, config, draw};
+use tira::{
+    App, AppEffect, AppEvent, JiraLoadPurpose, JiraProjectLoadResult, KeyBindings, config, draw,
+    services::{clipboard, jira},
+    tui::Tui,
+    ui::theme,
+};
 
 fn main() -> io::Result<()> {
-    let app = config::load_jira_credentials().map_or_else(App::default, App::from_credentials);
+    let mut app = config::load_jira_credentials().map_or_else(App::default, App::from_credentials);
+    let theme = theme::load_theme().map_err(|error| io::Error::other(error.0))?;
+    app.set_theme(theme);
     let keybindings = KeyBindings::load();
-
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let result = run(&mut terminal, &keybindings, app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    result
+    let mut tui = Tui::enter()?;
+    run(tui.terminal_mut(), &keybindings, app)
 }
 
 fn run(
@@ -36,14 +29,20 @@ fn run(
     app: App,
 ) -> io::Result<()> {
     let mut app = app;
+    let (event_tx, event_rx) = mpsc::channel();
+    spawn_effects(&mut app, &event_tx);
     let mut last_tick = Instant::now();
 
     while app.is_running() {
+        for event in event_rx.try_iter() {
+            app.handle_event(event);
+        }
+        spawn_effects(&mut app, &event_tx);
+
         let dt = last_tick.elapsed();
         last_tick = Instant::now();
         app.tick(dt);
-
-        terminal.draw(|frame| draw(frame, &app))?;
+        terminal.draw(|frame| draw(frame, &app, keybindings))?;
 
         let timeout = if app.is_animating() {
             Duration::from_millis(16)
@@ -55,10 +54,88 @@ fn run(
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 app.handle_key(key, keybindings);
+                spawn_effects(&mut app, &event_tx);
                 last_tick = Instant::now();
             }
         }
     }
 
     Ok(())
+}
+
+fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
+    for effect in app.take_effects() {
+        match effect {
+            AppEffect::LoadJiraProject {
+                request_id,
+                purpose,
+                credentials,
+            } => {
+                let tx = event_tx.clone();
+                thread::spawn(move || {
+                    if matches!(purpose, JiraLoadPurpose::Setup)
+                        && let Err(error) = config::save_jira_credentials(&credentials)
+                    {
+                        let _ = tx.send(AppEvent::CredentialsSaveFailed {
+                            request_id,
+                            purpose,
+                            error: error.to_string(),
+                        });
+                        return;
+                    }
+
+                    let result = load_jira_project_data(&credentials);
+                    if matches!(purpose, JiraLoadPurpose::SwitchProject)
+                        && result.issues.is_ok()
+                        && let Err(error) = config::save_jira_credentials(&credentials)
+                    {
+                        let _ = tx.send(AppEvent::CredentialsSaveFailed {
+                            request_id,
+                            purpose,
+                            error: error.to_string(),
+                        });
+                        return;
+                    }
+
+                    let _ = tx.send(AppEvent::JiraProjectLoaded {
+                        request_id,
+                        purpose,
+                        credentials,
+                        result,
+                    });
+                });
+            }
+            AppEffect::CopyToClipboard(url) => {
+                let tx = event_tx.clone();
+                thread::spawn(move || {
+                    let event = match clipboard::copy_to_clipboard(&url) {
+                        Ok(()) => AppEvent::IssueUrlCopied(url),
+                        Err(error) => AppEvent::IssueUrlCopyFailed { url, error },
+                    };
+                    let _ = tx.send(event);
+                });
+            }
+            AppEffect::SaveTheme(name) => {
+                let tx = event_tx.clone();
+                thread::spawn(move || {
+                    if let Err(error) = theme::save_theme_name(name) {
+                        let _ = tx.send(AppEvent::ThemeSaveFailed(error.0));
+                    }
+                });
+            }
+        }
+    }
+}
+
+fn load_jira_project_data(credentials: &config::JiraCredentials) -> JiraProjectLoadResult {
+    let fields = jira::load_issue_fields(credentials);
+    let projects = jira::load_projects(credentials);
+    let issues = jira::load_project_issues(credentials);
+
+    JiraProjectLoadResult {
+        logs: vec![fields.log.clone(), projects.log.clone(), issues.log.clone()],
+        fields: fields.fields,
+        projects: projects.projects,
+        issues: issues.issues,
+    }
 }

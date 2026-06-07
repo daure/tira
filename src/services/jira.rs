@@ -69,11 +69,18 @@ pub fn load_project_issues(credentials: &JiraCredentials) -> JiraLoadResult {
         ("maxResults", "50"),
         ("fields", "*all"),
     ];
-    let url = Url::parse_with_params(&format!("{site}/rest/api/3/search/jql"), &query)
-        .expect("valid Jira URL");
     let method = "GET";
-    let started_at = Instant::now();
     let timestamp = current_time_string();
+    let url = match Url::parse_with_params(&format!("{site}/rest/api/3/search/jql"), &query) {
+        Ok(url) => url,
+        Err(error) => {
+            return JiraLoadResult {
+                issues: Err(JiraError(format!("Invalid Jira site URL: {error}"))),
+                log: failed_log(timestamp, method, "/search/jql"),
+            };
+        }
+    };
+    let started_at = Instant::now();
 
     let response = reqwest::blocking::Client::new()
         .get(url.clone())
@@ -129,10 +136,18 @@ pub fn load_project_issues(credentials: &JiraCredentials) -> JiraLoadResult {
 
 pub fn load_issue_fields(credentials: &JiraCredentials) -> JiraFieldsResult {
     let site = credentials.site.trim().trim_end_matches('/');
-    let url = Url::parse(&format!("{site}/rest/api/3/field")).expect("valid Jira URL");
     let method = "GET";
-    let started_at = Instant::now();
     let timestamp = current_time_string();
+    let url = match Url::parse(&format!("{site}/rest/api/3/field")) {
+        Ok(url) => url,
+        Err(error) => {
+            return JiraFieldsResult {
+                fields: Err(JiraError(format!("Invalid Jira site URL: {error}"))),
+                log: failed_log(timestamp, method, "/field"),
+            };
+        }
+    };
+    let started_at = Instant::now();
 
     let response = reqwest::blocking::Client::new()
         .get(url.clone())
@@ -192,11 +207,18 @@ pub fn load_issue_fields(credentials: &JiraCredentials) -> JiraFieldsResult {
 pub fn load_projects(credentials: &JiraCredentials) -> JiraProjectsResult {
     let site = credentials.site.trim().trim_end_matches('/');
     let query = [("orderBy", "name")];
-    let url = Url::parse_with_params(&format!("{site}/rest/api/3/project/search"), &query)
-        .expect("valid Jira URL");
     let method = "GET";
-    let started_at = Instant::now();
     let timestamp = current_time_string();
+    let url = match Url::parse_with_params(&format!("{site}/rest/api/3/project/search"), &query) {
+        Ok(url) => url,
+        Err(error) => {
+            return JiraProjectsResult {
+                projects: Err(JiraError(format!("Invalid Jira site URL: {error}"))),
+                log: failed_log(timestamp, method, "/project/search"),
+            };
+        }
+    };
+    let started_at = Instant::now();
 
     let response = reqwest::blocking::Client::new()
         .get(url.clone())
@@ -250,6 +272,16 @@ pub fn load_projects(credentials: &JiraCredentials) -> JiraProjectsResult {
                 duration_ms,
             },
         },
+    }
+}
+
+fn failed_log(timestamp: String, method: &'static str, path: &str) -> CommandLogEntry {
+    CommandLogEntry {
+        timestamp,
+        method,
+        path: path.to_owned(),
+        status: String::from("ERR"),
+        duration_ms: 0,
     }
 }
 

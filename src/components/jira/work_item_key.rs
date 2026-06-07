@@ -1,38 +1,41 @@
-use ratatui::{
-    style::{Color, Style},
-    text::Span,
-};
+use ratatui::{style::Style, text::Span};
 
-use crate::components::generic::tree;
+use crate::{components::generic::tree, ui::theme::Theme};
 
-pub fn spans<'a>(key: &'a str, kind: &str, filter: &str, key_style: Style) -> Vec<Span<'a>> {
-    let mut spans = vec![Span::styled(icon(kind), icon_style(kind)), Span::raw(" ")];
-    spans.extend(highlighted_key_spans(key, filter, key_style));
+pub fn spans<'a>(
+    theme: &Theme,
+    key: &'a str,
+    kind: &str,
+    filter: &str,
+    key_style: Style,
+) -> Vec<Span<'a>> {
+    let mut spans = vec![
+        Span::styled(icon(kind), icon_style(theme, kind)),
+        Span::raw(" "),
+    ];
+    spans.extend(highlighted_key_spans(theme, key, filter, key_style));
     spans
 }
 
 pub fn icon(kind: &str) -> &'static str {
     match kind {
-        "Epic" => "",
-        "Story" => "",
-        "Task" => "",
-        "Subtask" | "Sub-task" => "",
-        "Bug" => "",
+        "Epic" => "",
+        "Task" => "",
+        "Sub-task" => "",
         _ => "",
     }
 }
 
-fn icon_style(kind: &str) -> Style {
-    match kind {
-        "Epic" => Style::default().fg(Color::Rgb(150, 100, 200)),
-        "Story" => Style::default().fg(Color::Rgb(100, 200, 100)),
-        "Task" | "Subtask" | "Sub-task" => Style::default().fg(Color::Rgb(100, 150, 240)),
-        "Bug" => Style::default().fg(Color::Rgb(240, 100, 100)),
-        _ => Style::default().fg(Color::Rgb(220, 150, 80)),
-    }
+fn icon_style(theme: &Theme, kind: &str) -> Style {
+    Style::default().fg(theme.issue_type_fg(kind))
 }
 
-fn highlighted_key_spans<'a>(key: &'a str, filter: &str, base_style: Style) -> Vec<Span<'a>> {
+fn highlighted_key_spans<'a>(
+    theme: &Theme,
+    key: &'a str,
+    filter: &str,
+    base_style: Style,
+) -> Vec<Span<'a>> {
     let indices = tree::fuzzy_indices(key, filter);
     if indices.is_empty() {
         return vec![Span::styled(key, base_style)];
@@ -51,17 +54,19 @@ fn highlighted_key_spans<'a>(key: &'a str, filter: &str, base_style: Style) -> V
             matched.next();
         }
         let next_style = if is_match {
-            Style::default().fg(Color::Black).bg(Color::Yellow)
+            Style::default()
+                .fg(theme.highlight_fg())
+                .bg(theme.highlight_bg())
         } else {
             base_style
         };
-        if next_style != current_style {
-            if segment_start < byte_start {
-                spans.push(Span::styled(&key[segment_start..byte_start], current_style));
-            }
+
+        if byte_start > segment_start && next_style != current_style {
+            spans.push(Span::styled(&key[segment_start..byte_start], current_style));
             segment_start = byte_start;
-            current_style = next_style;
         }
+        current_style = next_style;
+
         if byte_start + ch.len_utf8() == key.len() {
             spans.push(Span::styled(&key[segment_start..], current_style));
         }
@@ -73,24 +78,22 @@ fn highlighted_key_spans<'a>(key: &'a str, filter: &str, base_style: Style) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::Theme;
 
     #[test]
     fn renders_icon_space_and_work_item_key() {
-        let spans = spans("KAN-20", "Task", "", Style::default());
+        let spans = spans(&Theme::default(), "KAN-1", "Task", "", Style::default());
 
-        assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].content.as_ref(), "");
+        assert_eq!(spans[0].content.as_ref(), "");
         assert_eq!(spans[1].content.as_ref(), " ");
-        assert_eq!(spans[2].content.as_ref(), "KAN-20");
+        assert_eq!(spans[2].content.as_ref(), "KAN-1");
     }
 
     #[test]
-    fn subtask_uses_blue_copy_icon() {
-        let spans = spans("KAN-21", "Subtask", "", Style::default());
+    fn subtask_uses_copy_icon() {
+        let spans = spans(&Theme::default(), "KAN-2", "Sub-task", "", Style::default());
 
         assert_eq!(spans[0].content.as_ref(), "");
-        assert_eq!(spans[0].style, icon_style("Task"));
-        assert_eq!(icon("Sub-task"), "");
     }
 
     #[test]

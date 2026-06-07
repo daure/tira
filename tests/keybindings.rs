@@ -1,8 +1,8 @@
 mod support;
 
-use tira::{Action, App, KeyBindings, TabAction};
+use tira::{Action, App, JiraFilteredTreeAction, KeyBindings, TabAction, ui::theme::ThemeName};
 
-use support::{key, shift};
+use support::{ctrl, key, shift};
 
 #[test]
 fn bracket_keys_move_between_tabs() {
@@ -57,6 +57,27 @@ fn configured_tab_keys_override_defaults() {
 }
 
 #[test]
+fn issue_url_yank_binding_is_configurable_separately_from_columns() {
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [tree]
+        open_columns = "c"
+        yank_issue_url = "x"
+        "##,
+    );
+
+    assert_eq!(
+        bindings.action_for(key('x')),
+        Action::JiraFilteredTree(JiraFilteredTreeAction::YankIssueUrlPrefix)
+    );
+    assert_eq!(bindings.action_for(key('y')), Action::None);
+    assert_eq!(
+        bindings.action_for(key('c')),
+        Action::JiraFilteredTree(JiraFilteredTreeAction::OpenColumns)
+    );
+}
+
+#[test]
 fn global_reload_and_command_log_keys_are_mapped() {
     let bindings = KeyBindings::default();
 
@@ -68,4 +89,65 @@ fn global_reload_and_command_log_keys_are_mapped() {
         bindings.global_action_for(shift('l')),
         Some(Action::ToggleCommandLog)
     );
+}
+
+#[test]
+fn configured_open_help_key_opens_and_closes_help_dialog() {
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [global]
+        open_help = "!"
+        "##,
+    );
+    let mut app = App::with_issues(Vec::new());
+
+    app.handle_key(key('!'), &bindings);
+    assert!(app.is_help_open());
+
+    app.handle_key(key('!'), &bindings);
+    assert!(!app.is_help_open());
+}
+
+#[test]
+fn configured_theme_picker_switches_theme() {
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [global]
+        switch_theme = "T"
+        "##,
+    );
+    let mut app = App::with_issues(Vec::new());
+
+    app.handle_key(shift('t'), &bindings);
+    assert!(app.is_theme_dropdown_open());
+
+    app.handle_key(key('j'), &bindings);
+    app.handle_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        &bindings,
+    );
+
+    assert_eq!(app.theme().name(), ThemeName::Catppuccin);
+    assert!(app.status().contains("Catppuccin"));
+}
+
+#[test]
+fn theme_picker_focuses_current_theme() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(Vec::new());
+    app.set_theme(tira::ui::theme::Theme::named(ThemeName::Catppuccin));
+
+    app.handle_key(ctrl('t'), &bindings);
+    app.handle_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        &bindings,
+    );
+
+    assert_eq!(app.theme().name(), ThemeName::Catppuccin);
 }

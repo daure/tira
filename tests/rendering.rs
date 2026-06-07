@@ -1,7 +1,7 @@
 mod support;
 
 use ratatui::{Terminal, backend::TestBackend};
-use tira::{Action, App, TabAction, draw};
+use tira::{Action, App, KeyBindings, TabAction, draw};
 
 use support::{issue, rendered_text};
 
@@ -16,7 +16,9 @@ fn list_render_shows_filtered_tree_as_table_with_columns() {
         None,
     )]);
 
-    terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
 
     let (screen, _bottom_row) = rendered_text(&terminal);
 
@@ -36,11 +38,33 @@ fn command_log_dialog_renders_for_current_session() {
     let mut app = App::with_issues(Vec::new());
     app.dispatch(Action::ToggleCommandLog);
 
-    terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
 
     let (screen, bottom_row) = rendered_text(&terminal);
     assert!(screen.contains("Command log"));
     assert!(bottom_row.contains("NORMAL"));
+}
+
+#[test]
+fn status_bar_uses_configured_help_binding() {
+    let backend = TestBackend::new(120, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let app = App::with_issues(Vec::new());
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [global]
+        open_help = "!"
+        "##,
+    );
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (_, bottom_row) = rendered_text(&terminal);
+    assert!(bottom_row.contains("! help"));
 }
 
 #[test]
@@ -85,7 +109,9 @@ fn filter_render_uses_previous_search_icon_without_colon() {
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let app = App::with_issues(Vec::new());
 
-    terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
 
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains(" Search"));
@@ -103,7 +129,9 @@ fn board_tab_stays_empty_for_now() {
     )]);
     app.dispatch(Action::Tabs(TabAction::Previous));
 
-    terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
 
     let (screen, _) = rendered_text(&terminal);
 
@@ -122,7 +150,9 @@ fn list_render_truncates_long_description_with_ellipsis() {
         None,
     )]);
 
-    terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
     let (screen, _bottom_row) = rendered_text(&terminal);
 
     assert!(screen.contains("..."));
@@ -136,7 +166,7 @@ fn code_column_header_spacing_is_conditional() {
 
     let app_no_exp = App::with_issues(vec![issue("KAN-1", "Task 1", "Task", None)]);
     terminal
-        .draw(|frame| draw(frame, &app_no_exp))
+        .draw(|frame| draw(frame, &app_no_exp, &KeyBindings::default()))
         .expect("draw");
     let (screen_no_exp, _) = rendered_text(&terminal);
     let chars_no_exp: Vec<char> = screen_no_exp.chars().collect();
@@ -148,7 +178,7 @@ fn code_column_header_spacing_is_conditional() {
         issue("KAN-3", "Story 1", "Story", Some("KAN-2")),
     ]);
     terminal
-        .draw(|frame| draw(frame, &app_has_exp))
+        .draw(|frame| draw(frame, &app_has_exp, &KeyBindings::default()))
         .expect("draw");
     let (screen_has_exp, _) = rendered_text(&terminal);
     let chars_has_exp: Vec<char> = screen_has_exp.chars().collect();

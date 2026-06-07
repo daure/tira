@@ -1,6 +1,3 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
-
 use crate::components::generic::{
     dropdown::{DropdownAction, DropdownEvent, DropdownOption, MultiSelectDropdownState},
     filtered_tree::{
@@ -45,8 +42,8 @@ pub enum JiraFilteredTreeAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JiraFilteredTreeEvent {
     Quit,
-    IssueUrlCopied(String),
-    IssueUrlCopyFailed(String),
+    IssueUrlCopyRequested(String),
+    IssueUrlCopyUnavailable(String),
     ColumnsChanged(Vec<JiraIssueColumn>),
 }
 
@@ -118,6 +115,10 @@ impl JiraFilteredTreeState {
 
     pub fn selected_item_index(&self) -> usize {
         self.filtered_tree.selected_item_index()
+    }
+
+    pub fn selected_item_id(&self) -> Option<&str> {
+        self.filtered_tree.selected_item_id()
     }
 
     pub fn scroll_offset(&self) -> usize {
@@ -274,25 +275,15 @@ impl JiraFilteredTreeState {
     fn dispatch_yank_prefix(&mut self) -> Option<JiraFilteredTreeEvent> {
         if self.pending_yank {
             self.pending_yank = false;
-            Some(self.copy_issue_url())
+            match self.selected_issue_url() {
+                Some(url) => Some(JiraFilteredTreeEvent::IssueUrlCopyRequested(url)),
+                None => Some(JiraFilteredTreeEvent::IssueUrlCopyUnavailable(
+                    String::from("No selected issue or Jira site is available."),
+                )),
+            }
         } else {
             self.pending_yank = true;
             None
-        }
-    }
-
-    fn copy_issue_url(&self) -> JiraFilteredTreeEvent {
-        let Some(url) = self.selected_issue_url() else {
-            return JiraFilteredTreeEvent::IssueUrlCopyFailed(String::from(
-                "No selected issue or Jira site is available.",
-            ));
-        };
-
-        match copy_to_clipboard(&url) {
-            Ok(()) => JiraFilteredTreeEvent::IssueUrlCopied(url),
-            Err(error) => {
-                JiraFilteredTreeEvent::IssueUrlCopyFailed(format!("Could not copy {url}: {error}"))
-            }
         }
     }
 
@@ -303,61 +294,6 @@ impl JiraFilteredTreeState {
         let issue = &self.filtered_tree.items()[row.item_index];
 
         Some(format!("{site}/browse/{}", issue.id))
-    }
-}
-
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    for command in [
-        ClipboardCommand::new("wl-copy", &[]),
-        ClipboardCommand::new("xclip", &["-selection", "clipboard"]),
-        ClipboardCommand::new("xsel", &["--clipboard", "--input"]),
-    ] {
-        if command.copy(text).is_ok() {
-            return Ok(());
-        }
-    }
-
-    Err(String::from("no supported clipboard command found"))
-}
-
-struct ClipboardCommand<'a> {
-    program: &'a str,
-    args: &'a [&'a str],
-}
-
-impl<'a> ClipboardCommand<'a> {
-    const fn new(program: &'a str, args: &'a [&'a str]) -> Self {
-        Self { program, args }
-    }
-
-    fn copy(&self, text: &str) -> Result<(), String> {
-        let mut child = Command::new(self.program)
-            .args(self.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| error.to_string())?;
-
-        let Some(mut stdin) = child.stdin.take() else {
-            return Err(String::from("clipboard command did not open stdin"));
-        };
-
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|error| error.to_string())?;
-        drop(stdin);
-
-        child
-            .wait()
-            .map_err(|error| error.to_string())
-            .and_then(|status| {
-                if status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("clipboard command exited with {status}"))
-                }
-            })
     }
 }
 

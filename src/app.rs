@@ -1,6 +1,7 @@
 use crate::{
     components::{
         generic::{
+            dropdown::{DropdownEvent, DropdownOption, MultiSelectDropdownState},
             filter::FilterAction,
             filtered_tree::FilteredTreeViewMode,
             notification::Notification,
@@ -11,11 +12,13 @@ use crate::{
             JiraFilteredTreeAction, JiraFilteredTreeEvent, JiraFilteredTreeState, JiraIssueColumn,
         },
     },
-    config::{self, JiraCredentials},
+    config::JiraCredentials,
     keymap::KeyBindings,
-    services::jira::{self, CommandLogEntry, IssueSummary, JiraLoadResult, ProjectSummary},
+    services::jira::{CommandLogEntry, FieldSummary, IssueSummary, JiraError, ProjectSummary},
+    ui::theme::{Theme, ThemeChoice, ThemeName},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::fmt;
 
 pub const APP_TABS: &[&str] = &["Board", "List", "Timeline", "Filters"];
 const DEFAULT_TAB_INDEX: usize = 1;
@@ -29,19 +32,73 @@ pub enum Action {
     CloseCommandLog,
     ToggleProjectDropdown,
     ProjectDropdown(crate::components::generic::dropdown::DropdownAction),
+    ToggleThemeDropdown,
+    ThemeDropdown(crate::components::generic::dropdown::DropdownAction),
+    OpenHelp,
+    CloseHelp,
     Quit,
     None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppEffect {
+    LoadJiraProject {
+        request_id: u64,
+        purpose: JiraLoadPurpose,
+        credentials: JiraCredentials,
+    },
+    CopyToClipboard(String),
+    SaveTheme(ThemeName),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppEvent {
+    JiraProjectLoaded {
+        request_id: u64,
+        purpose: JiraLoadPurpose,
+        credentials: JiraCredentials,
+        result: JiraProjectLoadResult,
+    },
+    CredentialsSaveFailed {
+        request_id: u64,
+        purpose: JiraLoadPurpose,
+        error: String,
+    },
+    ThemeSaveFailed(String),
+    IssueUrlCopied(String),
+    IssueUrlCopyFailed {
+        url: String,
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JiraLoadPurpose {
+    Initial,
+    Setup,
+    Reload,
+    SwitchProject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JiraProjectLoadResult {
+    pub issues: Result<Vec<IssueSummary>, JiraError>,
+    pub fields: Result<Vec<FieldSummary>, JiraError>,
+    pub projects: Result<Vec<ProjectSummary>, JiraError>,
+    pub logs: Vec<CommandLogEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DialogKind {
     CommandLog,
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DropdownKind {
     JiraColumns,
     ProjectSwitcher,
+    ThemePicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +155,7 @@ impl CredentialField {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CredentialForm {
     site: String,
     email: String,
@@ -106,6 +163,20 @@ pub struct CredentialForm {
     default_project: String,
     active_field: usize,
     cursors: [usize; 4],
+}
+
+impl fmt::Debug for CredentialForm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialForm")
+            .field("site", &self.site)
+            .field("email", &self.email)
+            .field("api_key", &"<redacted>")
+            .field("default_project", &self.default_project)
+            .field("active_field", &self.active_field)
+            .field("cursors", &self.cursors)
+            .finish()
+    }
 }
 
 impl Default for CredentialForm {
@@ -203,9 +274,14 @@ pub struct App {
     command_log_open: bool,
     status: String,
     notifications: Vec<Notification>,
+    help_open: bool,
     projects: Vec<ProjectSummary>,
-    project_dropdown:
-        Option<crate::components::generic::dropdown::MultiSelectDropdownState<ProjectSummary>>,
+    project_dropdown: Option<MultiSelectDropdownState<ProjectSummary>>,
+    theme_dropdown: Option<MultiSelectDropdownState<ThemeChoice>>,
+    pending_effects: Vec<AppEffect>,
+    theme: Theme,
+    active_load_request_id: Option<u64>,
+    next_request_id: u64,
 }
 
 impl Default for App {
@@ -232,6 +308,12 @@ impl App {
             notifications: Vec::new(),
             projects: Vec::new(),
             project_dropdown: None,
+            theme_dropdown: None,
+            help_open: false,
+            pending_effects: Vec::new(),
+            active_load_request_id: None,
+            theme: Theme::default(),
+            next_request_id: 1,
         }
     }
 
@@ -252,6 +334,12 @@ impl App {
             notifications: Vec::new(),
             projects: Vec::new(),
             project_dropdown: None,
+            help_open: false,
+            theme_dropdown: None,
+            pending_effects: Vec::new(),
+            active_load_request_id: None,
+            theme: Theme::default(),
+            next_request_id: 1,
         }
     }
 
@@ -273,33 +361,11 @@ impl App {
     }
 
     pub fn from_credentials(credentials: JiraCredentials) -> Self {
-        let load_result = jira::load_project_issues(&credentials);
-        Self::from_load_result(credentials, load_result)
-    }
-
-    fn from_load_result(credentials: JiraCredentials, load_result: JiraLoadResult) -> Self {
         let mut app = Self::setup("Loading Jira issues...");
-        app.credentials = Some(credentials);
-        app.filtered_tree.set_jira_site(
-            app.credentials
-                .as_ref()
-                .expect("credentials set")
-                .site
-                .clone(),
-        );
-        load_available_columns(&mut app);
-        load_available_projects(&mut app);
-        app.command_log.push(load_result.log);
-        match load_result.issues {
-            Ok(issues) => {
-                app.filtered_tree.set_items(tree_items_from_issues(issues));
-                app.screen = Screen::Main;
-                app.status = String::from("Jira issues loaded");
-            }
-            Err(error) => {
-                app.status = error.0;
-            }
-        }
+        app.screen = Screen::Main;
+        app.credentials = Some(credentials.clone());
+        app.filtered_tree.set_jira_site(credentials.site.clone());
+        app.queue_jira_load(JiraLoadPurpose::Initial, credentials);
         app
     }
 
@@ -323,6 +389,9 @@ impl App {
         if let Some(dropdown) = &mut self.project_dropdown {
             dropdown.tick(dt);
         }
+        if let Some(dropdown) = &mut self.theme_dropdown {
+            dropdown.tick(dt);
+        }
         for notification in &mut self.notifications {
             notification.tick(dt);
         }
@@ -332,10 +401,150 @@ impl App {
 
     pub fn is_animating(&self) -> bool {
         self.filtered_tree.is_animating()
-            || self.project_dropdown.as_ref().is_some_and(
-                crate::components::generic::dropdown::MultiSelectDropdownState::is_animating,
-            )
+            || self
+                .project_dropdown
+                .as_ref()
+                .is_some_and(MultiSelectDropdownState::is_animating)
+            || self
+                .theme_dropdown
+                .as_ref()
+                .is_some_and(MultiSelectDropdownState::is_animating)
             || self.notifications.iter().any(Notification::is_animating)
+    }
+
+    pub fn take_effects(&mut self) -> Vec<AppEffect> {
+        std::mem::take(&mut self.pending_effects)
+    }
+
+    pub fn handle_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::JiraProjectLoaded {
+                request_id,
+                purpose,
+                credentials,
+                result,
+            } => self.apply_jira_project_result(request_id, purpose, credentials, result),
+            AppEvent::CredentialsSaveFailed {
+                request_id,
+                purpose,
+                error,
+            } => {
+                if self.is_current_load(request_id) {
+                    self.active_load_request_id = None;
+                    self.status = match purpose {
+                        JiraLoadPurpose::Setup => {
+                            format!("Could not save Jira credentials: {error}")
+                        }
+                        JiraLoadPurpose::SwitchProject => {
+                            format!("Could not save selected Jira project: {error}")
+                        }
+                        JiraLoadPurpose::Initial | JiraLoadPurpose::Reload => {
+                            format!("Could not save Jira config: {error}")
+                        }
+                    };
+                }
+            }
+            AppEvent::ThemeSaveFailed(error) => self.notifications.push(Notification::error(
+                "Theme not saved",
+                format!("The theme changed for this session, but could not be saved: {error}"),
+            )),
+            AppEvent::IssueUrlCopied(url) => self
+                .notifications
+                .push(Notification::success("Issue URL copied", url)),
+            AppEvent::IssueUrlCopyFailed { url, error } => {
+                self.notifications.push(Notification::error(
+                    "Issue URL not copied",
+                    format!("Could not copy {url}: {error}"),
+                ))
+            }
+        }
+    }
+
+    fn queue_jira_load(&mut self, purpose: JiraLoadPurpose, credentials: JiraCredentials) {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.active_load_request_id = Some(request_id);
+        self.pending_effects.push(AppEffect::LoadJiraProject {
+            request_id,
+            purpose,
+            credentials,
+        });
+    }
+
+    fn is_current_load(&self, request_id: u64) -> bool {
+        self.active_load_request_id == Some(request_id)
+    }
+
+    fn apply_jira_project_result(
+        &mut self,
+        request_id: u64,
+        purpose: JiraLoadPurpose,
+        credentials: JiraCredentials,
+        result: JiraProjectLoadResult,
+    ) {
+        if !self.is_current_load(request_id) {
+            return;
+        }
+        self.active_load_request_id = None;
+        self.command_log.extend(result.logs);
+
+        if let Ok(fields) = result.fields {
+            self.apply_available_columns(fields);
+        } else {
+            self.notifications.push(Notification::error(
+                "Jira fields not loaded",
+                "Issue list is using built-in columns.",
+            ));
+        }
+
+        if let Ok(projects) = result.projects {
+            self.projects = projects;
+        } else {
+            self.notifications.push(Notification::error(
+                "Jira projects not loaded",
+                "Project switcher is unavailable until reload succeeds.",
+            ));
+        }
+
+        match result.issues {
+            Ok(issues) => {
+                self.credentials = Some(credentials);
+                if let Some(credentials) = &self.credentials {
+                    self.filtered_tree.set_jira_site(credentials.site.clone());
+                }
+                self.filtered_tree.set_items(tree_items_from_issues(issues));
+                self.screen = Screen::Main;
+                self.status = match purpose {
+                    JiraLoadPurpose::Initial | JiraLoadPurpose::Reload => {
+                        String::from("Jira issues loaded.")
+                    }
+                    JiraLoadPurpose::Setup => {
+                        String::from("Jira credentials saved and issues loaded.")
+                    }
+                    JiraLoadPurpose::SwitchProject => {
+                        format!("Jira project {} loaded.", self.current_project())
+                    }
+                };
+            }
+            Err(error) => {
+                self.status = error.0;
+            }
+        }
+    }
+
+    fn apply_available_columns(&mut self, fields: Vec<FieldSummary>) {
+        let mut columns = JiraIssueColumn::default_columns();
+        columns.extend(fields.into_iter().filter_map(|field| {
+            let is_known = matches!(
+                field.id.as_str(),
+                "key" | "summary" | "issuetype" | "status"
+            );
+            (!is_known).then_some(JiraIssueColumn::Field {
+                id: field.id,
+                label: field.name,
+            })
+        }));
+        self.filtered_tree.set_available_columns(columns);
     }
 
     pub fn issues(&self) -> &[TreeItem] {
@@ -344,6 +553,10 @@ impl App {
 
     pub fn selected_issue_index(&self) -> usize {
         self.filtered_tree.selected_item_index()
+    }
+
+    pub fn selected_issue_key(&self) -> Option<&str> {
+        self.filtered_tree.selected_item_id()
     }
 
     pub fn issue_scroll_offset(&self) -> usize {
@@ -398,15 +611,24 @@ impl App {
         self.filtered_tree.is_column_dropdown_filter_focused()
     }
 
-    pub fn project_dropdown(
-        &self,
-    ) -> Option<&crate::components::generic::dropdown::MultiSelectDropdownState<ProjectSummary>>
-    {
+    pub fn project_dropdown(&self) -> Option<&MultiSelectDropdownState<ProjectSummary>> {
         self.project_dropdown.as_ref()
     }
 
     pub fn is_project_dropdown_open(&self) -> bool {
         self.project_dropdown.is_some()
+    }
+
+    pub fn theme_dropdown(&self) -> Option<&MultiSelectDropdownState<ThemeChoice>> {
+        self.theme_dropdown.as_ref()
+    }
+
+    pub fn is_theme_dropdown_open(&self) -> bool {
+        self.theme_dropdown.is_some()
+    }
+
+    pub fn is_help_open(&self) -> bool {
+        self.help_open
     }
 
     pub fn is_project_dropdown_filter_focused(&self) -> bool {
@@ -415,10 +637,18 @@ impl App {
         )
     }
 
+    pub fn is_theme_dropdown_filter_focused(&self) -> bool {
+        self.theme_dropdown
+            .as_ref()
+            .is_some_and(MultiSelectDropdownState::is_filter_focused)
+    }
+
     pub fn is_input_focused(&self) -> bool {
-        self.is_filter_focused()
+        self.screen == Screen::Setup
+            || self.is_filter_focused()
             || self.is_column_dropdown_filter_focused()
             || self.is_project_dropdown_filter_focused()
+            || self.is_theme_dropdown_filter_focused()
     }
 
     pub fn command_log_entries(&self) -> &[CommandLogEntry] {
@@ -445,6 +675,14 @@ impl App {
         self.tabs.selected_index()
     }
 
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
     pub fn tabs_view_mode(&self) -> crate::components::generic::tabs::TabsViewMode {
         self.tabs.view_mode()
     }
@@ -457,16 +695,50 @@ impl App {
         let typing = match self.screen {
             Screen::Setup => true,
             Screen::Main if self.project_dropdown.is_some() => true,
+            Screen::Main if self.theme_dropdown.is_some() => true,
             Screen::Main if self.filtered_tree.is_column_dropdown_open() => true,
             Screen::Main if self.filtered_tree.is_filter_focused() => true,
             _ => false,
         };
 
-        #[allow(clippy::collapsible_if)]
+        if self.help_open {
+            self.dispatch(keybindings.help_dialog_action_for(key));
+            return;
+        }
+
+        if self.theme_dropdown.is_some() {
+            let action = if self.is_theme_dropdown_filter_focused() {
+                if key.code == KeyCode::Esc
+                    || key.code == KeyCode::Char('[')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    crate::components::generic::dropdown::DropdownAction::Close
+                } else {
+                    crate::components::generic::dropdown::DropdownAction::Filter(
+                        keybindings.filter_action_for(key),
+                    )
+                }
+            } else if key.code == KeyCode::Esc
+                || key.code == KeyCode::Char('[') && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                crate::components::generic::dropdown::DropdownAction::Close
+            } else {
+                keybindings.theme_dropdown_action_for(key)
+            };
+            self.dispatch(Action::ThemeDropdown(action));
+            return;
+        }
+
         if let Some(action) = keybindings.global_action_for(key) {
             let is_ctrl_q =
                 key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL);
-            if !(typing && matches!(action, Action::Quit) && !is_ctrl_q) {
+            let text_input_should_own_key = self.screen == Screen::Setup
+                && matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT);
+            if !(text_input_should_own_key
+                || typing && matches!(action, Action::Quit) && !is_ctrl_q)
+            {
                 self.dispatch(action);
                 return;
             }
@@ -536,7 +808,11 @@ impl App {
             Action::ReloadList => self.reload_list(),
             Action::ToggleCommandLog => self.toggle_dialog(DialogKind::CommandLog),
             Action::ToggleProjectDropdown => self.toggle_dropdown(DropdownKind::ProjectSwitcher),
+            Action::ToggleThemeDropdown => self.toggle_dropdown(DropdownKind::ThemePicker),
+            Action::OpenHelp => self.open_dialog(DialogKind::Help),
+            Action::CloseHelp => self.close_dialog(DialogKind::Help),
             Action::ProjectDropdown(action) => self.dispatch_project_dropdown(action),
+            Action::ThemeDropdown(action) => self.dispatch_theme_dropdown(action),
             Action::CloseCommandLog => self.close_dialog(DialogKind::CommandLog),
             Action::Quit => self.running = false,
             Action::None => self.filtered_tree.clear_transient_input(),
@@ -641,10 +917,10 @@ impl App {
     fn handle_jira_filtered_tree_event(&mut self, event: JiraFilteredTreeEvent) {
         match event {
             JiraFilteredTreeEvent::Quit => self.running = false,
-            JiraFilteredTreeEvent::IssueUrlCopied(url) => self
-                .notifications
-                .push(Notification::success("Issue URL copied", url)),
-            JiraFilteredTreeEvent::IssueUrlCopyFailed(message) => self
+            JiraFilteredTreeEvent::IssueUrlCopyRequested(url) => {
+                self.pending_effects.push(AppEffect::CopyToClipboard(url));
+            }
+            JiraFilteredTreeEvent::IssueUrlCopyUnavailable(message) => self
                 .notifications
                 .push(Notification::error("Issue URL not copied", message)),
             JiraFilteredTreeEvent::ColumnsChanged(_) => {}
@@ -663,18 +939,21 @@ impl App {
         self.close_overlays();
         match dialog {
             DialogKind::CommandLog => self.command_log_open = true,
+            DialogKind::Help => self.help_open = true,
         }
     }
 
     fn close_dialog(&mut self, dialog: DialogKind) {
         match dialog {
             DialogKind::CommandLog => self.command_log_open = false,
+            DialogKind::Help => self.help_open = false,
         }
     }
 
     fn is_dialog_open(&self, dialog: DialogKind) -> bool {
         match dialog {
             DialogKind::CommandLog => self.command_log_open,
+            DialogKind::Help => self.help_open,
         }
     }
 
@@ -693,6 +972,7 @@ impl App {
                 self.filtered_tree.open_column_dropdown();
             }
             DropdownKind::ProjectSwitcher => self.open_project_dropdown(),
+            DropdownKind::ThemePicker => self.open_theme_dropdown(),
         }
     }
 
@@ -700,6 +980,7 @@ impl App {
         match dropdown {
             DropdownKind::JiraColumns => self.filtered_tree.close_column_dropdown(),
             DropdownKind::ProjectSwitcher => self.project_dropdown = None,
+            DropdownKind::ThemePicker => self.theme_dropdown = None,
         }
     }
 
@@ -707,16 +988,19 @@ impl App {
         match dropdown {
             DropdownKind::JiraColumns => self.filtered_tree.is_column_dropdown_open(),
             DropdownKind::ProjectSwitcher => self.project_dropdown.is_some(),
+            DropdownKind::ThemePicker => self.theme_dropdown.is_some(),
         }
     }
 
     fn close_dropdowns(&mut self) {
         self.project_dropdown = None;
+        self.theme_dropdown = None;
         self.filtered_tree.close_column_dropdown();
     }
 
     fn close_dialogs(&mut self) {
         self.command_log_open = false;
+        self.help_open = false;
     }
 
     fn close_overlays(&mut self) {
@@ -736,18 +1020,61 @@ impl App {
             .projects
             .iter()
             .cloned()
-            .map(
-                |project| crate::components::generic::dropdown::DropdownOption {
-                    selected: project.key == current_project,
-                    label: format!("{}  {}", project.key, project.name),
-                    value: project,
-                },
-            )
+            .map(|project| DropdownOption {
+                selected: project.key == current_project,
+                label: format!("{}  {}", project.key, project.name),
+                value: project,
+            })
             .collect();
         self.project_dropdown = Some(
-            crate::components::generic::dropdown::MultiSelectDropdownState::new(options)
-                .single_select(),
+            MultiSelectDropdownState::new(options)
+                .single_select()
+                .focus_selected(),
         );
+    }
+
+    fn open_theme_dropdown(&mut self) {
+        self.close_overlays();
+        let current_theme = self.theme.name();
+        let options = self
+            .theme
+            .choices()
+            .into_iter()
+            .map(|choice| DropdownOption {
+                selected: choice.name == current_theme,
+                label: choice.label(),
+                value: choice,
+            })
+            .collect();
+        self.theme_dropdown = Some(
+            MultiSelectDropdownState::new(options)
+                .single_select()
+                .focus_selected(),
+        );
+    }
+
+    fn dispatch_theme_dropdown(
+        &mut self,
+        action: crate::components::generic::dropdown::DropdownAction,
+    ) {
+        let Some(dropdown) = &mut self.theme_dropdown else {
+            return;
+        };
+        match dropdown.dispatch(action) {
+            Some(DropdownEvent::Closed) => {
+                self.theme_dropdown = None;
+            }
+            Some(DropdownEvent::Toggled(index)) => {
+                let Some(choice) = dropdown.options().get(index).map(|option| option.value) else {
+                    return;
+                };
+                self.theme_dropdown = None;
+                self.set_theme(self.theme.with_name(choice.name));
+                self.pending_effects.push(AppEffect::SaveTheme(choice.name));
+                self.status = format!("Theme switched to {}.", choice.name.label());
+            }
+            None => {}
+        }
     }
 
     fn dispatch_project_dropdown(
@@ -758,10 +1085,10 @@ impl App {
             return;
         };
         match dropdown.dispatch(action) {
-            Some(crate::components::generic::dropdown::DropdownEvent::Closed) => {
+            Some(DropdownEvent::Closed) => {
                 self.project_dropdown = None;
             }
-            Some(crate::components::generic::dropdown::DropdownEvent::Toggled(index)) => {
+            Some(DropdownEvent::Toggled(index)) => {
                 let Some(project) = dropdown
                     .options()
                     .get(index)
@@ -784,23 +1111,10 @@ impl App {
         if credentials.default_project == project.key {
             return;
         }
-        credentials.default_project = project.key.clone();
-        if let Err(error) = config::save_jira_credentials(&credentials) {
-            self.status = format!("Could not save selected Jira project: {error}");
-            return;
-        }
 
+        credentials.default_project = project.key.clone();
         self.status = format!("Loading Jira project {}...", project.key);
-        let load_result = jira::load_project_issues(&credentials);
-        self.credentials = Some(credentials);
-        self.command_log.push(load_result.log);
-        match load_result.issues {
-            Ok(issues) => {
-                self.filtered_tree.set_items(tree_items_from_issues(issues));
-                self.status = format!("Jira project {} loaded.", project.key);
-            }
-            Err(error) => self.status = error.0,
-        }
+        self.queue_jira_load(JiraLoadPurpose::SwitchProject, credentials);
     }
 
     fn submit_setup(&mut self) {
@@ -809,32 +1123,10 @@ impl App {
             return;
         };
 
-        if let Err(error) = config::save_jira_credentials(&credentials) {
-            self.status = format!("Could not save Jira credentials: {error}");
-            return;
-        }
-
         self.status = String::from("Loading Jira issues...");
-        let load_result = jira::load_project_issues(&credentials);
-        self.credentials = Some(credentials);
-        self.filtered_tree.set_jira_site(
-            self.credentials
-                .as_ref()
-                .expect("credentials set")
-                .site
-                .clone(),
-        );
-        load_available_columns(self);
-        load_available_projects(self);
-        self.command_log.push(load_result.log);
-        match load_result.issues {
-            Ok(issues) => {
-                self.filtered_tree.set_items(tree_items_from_issues(issues));
-                self.screen = Screen::Main;
-                self.status = String::from("Jira credentials saved and issues loaded.");
-            }
-            Err(error) => self.status = error.0,
-        }
+        self.credentials = Some(credentials.clone());
+        self.filtered_tree.set_jira_site(credentials.site.clone());
+        self.queue_jira_load(JiraLoadPurpose::Setup, credentials);
     }
 
     fn reload_list(&mut self) {
@@ -848,48 +1140,7 @@ impl App {
         };
 
         self.status = String::from("Reloading Jira issues...");
-        let load_result = jira::load_project_issues(&credentials);
-        self.command_log.push(load_result.log);
-        match load_result.issues {
-            Ok(issues) => {
-                self.filtered_tree.set_items(tree_items_from_issues(issues));
-                self.status = String::from("Jira issues reloaded.");
-            }
-            Err(error) => self.status = error.0,
-        }
-    }
-}
-
-fn load_available_projects(app: &mut App) {
-    let Some(credentials) = &app.credentials else {
-        return;
-    };
-    let project_result = jira::load_projects(credentials);
-    app.command_log.push(project_result.log);
-    if let Ok(projects) = project_result.projects {
-        app.projects = projects;
-    }
-}
-
-fn load_available_columns(app: &mut App) {
-    let Some(credentials) = &app.credentials else {
-        return;
-    };
-    let field_result = jira::load_issue_fields(credentials);
-    app.command_log.push(field_result.log);
-    if let Ok(fields) = field_result.fields {
-        let mut columns = JiraIssueColumn::default_columns();
-        columns.extend(fields.into_iter().filter_map(|field| {
-            let is_known = matches!(
-                field.id.as_str(),
-                "key" | "summary" | "issuetype" | "status"
-            );
-            (!is_known).then_some(JiraIssueColumn::Field {
-                id: field.id,
-                label: field.name,
-            })
-        }));
-        app.filtered_tree.set_available_columns(columns);
+        self.queue_jira_load(JiraLoadPurpose::Reload, credentials);
     }
 }
 

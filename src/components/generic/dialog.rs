@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::Line,
     widgets::{Block, Borders, Clear},
 };
@@ -12,6 +12,7 @@ pub struct Dialog<'a> {
     width: u16,
     height: u16,
     y_offset: u16,
+    border_style: Style,
 }
 
 impl<'a> Dialog<'a> {
@@ -21,6 +22,7 @@ impl<'a> Dialog<'a> {
             width,
             height,
             y_offset: 1,
+            border_style: Style::new(),
         }
     }
 
@@ -29,11 +31,16 @@ impl<'a> Dialog<'a> {
         self
     }
 
+    pub const fn border_style(mut self, border_style: Style) -> Self {
+        self.border_style = border_style;
+        self
+    }
+
     pub fn render(self, frame: &mut Frame<'_>, area: Rect) -> Rect {
         let dialog_area = self.area(area);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(self.border_style)
             .title(Line::from(self.title));
         let inner = block.inner(dialog_area);
 

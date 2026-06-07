@@ -58,6 +58,21 @@ fn jira_credentials_are_saved_to_config_file() {
 }
 
 #[test]
+fn credential_debug_output_redacts_api_tokens() {
+    let credentials = JiraCredentials {
+        site: String::from("https://example.atlassian.net"),
+        email: String::from("agent@example.com"),
+        api_key: String::from("secret-token"),
+        default_project: String::from("KAN"),
+    };
+
+    let debug = format!("{credentials:?}");
+
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains("secret-token"));
+}
+
+#[test]
 fn setup_screen_accepts_text_entry() {
     let bindings = KeyBindings::default();
     let mut app = App::default();
@@ -75,12 +90,33 @@ fn setup_screen_accepts_text_entry() {
 }
 
 #[test]
+fn setup_text_input_owns_printable_theme_picker_binding() {
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [global]
+        switch_theme = "T"
+        "##,
+    );
+    let mut app = App::default();
+
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT),
+        &bindings,
+    );
+
+    assert!(!app.is_theme_dropdown_open());
+    assert_eq!(app.setup_form().fields()[0].1, "T");
+}
+
+#[test]
 fn first_render_shows_setup_form_and_status_below_frame() {
     let backend = TestBackend::new(80, 12);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let app = App::default();
 
-    terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
 
     let (screen, bottom_row) = rendered_text(&terminal);
 
@@ -91,5 +127,5 @@ fn first_render_shows_setup_form_and_status_below_frame() {
     assert!(screen.contains("Jira connection"));
     assert!(screen.contains("Jira site"));
     assert!(screen.contains("API token"));
-    assert!(bottom_row.contains("NORMAL"));
+    assert!(bottom_row.contains("INSERT"));
 }

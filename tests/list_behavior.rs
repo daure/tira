@@ -121,7 +121,7 @@ fn only_escape_or_ctrl_left_bracket_clear_filter_in_tree() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
     assert_eq!(app.filter(), "");
     assert_eq!(app.visible_issue_rows().len(), 3);
-    assert_eq!(app.selected_issue_index(), 1);
+    assert_eq!(app.selected_issue_key(), Some("KAN-3"));
 
     app.handle_key(key('/'), &bindings);
     app.handle_key(key('c'), &bindings);
@@ -134,7 +134,7 @@ fn only_escape_or_ctrl_left_bracket_clear_filter_in_tree() {
 
     assert_eq!(app.filter(), "");
     assert_eq!(app.visible_issue_rows().len(), 3);
-    assert_eq!(app.selected_issue_index(), 1);
+    assert_eq!(app.selected_issue_key(), Some("KAN-3"));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use std::{env, fs, io, path::PathBuf};
+use std::{env, fmt, fs, io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +8,18 @@ pub struct JiraCredentials {
     pub email: String,
     pub api_key: String,
     pub default_project: String,
+}
+
+impl fmt::Debug for JiraCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JiraCredentials")
+            .field("site", &self.site)
+            .field("email", &self.email)
+            .field("api_key", &"<redacted>")
+            .field("default_project", &self.default_project)
+            .finish()
+    }
 }
 
 impl JiraCredentials {

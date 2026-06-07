@@ -105,6 +105,13 @@ impl<T> MultiSelectDropdownState<T> {
         self
     }
 
+    pub fn focus_selected(mut self) -> Self {
+        if let Some(index) = self.options.iter().position(|option| option.selected) {
+            self.selected_index = index;
+        }
+        self
+    }
+
     pub fn focus_filter(mut self) -> Self {
         self.filter.focus();
         self

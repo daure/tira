@@ -1,8 +1,10 @@
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders},
 };
+
+use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabAction {
@@ -72,12 +74,18 @@ impl TabsState {
     }
 }
 
-pub fn tabbed_frame(tabs: &[&str], active_tab: usize, view_mode: TabsViewMode) -> Block<'static> {
+pub fn tabbed_frame(
+    tabs: &[&str],
+    active_tab: usize,
+    view_mode: TabsViewMode,
+    theme: &Theme,
+) -> Block<'static> {
     match view_mode {
         TabsViewMode::Classic => Block::default().borders(Borders::ALL).title(tab_title_line(
             tabs,
             active_tab,
             TabsViewMode::Classic,
+            theme,
         )),
         TabsViewMode::Minimal => Block::default()
             .borders(Borders::TOP)
@@ -86,11 +94,21 @@ pub fn tabbed_frame(tabs: &[&str], active_tab: usize, view_mode: TabsViewMode) -
                 top_right: ratatui::symbols::line::HORIZONTAL,
                 ..ratatui::symbols::border::PLAIN
             })
-            .title(tab_title_line(tabs, active_tab, TabsViewMode::Minimal)),
+            .title(tab_title_line(
+                tabs,
+                active_tab,
+                TabsViewMode::Minimal,
+                theme,
+            )),
     }
 }
 
-fn tab_title_line(tabs: &[&str], active_tab: usize, view_mode: TabsViewMode) -> Line<'static> {
+fn tab_title_line(
+    tabs: &[&str],
+    active_tab: usize,
+    view_mode: TabsViewMode,
+    theme: &Theme,
+) -> Line<'static> {
     let mut spans = Vec::with_capacity(tabs.len().saturating_mul(2).saturating_add(1));
     match view_mode {
         TabsViewMode::Classic => spans.push(Span::raw(" ")),
@@ -98,15 +116,15 @@ fn tab_title_line(tabs: &[&str], active_tab: usize, view_mode: TabsViewMode) -> 
     }
     for (index, title) in tabs.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled(" - ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(" - ", Style::default().fg(theme.border_fg())));
         }
 
         let style = if index == active_tab {
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.accent_fg())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(theme.muted_fg())
         };
         spans.push(Span::styled((*title).to_owned(), style));
     }
@@ -142,7 +160,8 @@ mod tests {
     #[test]
     fn test_tabbed_frame_rendering() {
         use super::{TabsViewMode, tabbed_frame};
-        let _block_classic = tabbed_frame(TABS, 1, TabsViewMode::Classic);
-        let _block_minimal = tabbed_frame(TABS, 1, TabsViewMode::Minimal);
+        let theme = crate::ui::theme::Theme::default();
+        let _block_classic = tabbed_frame(TABS, 1, TabsViewMode::Classic, &theme);
+        let _block_minimal = tabbed_frame(TABS, 1, TabsViewMode::Minimal, &theme);
     }
 }

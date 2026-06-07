@@ -43,7 +43,7 @@ impl FilteredTreeState {
 
     pub fn set_items(&mut self, items: Vec<TreeItem>) {
         self.tree.set_items(items);
-        self.filter.clear();
+        self.tree.clamp_selection(self.filter.value());
     }
 
     pub fn set_searchable_field_ids(&mut self, field_ids: Option<Vec<String>>) {
@@ -69,6 +69,10 @@ impl FilteredTreeState {
 
     pub fn selected_item_index(&self) -> usize {
         self.tree.selected_row()
+    }
+
+    pub fn selected_item_id(&self) -> Option<&str> {
+        self.tree.selected_item_id()
     }
 
     pub fn scroll_offset(&self) -> usize {
@@ -217,6 +221,30 @@ mod tests {
         assert_eq!(filtered_tree.selected_item_index(), 1);
     }
 
+    #[test]
+    fn refreshed_items_preserve_filter_and_selected_id() {
+        let mut filtered_tree = FilteredTreeState::new(vec![
+            item("ONE", "Checkout", None),
+            item("TWO", "Catalog", None),
+            item("THREE", "Cart", None),
+        ]);
+        filtered_tree.dispatch(FilteredTreeAction::FocusFilter);
+        filtered_tree.dispatch_filter(FilterAction::Text('c'));
+        filtered_tree.dispatch_filter(FilterAction::Text('a'));
+        filtered_tree.dispatch_filter(FilterAction::Exit);
+        filtered_tree.dispatch(FilteredTreeAction::Tree(TreeAction::MoveDown));
+        assert_eq!(filtered_tree.selected_item_id(), Some("THREE"));
+
+        filtered_tree.set_items(vec![
+            item("THREE", "Cart refreshed", None),
+            item("TWO", "Catalog refreshed", None),
+            item("ONE", "Checkout refreshed", None),
+        ]);
+
+        assert_eq!(filtered_tree.filter(), "ca");
+        assert_eq!(filtered_tree.selected_item_id(), Some("THREE"));
+        assert_eq!(filtered_tree.selected_item_index(), 0);
+    }
     fn item(id: &str, label: &str, parent_id: Option<&str>) -> TreeItem {
         TreeItem {
             id: id.to_owned(),

@@ -1,8 +1,10 @@
 use ratatui::{
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
 };
+
+use crate::ui::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterAction {
@@ -130,13 +132,13 @@ impl FilterState {
     }
 }
 
-pub fn render_icon(state: &FilterState) -> Paragraph<'_> {
-    Paragraph::new(Line::from(Span::styled("", prefix_style(state))))
+pub fn render_icon<'a>(state: &FilterState, theme: &Theme) -> Paragraph<'a> {
+    Paragraph::new(Line::from(Span::styled("", prefix_style(state, theme))))
 }
 
-pub fn render_text(state: &FilterState) -> Paragraph<'_> {
+pub fn render_text<'a>(state: &'a FilterState, theme: &Theme) -> Paragraph<'a> {
     let value = if state.value.is_empty() {
-        Span::styled("Search", Style::default().fg(Color::DarkGray))
+        Span::styled("Search", Style::default().fg(theme.muted_fg()))
     } else {
         Span::raw(state.value.as_str())
     };
@@ -144,11 +146,11 @@ pub fn render_text(state: &FilterState) -> Paragraph<'_> {
     Paragraph::new(Line::from(value))
 }
 
-fn prefix_style(state: &FilterState) -> Style {
+fn prefix_style(state: &FilterState, theme: &Theme) -> Style {
     if state.focused {
-        Style::default().fg(Color::Green)
+        Style::default().fg(theme.accent_fg())
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.muted_fg())
     }
 }
 

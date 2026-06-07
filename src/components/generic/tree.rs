@@ -45,6 +45,7 @@ pub struct TreeState {
     items: Vec<TreeItem>,
     expanded_item_ids: HashSet<String>,
     selected_row: usize,
+    selected_item_id: Option<String>,
     scroll: usize,
     pending_goto_prefix: bool,
     scroll_animator: ScrollAnimator,
@@ -53,10 +54,12 @@ pub struct TreeState {
 
 impl TreeState {
     pub fn new(items: Vec<TreeItem>) -> Self {
+        let selected_item_id = items.first().map(|item| item.id.clone());
         Self {
             items,
             expanded_item_ids: HashSet::new(),
             selected_row: 0,
+            selected_item_id,
             scroll: 0,
             pending_goto_prefix: false,
             scroll_animator: ScrollAnimator::new(),
@@ -69,12 +72,27 @@ impl TreeState {
     }
 
     pub fn set_items(&mut self, items: Vec<TreeItem>) {
+        let previous_selection = self.selected_item_id.clone();
         self.items = items;
-        self.expanded_item_ids.clear();
+        let item_ids = self
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<HashSet<_>>();
+        self.expanded_item_ids
+            .retain(|id| item_ids.contains(id.as_str()));
+        self.selected_item_id = previous_selection
+            .filter(|id| self.items.iter().any(|item| item.id == *id))
+            .or_else(|| self.items.first().map(|item| item.id.clone()));
         self.selected_row = 0;
         self.scroll = 0;
         self.pending_goto_prefix = false;
         self.scroll_animator.snap_to(0.0);
+        self.clamp_selection("");
+    }
+
+    pub fn selected_item_id(&self) -> Option<&str> {
+        self.selected_item_id.as_deref()
     }
 
     pub fn set_searchable_field_ids(&mut self, field_ids: Option<Vec<String>>) {
@@ -138,9 +156,9 @@ impl TreeState {
             TreeAction::ToggleExpanded => self.toggle_selected_expansion(filter),
             TreeAction::CollapseAll => self.collapse_all_expansion(filter),
             TreeAction::ExpandAll => self.expand_all_expansion(filter),
-            TreeAction::GoToStart => self.go_to_start(),
+            TreeAction::GoToStart => self.go_to_start(filter),
             TreeAction::GoToEnd => self.go_to_end(filter),
-            TreeAction::GotoPrefix => self.handle_goto_prefix(),
+            TreeAction::GotoPrefix => self.handle_goto_prefix(filter),
         }
     }
 
@@ -149,16 +167,25 @@ impl TreeState {
     }
 
     pub fn clamp_selection(&mut self, filter: &str) {
-        let row_count = self.rows(filter).len();
-        if row_count == 0 {
+        let rows = self.rows(filter);
+        if rows.is_empty() {
             self.selected_row = 0;
+            self.selected_item_id = None;
             self.scroll = 0;
             self.scroll_animator.snap_to(0.0);
-        } else {
-            self.selected_row = self.selected_row.min(row_count - 1);
-            self.scroll = self.scroll.min(row_count - 1);
-            self.scroll_animator.snap_to(self.scroll as f64);
+            return;
         }
+
+        if let Some(selected_id) = self.selected_item_id.as_deref()
+            && let Some(row_index) = self.row_index_for_item_id(&rows, selected_id)
+        {
+            self.selected_row = row_index;
+        } else {
+            self.selected_row = self.selected_row.min(rows.len() - 1);
+            self.sync_selected_item_id(&rows);
+        }
+        self.scroll = self.scroll.min(rows.len() - 1);
+        self.scroll_animator.snap_to(self.scroll as f64);
     }
 
     fn move_by(&mut self, delta: isize, filter: &str) {
@@ -166,6 +193,7 @@ impl TreeState {
         let rows = self.rows(filter);
         if rows.is_empty() {
             self.selected_row = 0;
+            self.selected_item_id = None;
             self.scroll = 0;
             return;
         }
@@ -175,6 +203,7 @@ impl TreeState {
             .selected_row
             .saturating_add_signed(delta)
             .min(max_index);
+        self.sync_selected_item_id(&rows);
         self.scroll = self.selected_row.saturating_sub(HALF_PAGE_STEP as usize);
     }
 
@@ -194,8 +223,9 @@ impl TreeState {
 
         if let Some(parent_row_index) = self.parent_row_index(&rows, row.depth) {
             self.selected_row = parent_row_index;
+            self.sync_selected_item_id(&rows);
         } else {
-            self.go_to_start();
+            self.go_to_start(filter);
         }
     }
 
@@ -220,6 +250,7 @@ impl TreeState {
             .is_some_and(|next| next.depth > row.depth)
         {
             self.selected_row += 1;
+            self.sync_selected_item_id(&rows);
         }
     }
 
@@ -251,33 +282,35 @@ impl TreeState {
         self.expanded_item_ids.extend(self.expandable_item_ids());
         self.clamp_selection(filter);
     }
-
-    fn go_to_start(&mut self) {
+    fn go_to_start(&mut self, filter: &str) {
         self.pending_goto_prefix = false;
         self.selected_row = 0;
         self.scroll = 0;
+        let rows = self.rows(filter);
+        self.sync_selected_item_id(&rows);
     }
 
     fn go_to_end(&mut self, filter: &str) {
         self.pending_goto_prefix = false;
-        let row_count = self.rows(filter).len();
-        if row_count == 0 {
+        let rows = self.rows(filter);
+        if rows.is_empty() {
             self.selected_row = 0;
+            self.selected_item_id = None;
             self.scroll = 0;
         } else {
-            self.selected_row = row_count - 1;
+            self.selected_row = rows.len() - 1;
+            self.sync_selected_item_id(&rows);
             self.scroll = self.selected_row.saturating_sub(HALF_PAGE_STEP as usize);
         }
     }
 
-    fn handle_goto_prefix(&mut self) {
+    fn handle_goto_prefix(&mut self, filter: &str) {
         if self.pending_goto_prefix {
-            self.go_to_start();
+            self.go_to_start(filter);
         } else {
             self.pending_goto_prefix = true;
         }
     }
-
     fn parent_row_index(&self, rows: &[TreeRow], selected_depth: usize) -> Option<usize> {
         if selected_depth == 0 || self.selected_row == 0 {
             return None;
@@ -288,6 +321,16 @@ impl TreeState {
             .rposition(|candidate| candidate.depth + 1 == selected_depth)
     }
 
+    fn row_index_for_item_id(&self, rows: &[TreeRow], item_id: &str) -> Option<usize> {
+        rows.iter()
+            .position(|row| self.items[row.item_index].id == item_id)
+    }
+
+    fn sync_selected_item_id(&mut self, rows: &[TreeRow]) {
+        self.selected_item_id = rows
+            .get(self.selected_row)
+            .map(|row| self.items[row.item_index].id.clone());
+    }
     fn build_rows(&self, filter: &str) -> Vec<TreeRow> {
         let children = self.children_by_parent();
         let index_by_id = self.index_by_id();

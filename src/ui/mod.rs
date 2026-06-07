@@ -5,53 +5,61 @@ mod project_switcher;
 pub(crate) mod scrollbar;
 mod setup;
 pub(crate) mod style;
+pub mod theme;
+mod theme_picker;
 
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::Line,
     widgets::Paragraph,
 };
 
-use crate::{App, Screen, components::jira::issue_list};
+use crate::{App, KeyBindings, Screen, components::jira::issue_list};
 
-pub fn draw(frame: &mut Frame<'_>, app: &App) {
+pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
     let [frame_area, status_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .areas(frame.area());
 
-    let outer = chrome::tabbed_frame(app.active_tab_index(), app.tabs_view_mode());
+    let outer = chrome::tabbed_frame(app.active_tab_index(), app.tabs_view_mode(), app.theme());
     let inner = outer.inner(frame_area);
     frame.render_widget(outer, frame_area);
 
     match app.screen() {
-        Screen::Setup => setup::render(frame, inner, app),
-        Screen::Main => render_main(frame, inner, app),
+        Screen::Setup => setup::render(frame, inner, app, keybindings),
+        Screen::Main => render_main(frame, inner, app, keybindings),
     }
 
     if app.is_command_log_open() {
-        overlays::render_command_log_dialog(frame, inner, app.command_log_entries());
+        overlays::render_command_log_dialog(frame, inner, app);
+    }
+    if app.is_help_open() {
+        overlays::render_help_dialog(frame, inner, app, keybindings);
     }
 
     overlays::render_notifications(frame, inner, app);
 
-    frame.render_widget(chrome::status_bar(app, status_area.width), status_area);
+    frame.render_widget(
+        chrome::status_bar(app, keybindings, status_area.width),
+        status_area,
+    );
+    theme_picker::render(frame, status_area, app);
     project_switcher::render(frame, status_area, app);
 }
-
-fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
     match app.active_tab() {
-        "List" => issue_list::render(frame, area, app),
-        "Board" => render_empty_tab(frame, area, "Board"),
-        tab => render_empty_tab(frame, area, tab),
+        "List" => issue_list::render(frame, area, app, keybindings),
+        "Board" => render_empty_tab(frame, area, "Board", app.theme()),
+        tab => render_empty_tab(frame, area, tab, app.theme()),
     }
 }
 
-fn render_empty_tab(frame: &mut Frame<'_>, area: Rect, tab: &str) {
+fn render_empty_tab(frame: &mut Frame<'_>, area: Rect, tab: &str, theme: &theme::Theme) {
     let body = Paragraph::new(Line::from(tab))
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Gray));
+        .style(Style::default().fg(theme.muted_fg()));
     frame.render_widget(body, area);
 }
