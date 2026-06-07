@@ -72,7 +72,6 @@ fn project_switcher_search_uses_filter_input_when_focused() {
     );
 
     open_project_switcher(&mut app, &bindings);
-    app.handle_key(key('/'), &bindings);
     app.handle_key(key('o'), &bindings);
     app.handle_key(key('p'), &bindings);
 

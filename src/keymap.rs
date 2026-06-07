@@ -184,7 +184,7 @@ impl Default for KeyBindings {
             leader: KeySpec::code_with_modifiers(KeyCode::Char('x'), KeyModifiers::CONTROL),
             leader_command_log: KeySpec::plain('c'),
             leader_project: KeySpec::plain('p'),
-            leader_theme: KeySpec::shifted('t'),
+            leader_theme: KeySpec::plain('s'),
             leader_board: KeySpec::plain('b'),
             leader_list: KeySpec::plain('l'),
             leader_timeline: KeySpec::plain('t'),
@@ -806,6 +806,7 @@ impl KeyBindings {
             match key.code {
                 KeyCode::Left => FilterAction::MoveCursorLeft,
                 KeyCode::Right => FilterAction::MoveCursorRight,
+                KeyCode::Delete => FilterAction::Delete,
                 _ => FilterAction::None,
             }
         } else {
@@ -865,6 +866,7 @@ impl KeyBindings {
             match key.code {
                 KeyCode::Left => SetupAction::MoveCursorLeft,
                 KeyCode::Right => SetupAction::MoveCursorRight,
+                KeyCode::Delete => SetupAction::Delete,
                 _ => SetupAction::None,
             }
         } else {

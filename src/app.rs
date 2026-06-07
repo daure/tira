@@ -160,6 +160,7 @@ pub enum SetupAction {
     MoveCursorRight,
     DeleteToEnd,
     DeleteToStart,
+    Delete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -877,7 +878,15 @@ impl App {
             }
             Screen::Main if self.filtered_tree.is_column_dropdown_open() => {
                 let action = if self.filtered_tree.is_column_dropdown_filter_focused() {
-                    if key.code == KeyCode::Esc
+                    let is_ctrl_space = key.code == KeyCode::Char(' ')
+                        && key.modifiers.contains(KeyModifiers::CONTROL);
+                    let is_ctrl_enter =
+                        key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL);
+                    if is_ctrl_space || is_ctrl_enter {
+                        JiraFilteredTreeAction::Dropdown(
+                            crate::components::generic::dropdown::DropdownAction::ToggleSelected,
+                        )
+                    } else if key.code == KeyCode::Esc
                         || key.code == KeyCode::Char('[')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
@@ -1274,6 +1283,13 @@ impl App {
         ) -> crate::components::generic::dropdown::DropdownAction,
     ) -> crate::components::generic::dropdown::DropdownAction {
         if filter_focused {
+            let is_ctrl_space =
+                key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL);
+            let is_ctrl_enter =
+                key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL);
+            if is_ctrl_space || is_ctrl_enter {
+                return crate::components::generic::dropdown::DropdownAction::ToggleSelected;
+            }
             if key.code == KeyCode::Enter {
                 return crate::components::generic::dropdown::DropdownAction::Filter(
                     FilterAction::Submit,
@@ -1395,6 +1411,11 @@ impl App {
                 let val = self.setup.active_value_mut();
                 input::delete_to_start(val, &mut cursor);
                 self.setup.cursors[field_idx] = cursor;
+            }
+            SetupAction::Delete => {
+                let cursor = self.setup.cursors[field_idx];
+                let val = self.setup.active_value_mut();
+                input::delete_forwards(val, cursor);
             }
         }
     }
@@ -1539,7 +1560,11 @@ impl App {
                 value: action,
             })
             .collect();
-        self.quick_switcher = Some(MultiSelectDropdownState::new(options).single_select());
+        self.quick_switcher = Some(
+            MultiSelectDropdownState::new(options)
+                .single_select()
+                .with_filter_focused(),
+        );
     }
 
     fn close_overlays(&mut self) {
@@ -1568,7 +1593,8 @@ impl App {
         self.project_dropdown = Some(
             MultiSelectDropdownState::new(options)
                 .single_select()
-                .focus_selected(),
+                .focus_selected()
+                .with_filter_focused(),
         );
     }
 
@@ -1588,7 +1614,8 @@ impl App {
         self.theme_dropdown = Some(
             MultiSelectDropdownState::new(options)
                 .single_select()
-                .focus_selected(),
+                .focus_selected()
+                .with_filter_focused(),
         );
         self.theme_preview_origin = Some(self.theme.clone());
     }

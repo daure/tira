@@ -95,7 +95,7 @@ fn leader_keys_are_mapped() {
     assert_eq!(bindings.leader_action_for(key('t')), Action::GoToTimeline);
     assert_eq!(bindings.leader_action_for(key('f')), Action::GoToFilters);
     assert_eq!(
-        bindings.leader_action_for(shift('t')),
+        bindings.leader_action_for(key('s')),
         Action::ToggleThemeDropdown
     );
     assert_eq!(
@@ -260,11 +260,9 @@ fn ctrl_j_and_ctrl_k_navigate_dropdown_options_while_filter_is_focused() {
 
     // Open theme picker (which has a search/filter input)
     app.handle_key(ctrl('x'), &bindings);
-    app.handle_key(shift('t'), &bindings);
+    app.handle_key(key('s'), &bindings);
     assert!(app.is_theme_dropdown_open());
 
-    // Focus the dropdown filter input
-    app.handle_key(key('/'), &bindings);
     assert!(app.is_theme_dropdown_filter_focused());
 
     let dropdown = app.theme_dropdown().expect("theme dropdown");
@@ -306,11 +304,14 @@ fn configured_theme_picker_switches_theme() {
     app.handle_key(shift('t'), &bindings);
     assert!(app.is_theme_dropdown_open());
 
-    app.handle_key(key('j'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        &bindings,
+    );
     app.handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
+            crossterm::event::KeyModifiers::CONTROL,
         ),
         &bindings,
     );
@@ -326,11 +327,11 @@ fn theme_picker_focuses_current_theme() {
     app.set_theme(tira::ui::theme::Theme::named(ThemeName::Catppuccin));
 
     app.handle_key(ctrl('x'), &bindings);
-    app.handle_key(shift('t'), &bindings);
+    app.handle_key(key('s'), &bindings);
     app.handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
+            crossterm::event::KeyModifiers::CONTROL,
         ),
         &bindings,
     );
@@ -364,10 +365,20 @@ fn theme_picker_previews_focus_and_reverts_when_closed() {
     let mut app = App::with_issues(Vec::new());
 
     app.handle_key(ctrl('x'), &bindings);
-    app.handle_key(shift('t'), &bindings);
-    app.handle_key(key('j'), &bindings);
+    app.handle_key(key('s'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        &bindings,
+    );
     assert_eq!(app.theme().name(), ThemeName::Catppuccin);
 
+    app.handle_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        &bindings,
+    );
     app.handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Esc,
@@ -389,7 +400,7 @@ fn quick_switcher_opens_command_log_and_jumps_to_tabs() {
     app.handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
+            crossterm::event::KeyModifiers::CONTROL,
         ),
         &bindings,
     );
@@ -398,12 +409,15 @@ fn quick_switcher_opens_command_log_and_jumps_to_tabs() {
     app.dispatch(Action::CloseCommandLog);
     app.handle_key(ctrl('k'), &bindings);
     for _ in 0..6 {
-        app.handle_key(key('j'), &bindings);
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            &bindings,
+        );
     }
     app.handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
+            crossterm::event::KeyModifiers::CONTROL,
         ),
         &bindings,
     );
@@ -442,14 +456,13 @@ fn quick_switcher_filter_accepts_text_after_focus() {
     let mut app = App::with_issues(Vec::new());
 
     app.handle_key(ctrl('k'), &bindings);
-    app.handle_key(key('/'), &bindings);
     assert!(app.is_quick_switcher_filter_focused());
     app.handle_key(key('b'), &bindings);
     app.handle_key(key('o'), &bindings);
     app.handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
+            crossterm::event::KeyModifiers::CONTROL,
         ),
         &bindings,
     );

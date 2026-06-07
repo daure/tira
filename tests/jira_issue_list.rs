@@ -18,7 +18,8 @@ fn column_picker_yank_and_expansion_keys_apply_to_issue_list() {
     app.handle_key(key('c'), &bindings);
     assert!(app.is_column_dropdown_open());
     assert!(app.notifications().is_empty());
-    app.handle_key(key('c'), &bindings);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
     assert!(!app.is_column_dropdown_open());
     app.handle_key(key('c'), &bindings);
     assert!(app.is_column_dropdown_open());
@@ -33,9 +34,12 @@ fn column_picker_yank_and_expansion_keys_apply_to_issue_list() {
     app.tick(std::time::Duration::from_secs(3));
     assert!(app.notifications().is_empty());
     app.handle_key(key('c'), &bindings);
-    app.handle_key(key('j'), &bindings);
     app.handle_key(
-        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        &bindings,
+    );
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
         &bindings,
     );
     assert!(app.is_column_dropdown_open());
@@ -43,6 +47,7 @@ fn column_picker_yank_and_expansion_keys_apply_to_issue_list() {
         !app.visible_issue_columns()
             .contains(&tira::JiraIssueColumn::Summary)
     );
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
 
     app.handle_key(shift('z'), &bindings);

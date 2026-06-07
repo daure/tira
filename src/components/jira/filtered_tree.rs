@@ -263,8 +263,11 @@ impl JiraFilteredTreeState {
                 value: column,
             })
             .collect();
-        self.column_dropdown =
-            Some(MultiSelectDropdownState::new(options).require_at_least_one_selection());
+        self.column_dropdown = Some(
+            MultiSelectDropdownState::new(options)
+                .require_at_least_one_selection()
+                .with_filter_focused(),
+        );
     }
 
     fn sync_visible_columns(&mut self) {

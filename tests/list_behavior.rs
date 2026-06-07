@@ -227,6 +227,29 @@ fn ctrl_j_and_ctrl_k_navigate_list_while_filter_is_focused() {
 }
 
 #[test]
+fn delete_key_deletes_character_after_cursor_in_filter() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![issue("KAN-1", "Catalog work", "Task", None)]);
+
+    // Focus and type "cat"
+    app.handle_key(key('/'), &bindings);
+    app.handle_key(key('c'), &bindings);
+    app.handle_key(key('a'), &bindings);
+    app.handle_key(key('t'), &bindings);
+    assert_eq!(app.filter(), "cat");
+
+    // Move cursor left: "ca|t"
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &bindings);
+
+    // Press delete key: should delete 't' -> "ca"
+    app.handle_key(
+        KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+        &bindings,
+    );
+    assert_eq!(app.filter(), "ca");
+}
+
+#[test]
 fn ctrl_slash_inside_filter_only_exits_focus() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(vec![

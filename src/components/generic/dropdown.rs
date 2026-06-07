@@ -82,6 +82,11 @@ impl<T> MultiSelectDropdownState<T> {
         }
     }
 
+    pub fn with_filter_focused(mut self) -> Self {
+        self.filter.focus();
+        self
+    }
+
     pub fn require_at_least_one_selection(mut self) -> Self {
         self.at_least_one_selection_required = true;
         self
@@ -314,9 +319,6 @@ impl<T> MultiSelectDropdownState<T> {
                 None
             }
             DropdownAction::ToggleSelected => {
-                if self.filter.is_focused() {
-                    return None;
-                }
                 self.pending_goto_prefix = false;
                 let toggled_index = self.selected_index;
                 if !self

@@ -131,7 +131,7 @@ fn setup_leader_theme_picker_binding_opens_picker() {
         &bindings,
     );
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
         &bindings,
     );
 
