@@ -151,6 +151,53 @@ fn column_dropdown_separator_connects_to_border() {
 }
 
 #[test]
+fn duplicate_field_labels_append_field_id_to_differentiate() {
+    let backend = TestBackend::new(120, 20);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let credentials = JiraCredentials {
+        site: String::from("https://example.atlassian.net"),
+        email: String::from("test@example.com"),
+        api_key: String::from("test"),
+        default_project: String::from("KAN"),
+    };
+    let mut app = App::from_credentials(credentials.clone());
+    let AppEffect::LoadJiraProject { request_id, .. } = app.take_effects().remove(0) else {
+        panic!("expected Jira load effect");
+    };
+    app.handle_event(AppEvent::JiraProjectLoaded {
+        request_id,
+        purpose: JiraLoadPurpose::Initial,
+        credentials,
+        result: JiraProjectLoadResult {
+            issues: Ok(Vec::new()),
+            fields: Ok(vec![
+                FieldSummary {
+                    id: String::from("project"),
+                    name: String::from("Project"),
+                },
+                FieldSummary {
+                    id: String::from("customfield_10001"),
+                    name: String::from("Project"),
+                },
+            ]),
+            projects: Ok(Vec::new()),
+            logs: Vec::new(),
+        },
+    });
+
+    app.handle_key(key('c'), &KeyBindings::default());
+    app.handle_key(key(' '), &KeyBindings::default());
+
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("Project (project)"));
+    assert!(screen.contains("Project (customfield_10001)"));
+}
+
+#[test]
 fn command_log_opens_even_while_filter_is_focused() {
     let bindings = tira::KeyBindings::default();
     let mut app = App::with_issues(Vec::new());

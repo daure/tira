@@ -600,15 +600,34 @@ impl App {
 
     fn apply_available_columns(&mut self, fields: Vec<FieldSummary>) {
         let mut columns = JiraIssueColumn::default_columns();
-        columns.extend(fields.into_iter().filter_map(|field| {
+        let mut name_counts = std::collections::HashMap::new();
+        name_counts.insert(String::from("Key"), 1);
+        name_counts.insert(String::from("Summary"), 1);
+        name_counts.insert(String::from("Work type"), 1);
+        name_counts.insert(String::from("Status"), 1);
+
+        let mut candidate_fields = Vec::new();
+        for field in fields {
             let is_known = matches!(
                 field.id.as_str(),
                 "key" | "summary" | "issuetype" | "status"
             );
-            (!is_known).then_some(JiraIssueColumn::Field {
+            if !is_known {
+                *name_counts.entry(field.name.clone()).or_insert(0) += 1;
+                candidate_fields.push(field);
+            }
+        }
+
+        columns.extend(candidate_fields.into_iter().map(|field| {
+            let label = if name_counts.get(&field.name).copied().unwrap_or(0) > 1 {
+                format!("{} ({})", field.name, field.id)
+            } else {
+                field.name
+            };
+            JiraIssueColumn::Field {
                 id: field.id,
-                label: field.name,
-            })
+                label,
+            }
         }));
         self.filtered_tree.set_available_columns(columns);
     }
