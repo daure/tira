@@ -804,13 +804,18 @@ impl App {
                 || self.is_project_dropdown_filter_focused()
                 || self.is_theme_dropdown_filter_focused()
                 || self.is_quick_switcher_filter_focused();
+            let is_navigation_shortcut = (key.code == KeyCode::Char('j')
+                || key.code == KeyCode::Char('k'))
+                && key.modifiers.contains(KeyModifiers::CONTROL);
             let printable_text = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT);
             let is_ctrl_q =
                 key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL);
             let reserved_input_action = matches!(action, Action::OpenHelp);
-            if !(focused_text_input && printable_text && !reserved_input_action
+            if !(focused_text_input
+                && (printable_text || is_navigation_shortcut)
+                && !reserved_input_action
                 || typing && matches!(action, Action::Quit) && !is_ctrl_q)
             {
                 self.dispatch(action);
@@ -875,7 +880,26 @@ impl App {
                 self.dispatch(Action::JiraFilteredTree(action));
             }
             Screen::Main if self.filtered_tree.is_filter_focused() => {
-                self.dispatch_filter(keybindings.filter_action_for(key))
+                let action = keybindings.filter_action_for(key);
+                if action == FilterAction::MoveSelectionUp {
+                    self.dispatch(Action::JiraFilteredTree(
+                        JiraFilteredTreeAction::FilteredTree(
+                            crate::components::generic::filtered_tree::FilteredTreeAction::Tree(
+                                crate::components::generic::tree::TreeAction::MoveUp,
+                            ),
+                        ),
+                    ));
+                } else if action == FilterAction::MoveSelectionDown {
+                    self.dispatch(Action::JiraFilteredTree(
+                        JiraFilteredTreeAction::FilteredTree(
+                            crate::components::generic::filtered_tree::FilteredTreeAction::Tree(
+                                crate::components::generic::tree::TreeAction::MoveDown,
+                            ),
+                        ),
+                    ));
+                } else {
+                    self.dispatch_filter(action);
+                }
             }
             Screen::Main => self.dispatch(keybindings.jira_filtered_tree_action_for(key)),
         }

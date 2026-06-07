@@ -770,7 +770,8 @@ impl KeyBindings {
                 KeyCode::Delete => return FilterAction::DeleteWordRight,
                 KeyCode::Char('f') => return FilterAction::MoveCursorRight,
                 KeyCode::Char('b') => return FilterAction::MoveCursorLeft,
-                KeyCode::Char('k') => return FilterAction::DeleteToEnd,
+                KeyCode::Char('k') => return FilterAction::MoveSelectionUp,
+                KeyCode::Char('j') => return FilterAction::MoveSelectionDown,
                 KeyCode::Char('u') => return FilterAction::DeleteToStart,
                 _ => {}
             }

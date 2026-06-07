@@ -116,7 +116,7 @@ impl FilteredTreeState {
             }
             FilteredTreeAction::ClearFilter => {
                 self.filter.clear();
-                self.tree.clamp_selection(self.filter.value());
+                self.tree.select_row(0, self.filter.value());
             }
         }
     }
@@ -128,7 +128,11 @@ impl FilteredTreeState {
 
         let event = self.filter.dispatch(action);
         if matches!(event, Some(FilterEvent::Changed | FilterEvent::Blurred)) {
-            self.tree.clamp_selection(self.filter.value());
+            if self.filter.value().is_empty() {
+                self.tree.select_row(0, self.filter.value());
+            } else {
+                self.tree.clamp_selection(self.filter.value());
+            }
         }
         None
     }
@@ -212,7 +216,7 @@ mod tests {
         assert_eq!(filtered_tree.filter(), "");
         assert!(!filtered_tree.is_filter_focused());
         assert_eq!(filtered_tree.visible_rows().len(), 2);
-        assert_eq!(filtered_tree.selected_item_index(), 1);
+        assert_eq!(filtered_tree.selected_item_index(), 0);
     }
 
     #[test]

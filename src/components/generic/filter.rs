@@ -25,6 +25,8 @@ pub enum FilterAction {
     MoveCursorRight,
     DeleteToEnd,
     DeleteToStart,
+    MoveSelectionUp,
+    MoveSelectionDown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +85,7 @@ impl FilterState {
                 Some(FilterEvent::Blurred)
             }
             FilterAction::Quit | FilterAction::None => None,
+            FilterAction::MoveSelectionUp | FilterAction::MoveSelectionDown => None,
             FilterAction::MoveCursorStart => {
                 self.cursor = 0;
                 None

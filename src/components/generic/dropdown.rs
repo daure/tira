@@ -243,6 +243,14 @@ impl<T> MultiSelectDropdownState<T> {
                     self.filter.clear_focus();
                     return None;
                 }
+                if action == FilterAction::MoveSelectionUp {
+                    self.move_selection(-1);
+                    return None;
+                }
+                if action == FilterAction::MoveSelectionDown {
+                    self.move_selection(1);
+                    return None;
+                }
                 let event = self.filter.dispatch(action);
                 if matches!(event, Some(FilterEvent::Changed)) {
                     self.select_first_visible_option();

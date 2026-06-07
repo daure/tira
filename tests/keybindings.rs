@@ -1,5 +1,6 @@
 mod support;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tira::{
     Action, App, JiraFilteredTreeAction, KeyBindings, Screen, TabAction, ui::theme::ThemeName,
 };
@@ -250,6 +251,42 @@ fn configured_open_help_key_opens_and_closes_help_dialog() {
 
     app.handle_key(key('!'), &bindings);
     assert!(!app.is_help_open());
+}
+
+#[test]
+fn ctrl_j_and_ctrl_k_navigate_dropdown_options_while_filter_is_focused() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(Vec::new());
+
+    // Open theme picker (which has a search/filter input)
+    app.handle_key(ctrl('x'), &bindings);
+    app.handle_key(shift('t'), &bindings);
+    assert!(app.is_theme_dropdown_open());
+
+    // Focus the dropdown filter input
+    app.handle_key(key('/'), &bindings);
+    assert!(app.is_theme_dropdown_filter_focused());
+
+    let dropdown = app.theme_dropdown().expect("theme dropdown");
+    assert_eq!(dropdown.selected_index(), 0);
+
+    // Ctrl+J should move selection down
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        &bindings,
+    );
+    assert!(app.is_theme_dropdown_filter_focused());
+    let dropdown = app.theme_dropdown().expect("theme dropdown");
+    assert_eq!(dropdown.selected_index(), 1);
+
+    // Ctrl+K should move selection up
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        &bindings,
+    );
+    assert!(app.is_theme_dropdown_filter_focused());
+    let dropdown = app.theme_dropdown().expect("theme dropdown");
+    assert_eq!(dropdown.selected_index(), 0);
 }
 
 #[test]

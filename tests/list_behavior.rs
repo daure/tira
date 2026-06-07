@@ -189,6 +189,44 @@ fn filter_enter_blurs_and_keeps_current_clamped_selection() {
 }
 
 #[test]
+fn ctrl_j_and_ctrl_k_navigate_list_while_filter_is_focused() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![
+        issue("KAN-1", "Checkout work", "Task", None),
+        issue("KAN-2", "Catalog work", "Task", None),
+        issue("KAN-3", "Cart polish", "Task", None),
+    ]);
+
+    // Focus the filter
+    app.handle_key(key('/'), &bindings);
+    assert!(app.is_filter_focused());
+    assert_eq!(app.selected_issue_index(), 0);
+
+    // Ctrl+J should move selection down
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        &bindings,
+    );
+    assert!(app.is_filter_focused());
+    assert_eq!(app.selected_issue_index(), 1);
+
+    // Ctrl+J again
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        &bindings,
+    );
+    assert_eq!(app.selected_issue_index(), 2);
+
+    // Ctrl+K should move selection up
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        &bindings,
+    );
+    assert!(app.is_filter_focused());
+    assert_eq!(app.selected_issue_index(), 1);
+}
+
+#[test]
 fn ctrl_slash_inside_filter_only_exits_focus() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(vec![
@@ -236,7 +274,7 @@ fn only_escape_or_ctrl_left_bracket_clear_filter_in_tree() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
     assert_eq!(app.filter(), "");
     assert_eq!(app.visible_issue_rows().len(), 3);
-    assert_eq!(app.selected_issue_key(), Some("KAN-3"));
+    assert_eq!(app.selected_issue_key(), Some("KAN-1"));
 
     app.handle_key(key('/'), &bindings);
     app.handle_key(key('c'), &bindings);
@@ -249,7 +287,7 @@ fn only_escape_or_ctrl_left_bracket_clear_filter_in_tree() {
 
     assert_eq!(app.filter(), "");
     assert_eq!(app.visible_issue_rows().len(), 3);
-    assert_eq!(app.selected_issue_key(), Some("KAN-3"));
+    assert_eq!(app.selected_issue_key(), Some("KAN-1"));
 }
 
 #[test]
