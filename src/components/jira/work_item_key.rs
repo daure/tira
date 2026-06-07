@@ -1,6 +1,9 @@
 use ratatui::{style::Style, text::Span};
 
-use crate::{components::generic::tree, ui::theme::Theme};
+use crate::{
+    components::generic::tree,
+    ui::theme::{Theme, prefers_plain_icons},
+};
 
 pub fn spans<'a>(
     theme: &Theme,
@@ -18,10 +21,23 @@ pub fn spans<'a>(
 }
 
 pub fn icon(kind: &str) -> &'static str {
+    if prefers_plain_icons() {
+        return match kind {
+            "Epic" => "⚡",
+            "Story" => "▣",
+            "Task" => "✓",
+            "Subtask" | "Sub-task" => "⧉",
+            "Bug" => "!",
+            _ => "•",
+        };
+    }
+
     match kind {
-        "Epic" => "",
-        "Task" => "",
-        "Sub-task" => "",
+        "Epic" => "",
+        "Story" => "",
+        "Task" => "",
+        "Subtask" | "Sub-task" => "",
+        "Bug" => "",
         _ => "",
     }
 }
@@ -84,16 +100,17 @@ mod tests {
     fn renders_icon_space_and_work_item_key() {
         let spans = spans(&Theme::default(), "KAN-1", "Task", "", Style::default());
 
-        assert_eq!(spans[0].content.as_ref(), "");
+        assert_eq!(spans[0].content.as_ref(), "");
         assert_eq!(spans[1].content.as_ref(), " ");
         assert_eq!(spans[2].content.as_ref(), "KAN-1");
     }
 
     #[test]
     fn subtask_uses_copy_icon() {
-        let spans = spans(&Theme::default(), "KAN-2", "Sub-task", "", Style::default());
+        let spans = spans(&Theme::default(), "KAN-2", "Subtask", "", Style::default());
 
         assert_eq!(spans[0].content.as_ref(), "");
+        assert_eq!(icon("Sub-task"), "");
     }
 
     #[test]

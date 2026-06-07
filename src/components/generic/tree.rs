@@ -103,6 +103,19 @@ impl TreeState {
         self.selected_row
     }
 
+    pub fn select_row(&mut self, row: usize, filter: &str) {
+        let rows = self.rows(filter);
+        if rows.is_empty() {
+            self.selected_row = 0;
+            self.selected_item_id = None;
+            return;
+        }
+        self.selected_row = row.min(rows.len() - 1);
+        self.sync_selected_item_id(&rows);
+        self.scroll = self.selected_row.saturating_sub(HALF_PAGE_STEP as usize);
+        self.scroll_animator.snap_to(self.scroll as f64);
+    }
+
     pub fn scroll_offset(&self) -> usize {
         self.scroll
     }

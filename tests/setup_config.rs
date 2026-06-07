@@ -90,22 +90,52 @@ fn setup_screen_accepts_text_entry() {
 }
 
 #[test]
-fn setup_text_input_owns_printable_theme_picker_binding() {
+fn setup_text_input_keeps_non_help_printable_global_bindings_as_text() {
     let bindings = KeyBindings::from_toml_str(
         r##"
         [global]
-        switch_theme = "T"
+        reload_list = "R"
         "##,
     );
     let mut app = App::default();
 
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
         &bindings,
     );
 
-    assert!(!app.is_theme_dropdown_open());
-    assert_eq!(app.setup_form().fields()[0].1, "T");
+    let fields = app.setup_form().fields();
+    assert_eq!(fields[0].1, "R");
+}
+
+#[test]
+fn setup_help_binding_still_opens_help_from_text_input() {
+    let bindings = KeyBindings::default();
+    let mut app = App::default();
+
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+        &bindings,
+    );
+
+    assert!(app.is_help_open());
+}
+
+#[test]
+fn setup_leader_theme_picker_binding_opens_picker() {
+    let bindings = KeyBindings::default();
+    let mut app = App::default();
+
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        &bindings,
+    );
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::SHIFT),
+        &bindings,
+    );
+
+    assert!(app.is_theme_dropdown_open());
 }
 
 #[test]

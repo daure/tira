@@ -1,5 +1,8 @@
 use crate::components::generic::{
-    dropdown::{DropdownAction, DropdownEvent, DropdownOption, MultiSelectDropdownState},
+    dropdown::{
+        DropdownAction, DropdownEvent, DropdownOption, DropdownVisibleOption,
+        MultiSelectDropdownState,
+    },
     filtered_tree::{
         FilteredTreeAction, FilteredTreeEvent, FilteredTreeState, FilteredTreeViewMode,
     },
@@ -117,6 +120,10 @@ impl JiraFilteredTreeState {
         self.filtered_tree.selected_item_index()
     }
 
+    pub fn select_item_index(&mut self, index: usize) {
+        self.filtered_tree.select_item_index(index);
+    }
+
     pub fn selected_item_id(&self) -> Option<&str> {
         self.filtered_tree.selected_item_id()
     }
@@ -170,6 +177,24 @@ impl JiraFilteredTreeState {
             .is_some_and(MultiSelectDropdownState::is_filter_focused)
     }
 
+    pub fn click_column_dropdown_row(&mut self, row: usize, height: usize) {
+        let Some(dropdown) = &mut self.column_dropdown else {
+            return;
+        };
+        let Some(entry) = dropdown.visible_window(height).into_iter().nth(row) else {
+            return;
+        };
+        let DropdownVisibleOption::Option { index, .. } = entry else {
+            return;
+        };
+        dropdown.set_selected_index(index);
+        if matches!(
+            dropdown.dispatch(DropdownAction::ToggleSelected),
+            Some(DropdownEvent::Toggled(_))
+        ) {
+            self.sync_visible_columns();
+        }
+    }
     pub fn dispatch(&mut self, action: JiraFilteredTreeAction) -> Option<JiraFilteredTreeEvent> {
         match action {
             JiraFilteredTreeAction::FilteredTree(action) => {

@@ -71,6 +71,10 @@ impl FilteredTreeState {
         self.tree.selected_row()
     }
 
+    pub fn select_item_index(&mut self, index: usize) {
+        self.tree.select_row(index, self.filter.value());
+    }
+
     pub fn selected_item_id(&self) -> Option<&str> {
         self.tree.selected_item_id()
     }

@@ -43,11 +43,17 @@ impl<'a> Dialog<'a> {
             .border_style(self.border_style)
             .title(Line::from(self.title));
         let inner = block.inner(dialog_area);
+        let padded_inner = Rect {
+            x: inner.x.saturating_add(1),
+            y: inner.y,
+            width: inner.width.saturating_sub(2),
+            height: inner.height,
+        };
 
         frame.render_widget(Clear, dialog_area);
         frame.render_widget(block, dialog_area);
 
-        inner
+        padded_inner
     }
 
     fn area(self, area: Rect) -> Rect {

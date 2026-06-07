@@ -2,6 +2,7 @@ pub mod chrome;
 pub mod layout;
 mod overlays;
 mod project_switcher;
+mod quick_switcher;
 pub(crate) mod scrollbar;
 mod setup;
 pub(crate) mod style;
@@ -46,8 +47,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
         chrome::status_bar(app, keybindings, status_area.width),
         status_area,
     );
-    theme_picker::render(frame, status_area, app);
-    project_switcher::render(frame, status_area, app);
+    quick_switcher::render(frame, inner, app);
+    theme_picker::render(frame, inner, app);
+    project_switcher::render(frame, inner, app);
 }
 fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
     match app.active_tab() {

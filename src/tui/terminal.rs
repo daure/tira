@@ -1,6 +1,7 @@
 use std::{io, panic};
 
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -16,8 +17,12 @@ impl Tui {
         enable_raw_mode()?;
 
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        execute!(stdout, EnterAlternateScreen).inspect_err(|_| {
             let _ = disable_raw_mode();
+        })?;
+        if let Err(error) = execute!(stdout, EnableMouseCapture) {
+            let _ = disable_raw_mode();
+            let _ = execute!(stdout, LeaveAlternateScreen);
             return Err(error);
         }
 
@@ -26,7 +31,11 @@ impl Tui {
             Ok(mut terminal) => {
                 if let Err(error) = terminal.hide_cursor() {
                     let _ = disable_raw_mode();
-                    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+                    let _ = execute!(
+                        terminal.backend_mut(),
+                        DisableMouseCapture,
+                        LeaveAlternateScreen
+                    );
                     let _ = terminal.show_cursor();
                     return Err(error);
                 }
@@ -47,7 +56,11 @@ impl Tui {
 impl Drop for Tui {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -65,5 +78,5 @@ fn install_panic_hook() {
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
 }

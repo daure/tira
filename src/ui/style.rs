@@ -43,14 +43,17 @@ pub fn single_select_dropdown_spans(
 ) -> Vec<Span<'static>> {
     let chevron = if is_focused { "› " } else { "  " };
     let checkmark = if is_selected { "✓" } else { "" };
+    let right_padding = usize::from(is_selected);
     let gap_before_checkmark = usize::from(is_selected);
-    let reserved_width = chevron.chars().count() + gap_before_checkmark + checkmark.chars().count();
+    let reserved_width =
+        chevron.chars().count() + gap_before_checkmark + checkmark.chars().count() + right_padding;
     let label_width = row_width.saturating_sub(reserved_width);
     let label = super::layout::truncate_with_ellipsis(label, label_width);
     let used_width = chevron.chars().count()
         + label.chars().count()
         + gap_before_checkmark
-        + checkmark.chars().count();
+        + checkmark.chars().count()
+        + right_padding;
     let gap = row_width.saturating_sub(used_width);
 
     let mut spans = vec![Span::styled(chevron, selected_row_style(theme, is_focused))];
@@ -62,6 +65,9 @@ pub fn single_select_dropdown_spans(
         Style::default().fg(theme.selected_alt_fg())
     };
     spans.push(Span::styled(checkmark, checkmark_style));
+    if right_padding > 0 {
+        spans.push(Span::styled(" ", selected_row_style(theme, is_focused)));
+    }
     spans
 }
 

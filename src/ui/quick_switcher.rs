@@ -13,7 +13,7 @@ use crate::{
 use super::{project_switcher, style};
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let Some(dropdown) = app.theme_dropdown() else {
+    let Some(dropdown) = app.quick_switcher() else {
         return;
     };
     let longest_option = dropdown
@@ -23,14 +23,14 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .max()
         .unwrap_or(0) as u16;
     let width = area.width.min((longest_option + 6).max(34));
-    let visible_rows = dropdown.visible_row_count().min(12) as u16;
+    let visible_rows = dropdown.visible_row_count().min(10) as u16;
     let height = area.height.min((visible_rows + 3).max(5));
     if width < 20 || height < 5 {
         return;
     }
 
     let dropdown_area = project_switcher::centered_rect(area, width, height);
-    let block = project_switcher::dropdown_block("Theme", app.theme());
+    let block = project_switcher::dropdown_block("Quick switcher", app.theme());
     let inner = block.inner(dropdown_area);
 
     frame.render_widget(Clear, dropdown_area);

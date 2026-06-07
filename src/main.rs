@@ -52,11 +52,16 @@ fn run(
 
         #[allow(clippy::collapsible_if)]
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_key(key, keybindings);
-                spawn_effects(&mut app, &event_tx);
-                last_tick = Instant::now();
+            match event::read()? {
+                Event::Key(key) => app.handle_key(key, keybindings),
+                Event::Mouse(mouse) => {
+                    let area = terminal.size()?;
+                    app.handle_mouse(mouse, area.into(), keybindings);
+                }
+                _ => {}
             }
+            spawn_effects(&mut app, &event_tx);
+            last_tick = Instant::now();
         }
     }
 

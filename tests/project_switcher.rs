@@ -3,10 +3,14 @@ mod support;
 use ratatui::{Terminal, backend::TestBackend};
 use tira::{Action, App, JiraFilteredTreeAction, KeyBindings, draw};
 
-use support::{issue, key, project, rendered_text, shift};
+use support::{ctrl, issue, key, project, rendered_text};
 
+fn open_project_switcher(app: &mut App, bindings: &KeyBindings) {
+    app.handle_key(ctrl('x'), bindings);
+    app.handle_key(key('p'), bindings);
+}
 #[test]
-fn shift_p_toggles_project_switcher() {
+fn leader_p_toggles_project_switcher() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues_and_projects(
         vec![issue("KAN-1", "Catalog epic", "Epic", None)],
@@ -14,10 +18,10 @@ fn shift_p_toggles_project_switcher() {
         "KAN",
     );
 
-    app.handle_key(shift('p'), &bindings);
+    open_project_switcher(&mut app, &bindings);
     assert!(app.is_project_dropdown_open());
 
-    app.handle_key(shift('p'), &bindings);
+    open_project_switcher(&mut app, &bindings);
     assert!(!app.is_project_dropdown_open());
 }
 
@@ -33,7 +37,7 @@ fn opening_project_switcher_closes_column_picker() {
     app.handle_key(key('c'), &bindings);
     assert!(app.is_column_dropdown_open());
 
-    app.handle_key(shift('p'), &bindings);
+    open_project_switcher(&mut app, &bindings);
 
     assert!(app.is_project_dropdown_open());
     assert!(!app.is_column_dropdown_open());
@@ -67,7 +71,7 @@ fn project_switcher_search_uses_filter_input_when_focused() {
         "KAN",
     );
 
-    app.handle_key(shift('p'), &bindings);
+    open_project_switcher(&mut app, &bindings);
     app.handle_key(key('/'), &bindings);
     app.handle_key(key('o'), &bindings);
     app.handle_key(key('p'), &bindings);
@@ -89,7 +93,7 @@ fn project_switcher_renders_focus_and_checkmark() {
         "KAN",
     );
 
-    app.handle_key(shift('p'), &bindings);
+    open_project_switcher(&mut app, &bindings);
     terminal
         .draw(|frame| draw(frame, &app, &bindings))
         .expect("draw app");
@@ -112,7 +116,7 @@ fn project_switcher_filter_focus_shows_insert_mode_in_status_bar() {
         "KAN",
     );
 
-    app.handle_key(shift('p'), &bindings);
+    open_project_switcher(&mut app, &bindings);
     app.handle_key(key('/'), &bindings);
     assert!(app.is_project_dropdown_filter_focused());
 

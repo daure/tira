@@ -13,7 +13,7 @@ use crate::{
 
 use super::style;
 
-pub fn render(frame: &mut Frame<'_>, status_area: Rect, app: &App) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(dropdown) = app.project_dropdown() else {
         return;
     };
@@ -23,19 +23,14 @@ pub fn render(frame: &mut Frame<'_>, status_area: Rect, app: &App) {
         .map(|option| option.label.chars().count())
         .max()
         .unwrap_or(0) as u16;
-    let width = status_area.width.min((longest_option + 6).max(24));
+    let width = area.width.min((longest_option + 6).max(32));
     let visible_rows = dropdown.visible_row_count().min(10) as u16;
-    let height = (visible_rows + 3).max(5);
-    if width < 20 || status_area.y < height {
+    let height = area.height.min((visible_rows + 3).max(5));
+    if width < 20 || height < 5 {
         return;
     }
 
-    let dropdown_area = Rect {
-        x: status_area.x + status_area.width.saturating_sub(width + 1),
-        y: status_area.y.saturating_sub(height),
-        width,
-        height,
-    };
+    let dropdown_area = centered_rect(area, width, height);
     let block = dropdown_block("Project", app.theme());
     let inner = block.inner(dropdown_area);
 
@@ -99,6 +94,14 @@ pub fn render(frame: &mut Frame<'_>, status_area: Rect, app: &App) {
     }
 }
 
+pub(crate) fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
 pub(crate) fn dropdown_block(
     title: &'static str,
     theme: &crate::ui::theme::Theme,

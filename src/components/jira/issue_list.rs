@@ -11,7 +11,7 @@ use crate::{
     components::generic::{
         dropdown::DropdownVisibleOption, filter, filtered_tree::FilteredTreeViewMode,
     },
-    ui::{layout, scrollbar, style},
+    ui::{layout, scrollbar, style, theme::prefers_plain_icons},
 };
 
 const NERD_COLLAPSED_ICON: &str = "";
@@ -22,9 +22,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .areas(area);
-    let [content_main, scrollbar_area] = Layout::default()
+    let [content_main, _, scrollbar_area] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .areas(content_area);
 
     render_filter(frame, filter_area, app, keybindings);
@@ -302,46 +306,92 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
         filter_text_area,
     );
 
-    let separator = "─".repeat(options_area.width as usize);
-    let options = dropdown
-        .visible_window(options_area.height as usize)
-        .into_iter()
-        .map(|entry| match entry {
-            DropdownVisibleOption::Separator => ListItem::new(Line::from(Span::styled(
-                separator.clone(),
-                Style::default().fg(app.theme().border_fg()),
-            ))),
-            DropdownVisibleOption::NoResults => no_results_item(app.theme()),
-            DropdownVisibleOption::Option { index, option } => {
-                let is_focused = index == dropdown.selected_index();
-                let row_style = style::selected_row_style(app.theme(), is_focused);
-                let label_style =
-                    style::dropdown_option_label_style(app.theme(), option.selected, is_focused);
-                let icon = if option.selected { "" } else { "" };
-                let icon_style = if dropdown.is_option_toggle_enabled(index) {
-                    Style::default().fg(app.theme().accent_fg())
-                } else {
-                    Style::default().fg(app.theme().muted_fg())
-                };
-                let mut spans = vec![Span::styled(icon, icon_style), Span::raw(" ")];
-                spans.extend(style::highlighted_spans_owned(
-                    app.theme(),
-                    option.label.as_str(),
-                    dropdown.filter(),
-                    label_style,
-                ));
-                ListItem::new(Line::from(spans)).style(row_style)
-            }
-        });
+    let visible_window = dropdown.visible_window(options_area.height as usize);
+    let options = visible_window.iter().map(|entry| match *entry {
+        DropdownVisibleOption::Separator => ListItem::new(Line::default()),
+        DropdownVisibleOption::NoResults => no_results_item(app.theme()),
+        DropdownVisibleOption::Option { index, option } => {
+            let is_focused = index == dropdown.selected_index();
+            let row_style = style::selected_row_style(app.theme(), is_focused);
+            let label_style =
+                style::dropdown_option_label_style(app.theme(), option.selected, is_focused);
+            let icon = if option.selected {
+                if prefers_plain_icons() { "[x]" } else { "" }
+            } else if prefers_plain_icons() {
+                "[ ]"
+            } else {
+                ""
+            };
+            let icon_style = if dropdown.is_option_toggle_enabled(index) {
+                Style::default().fg(app.theme().accent_fg())
+            } else {
+                Style::default().fg(app.theme().muted_fg())
+            };
+            let mut spans = vec![Span::styled(icon, icon_style), Span::raw(" ")];
+            spans.extend(style::highlighted_spans_owned(
+                app.theme(),
+                option.label.as_str(),
+                dropdown.filter(),
+                label_style,
+            ));
+            ListItem::new(Line::from(spans)).style(row_style)
+        }
+    });
 
     frame.render_widget(List::new(options), options_area);
+
+    let visible_range = dropdown.visible_range(options_area.height as usize);
+    let thumb_range = scrollbar::thumb_range(
+        dropdown.visible_row_count(),
+        visible_range.clone(),
+        scrollbar_area.height as usize,
+    );
+    let separator_width = dropdown_area.width.saturating_sub(1);
+    for (row, entry) in visible_window.iter().enumerate() {
+        if matches!(entry, DropdownVisibleOption::Separator) && separator_width > 0 {
+            let line = if separator_width == 1 {
+                String::from("├")
+            } else {
+                format!(
+                    "├{}",
+                    "─".repeat(separator_width.saturating_sub(1) as usize)
+                )
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    line,
+                    Style::reset().fg(app.theme().border_fg()),
+                ))),
+                Rect {
+                    x: dropdown_area.x,
+                    y: options_area.y.saturating_add(row as u16),
+                    width: separator_width,
+                    height: 1,
+                },
+            );
+        }
+    }
     scrollbar::render_range(
         frame,
         scrollbar_area,
         dropdown.visible_row_count(),
-        dropdown.visible_range(options_area.height as usize),
+        visible_range,
         app.theme(),
     );
+    for (row, entry) in visible_window.iter().enumerate() {
+        if matches!(entry, DropdownVisibleOption::Separator) && !thumb_range.contains(&(row + 1)) {
+            let style = Style::reset().fg(app.theme().border_fg());
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled("┤", style))),
+                Rect {
+                    x: dropdown_area.x + dropdown_area.width.saturating_sub(1),
+                    y: options_area.y.saturating_add(row as u16),
+                    width: 1,
+                    height: 1,
+                },
+            );
+        }
+    }
 
     if dropdown.is_filter_focused() {
         let cursor_x = filter_text_area.x + dropdown.filter_cursor() as u16;
@@ -412,9 +462,9 @@ fn tree_control_spans(theme: &crate::ui::theme::Theme, row: &TreeRow) -> Vec<Spa
     let indent = "  ".repeat(row.depth);
     let indicator = if row.expandable {
         if row.expanded {
-            NERD_EXPANDED_ICON
+            expanded_icon()
         } else {
-            NERD_COLLAPSED_ICON
+            collapsed_icon()
         }
     } else {
         " "
@@ -423,6 +473,22 @@ fn tree_control_spans(theme: &crate::ui::theme::Theme, row: &TreeRow) -> Vec<Spa
         Span::raw(indent),
         Span::styled(indicator, Style::default().fg(theme.border_fg())),
     ]
+}
+
+fn collapsed_icon() -> &'static str {
+    if prefers_plain_icons() {
+        ">"
+    } else {
+        NERD_COLLAPSED_ICON
+    }
+}
+
+fn expanded_icon() -> &'static str {
+    if prefers_plain_icons() {
+        "v"
+    } else {
+        NERD_EXPANDED_ICON
+    }
 }
 
 fn dropdown_block(title: &'static str, theme: &crate::ui::theme::Theme) -> Block<'static> {

@@ -7,11 +7,14 @@ use ratatui::{
 };
 
 use crate::{
-    App, KeyBindings, components::generic::dialog::Dialog,
-    components::generic::notification::NotificationKind, services::jira::CommandLogEntry,
+    App, KeyBindings,
+    components::generic::dialog::Dialog,
+    components::generic::notification::NotificationKind,
+    keymap::{HelpItem, HelpScope},
+    services::jira::CommandLogEntry,
 };
 
-use super::layout;
+use super::{chrome, layout};
 
 pub fn render_command_log_dialog(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let entries = app.command_log_entries();
@@ -20,7 +23,7 @@ pub fn render_command_log_dialog(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let height = height.min(area.height.saturating_sub(2)).max(3);
     let inner = Dialog::new("Command log", width, height)
         .border_style(Style::default().fg(app.theme().border_fg()))
-        .y_offset(1)
+        .y_offset(area.height.saturating_sub(height) / 2)
         .render(frame, area);
 
     let start = entries.len().saturating_sub(inner.height as usize);
@@ -32,30 +35,140 @@ pub fn render_command_log_dialog(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
-    let width = area.width.min(72).max(32);
-    let height = area.height.min(10).max(6);
+    let items = keybindings.help_items(app.screen(), app.active_tab());
+    let selected = app.help_selected().min(items.len().saturating_sub(1));
+    let width = area.width.min(96).max(48);
+    let height = area.height.min(18).max(10);
     let inner = Dialog::new("Keyboard help", width, height)
         .border_style(Style::default().fg(app.theme().border_fg()))
-        .y_offset(1)
+        .y_offset(area.height.saturating_sub(height) / 2)
         .render(frame, area);
-    let lines = vec![
-        Line::from(Span::styled(
-            "Context",
+
+    let [list_area, description_area] = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Min(1),
+            ratatui::layout::Constraint::Length(3),
+        ])
+        .areas(inner);
+    let [local_area, global_area] = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Horizontal)
+        .constraints([
+            ratatui::layout::Constraint::Percentage(58),
+            ratatui::layout::Constraint::Percentage(42),
+        ])
+        .areas(list_area);
+
+    render_help_scope(
+        frame,
+        local_area,
+        app,
+        "Local",
+        &items,
+        selected,
+        HelpScope::Local,
+    );
+    render_help_scope(
+        frame,
+        global_area,
+        app,
+        "Global",
+        &items,
+        selected,
+        HelpScope::Global,
+    );
+
+    if let Some(item) = items.get(selected) {
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    item.binding.clone(),
+                    Style::default()
+                        .fg(app.theme().accent_fg())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    item.summary.as_str(),
+                    Style::default()
+                        .fg(app.theme().selected_alt_fg())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                item.description.as_str(),
+                Style::default().fg(app.theme().subtle_fg()),
+            )),
+        ];
+        let separator_area = Rect {
+            x: inner.x.saturating_sub(2),
+            y: description_area.y,
+            width: inner.width.saturating_add(4),
+            height: 1,
+        };
+        let desc_inner = Rect {
+            x: description_area.x,
+            y: description_area.y.saturating_add(1),
+            width: description_area.width,
+            height: description_area.height.saturating_sub(1),
+        };
+        frame.render_widget(
+            chrome::border_separator(separator_area.width, app.theme()),
+            separator_area,
+        );
+        frame.render_widget(Paragraph::new(lines), desc_inner);
+    }
+}
+
+fn render_help_scope(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    title: &str,
+    items: &[HelpItem],
+    selected: usize,
+    scope: HelpScope,
+) {
+    let scoped = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.scope == scope)
+        .collect::<Vec<_>>();
+    let binding_width = scoped
+        .iter()
+        .map(|(_, item)| item.binding.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec![Line::from(vec![Span::styled(
+        format!("── {} ──", title),
+        Style::default()
+            .fg(app.theme().success_fg())
+            .add_modifier(Modifier::BOLD),
+    )])];
+    for (index, item) in scoped {
+        let is_selected = index == selected;
+        let row_style = if is_selected {
+            Style::default().bg(app.theme().selected_bg())
+        } else {
             Style::default()
-                .fg(app.theme().selected_alt_fg())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(keybindings.list_hint_text()),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "Global",
-            Style::default()
-                .fg(app.theme().selected_alt_fg())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(format!("{} close help", keybindings.open_help_label())),
-    ];
-    frame.render_widget(Paragraph::new(lines), inner);
+        };
+        let binding = format!("{:width$}", item.binding, width = binding_width);
+        lines.push(Line::from(vec![
+            Span::styled(
+                binding,
+                row_style
+                    .fg(app.theme().accent_fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", row_style),
+            Span::styled(
+                item.summary.as_str(),
+                row_style.fg(app.theme().status_text()),
+            ),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 pub fn render_notifications(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -85,9 +198,16 @@ pub fn render_notifications(frame: &mut Frame<'_>, area: Rect, app: &App) {
             width: notification_width,
             height: 4,
         };
-        let icon = match notification.kind() {
-            NotificationKind::Success => "",
-            NotificationKind::Error => "",
+        let icon = if crate::ui::theme::prefers_plain_icons() {
+            match notification.kind() {
+                NotificationKind::Success => "OK",
+                NotificationKind::Error => "!!",
+            }
+        } else {
+            match notification.kind() {
+                NotificationKind::Success => "",
+                NotificationKind::Error => "",
+            }
         };
         let icon_style = match notification.kind() {
             NotificationKind::Success => Style::default().fg(app.theme().success_fg()),

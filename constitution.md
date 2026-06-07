@@ -10,6 +10,7 @@ No feature may depend on a hard-coded key as its only path. Built-in defaults ar
 
 Keybindings live in `~/.tira/keybindings.toml`.
 
+The keyboard help dialog (bound to `open_help`) reflectively displays these keybindings. To keep keybinding configuration decoupled from dynamic UI widgets, context-based help items are centralized and managed in `src/keymap.rs::help_items`. When adding a configurable keybinding, its help text must be manually added to that function.
 ## 2. Color and Style Are Theme Data
 
 All colors must be reconfigurable.

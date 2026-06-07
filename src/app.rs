@@ -1,7 +1,9 @@
 use crate::{
     components::{
         generic::{
-            dropdown::{DropdownEvent, DropdownOption, MultiSelectDropdownState},
+            dropdown::{
+                DropdownEvent, DropdownOption, DropdownVisibleOption, MultiSelectDropdownState,
+            },
             filter::FilterAction,
             filtered_tree::FilteredTreeViewMode,
             notification::Notification,
@@ -17,7 +19,8 @@ use crate::{
     services::jira::{CommandLogEntry, FieldSummary, IssueSummary, JiraError, ProjectSummary},
     ui::theme::{Theme, ThemeChoice, ThemeName},
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use std::fmt;
 
 pub const APP_TABS: &[&str] = &["Board", "List", "Timeline", "Filters"];
@@ -28,12 +31,19 @@ pub enum Action {
     Tabs(TabAction),
     JiraFilteredTree(JiraFilteredTreeAction),
     ReloadList,
+    Leader,
     ToggleCommandLog,
     CloseCommandLog,
     ToggleProjectDropdown,
     ProjectDropdown(crate::components::generic::dropdown::DropdownAction),
+    ToggleQuickSwitcher,
+    QuickSwitcher(crate::components::generic::dropdown::DropdownAction),
     ToggleThemeDropdown,
     ThemeDropdown(crate::components::generic::dropdown::DropdownAction),
+    GoToBoard,
+    GoToList,
+    GoToTimeline,
+    GoToFilters,
     OpenHelp,
     CloseHelp,
     Quit,
@@ -97,8 +107,37 @@ enum DialogKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DropdownKind {
     JiraColumns,
+    QuickSwitcher,
     ProjectSwitcher,
     ThemePicker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickAction {
+    CommandLog,
+    ThemePicker,
+    ProjectPicker,
+    ReloadList,
+    Board,
+    List,
+    Timeline,
+    Filters,
+}
+
+impl QuickAction {
+    pub fn label(self) -> String {
+        match self {
+            Self::CommandLog => "Command log",
+            Self::ThemePicker => "Theme picker",
+            Self::ProjectPicker => "Project picker",
+            Self::ReloadList => "Reload list",
+            Self::Board => "Go to Board",
+            Self::List => "Go to List",
+            Self::Timeline => "Go to Timeline",
+            Self::Filters => "Go to Filters",
+        }
+        .to_owned()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,9 +314,13 @@ pub struct App {
     status: String,
     notifications: Vec<Notification>,
     help_open: bool,
+    help_selected: usize,
     projects: Vec<ProjectSummary>,
     project_dropdown: Option<MultiSelectDropdownState<ProjectSummary>>,
     theme_dropdown: Option<MultiSelectDropdownState<ThemeChoice>>,
+    quick_switcher: Option<MultiSelectDropdownState<QuickAction>>,
+    theme_preview_origin: Option<Theme>,
+    leader_pending: bool,
     pending_effects: Vec<AppEffect>,
     theme: Theme,
     active_load_request_id: Option<u64>,
@@ -309,7 +352,11 @@ impl App {
             projects: Vec::new(),
             project_dropdown: None,
             theme_dropdown: None,
+            quick_switcher: None,
+            theme_preview_origin: None,
+            leader_pending: false,
             help_open: false,
+            help_selected: 0,
             pending_effects: Vec::new(),
             active_load_request_id: None,
             theme: Theme::default(),
@@ -336,6 +383,10 @@ impl App {
             project_dropdown: None,
             help_open: false,
             theme_dropdown: None,
+            quick_switcher: None,
+            theme_preview_origin: None,
+            leader_pending: false,
+            help_selected: 0,
             pending_effects: Vec::new(),
             active_load_request_id: None,
             theme: Theme::default(),
@@ -373,6 +424,14 @@ impl App {
         self.screen
     }
 
+    pub fn help_selected(&self) -> usize {
+        self.help_selected
+    }
+
+    fn reset_help_selection(&mut self) {
+        self.help_selected = 0;
+    }
+
     pub fn setup_form(&self) -> &CredentialForm {
         &self.setup
     }
@@ -392,6 +451,9 @@ impl App {
         if let Some(dropdown) = &mut self.theme_dropdown {
             dropdown.tick(dt);
         }
+        if let Some(dropdown) = &mut self.quick_switcher {
+            dropdown.tick(dt);
+        }
         for notification in &mut self.notifications {
             notification.tick(dt);
         }
@@ -407,6 +469,10 @@ impl App {
                 .is_some_and(MultiSelectDropdownState::is_animating)
             || self
                 .theme_dropdown
+                .as_ref()
+                .is_some_and(MultiSelectDropdownState::is_animating)
+            || self
+                .quick_switcher
                 .as_ref()
                 .is_some_and(MultiSelectDropdownState::is_animating)
             || self.notifications.iter().any(Notification::is_animating)
@@ -627,6 +693,20 @@ impl App {
         self.theme_dropdown.is_some()
     }
 
+    pub fn quick_switcher(&self) -> Option<&MultiSelectDropdownState<QuickAction>> {
+        self.quick_switcher.as_ref()
+    }
+
+    pub fn is_quick_switcher_open(&self) -> bool {
+        self.quick_switcher.is_some()
+    }
+
+    pub fn is_quick_switcher_filter_focused(&self) -> bool {
+        self.quick_switcher
+            .as_ref()
+            .is_some_and(MultiSelectDropdownState::is_filter_focused)
+    }
+
     pub fn is_help_open(&self) -> bool {
         self.help_open
     }
@@ -649,6 +729,7 @@ impl App {
             || self.is_column_dropdown_filter_focused()
             || self.is_project_dropdown_filter_focused()
             || self.is_theme_dropdown_filter_focused()
+            || self.is_quick_switcher_filter_focused()
     }
 
     pub fn command_log_entries(&self) -> &[CommandLogEntry] {
@@ -694,6 +775,7 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent, keybindings: &KeyBindings) {
         let typing = match self.screen {
             Screen::Setup => true,
+            Screen::Main if self.quick_switcher.is_some() => true,
             Screen::Main if self.project_dropdown.is_some() => true,
             Screen::Main if self.theme_dropdown.is_some() => true,
             Screen::Main if self.filtered_tree.is_column_dropdown_open() => true,
@@ -701,47 +783,59 @@ impl App {
             _ => false,
         };
 
-        if self.help_open {
-            self.dispatch(keybindings.help_dialog_action_for(key));
+        if self.leader_pending {
+            self.leader_pending = false;
+            let action = keybindings.leader_action_for(key);
+            if action != Action::None {
+                self.dispatch(action);
+            }
             return;
         }
 
-        if self.theme_dropdown.is_some() {
-            let action = if self.is_theme_dropdown_filter_focused() {
-                if key.code == KeyCode::Esc
-                    || key.code == KeyCode::Char('[')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    crate::components::generic::dropdown::DropdownAction::Close
-                } else {
-                    crate::components::generic::dropdown::DropdownAction::Filter(
-                        keybindings.filter_action_for(key),
-                    )
-                }
-            } else if key.code == KeyCode::Esc
-                || key.code == KeyCode::Char('[') && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                crate::components::generic::dropdown::DropdownAction::Close
-            } else {
-                keybindings.theme_dropdown_action_for(key)
-            };
-            self.dispatch(Action::ThemeDropdown(action));
+        if self.help_open {
+            self.handle_help_key(key, keybindings);
             return;
         }
 
         if let Some(action) = keybindings.global_action_for(key) {
-            let is_ctrl_q =
-                key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL);
-            let text_input_should_own_key = self.screen == Screen::Setup
-                && matches!(key.code, KeyCode::Char(_))
+            let focused_text_input = self.screen == Screen::Setup
+                || self.is_filter_focused()
+                || self.is_column_dropdown_filter_focused()
+                || self.is_project_dropdown_filter_focused()
+                || self.is_theme_dropdown_filter_focused()
+                || self.is_quick_switcher_filter_focused();
+            let printable_text = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT);
-            if !(text_input_should_own_key
+            let is_ctrl_q =
+                key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL);
+            let reserved_input_action = matches!(action, Action::OpenHelp);
+            if !(focused_text_input && printable_text && !reserved_input_action
                 || typing && matches!(action, Action::Quit) && !is_ctrl_q)
             {
                 self.dispatch(action);
                 return;
             }
+        }
+
+        if self.quick_switcher.is_some() {
+            self.dispatch(Action::QuickSwitcher(self.dropdown_key_action(
+                key,
+                keybindings,
+                self.is_quick_switcher_filter_focused(),
+                KeyBindings::project_dropdown_action_for,
+            )));
+            return;
+        }
+
+        if self.theme_dropdown.is_some() {
+            self.dispatch(Action::ThemeDropdown(self.dropdown_key_action(
+                key,
+                keybindings,
+                self.is_theme_dropdown_filter_focused(),
+                KeyBindings::theme_dropdown_action_for,
+            )));
+            return;
         }
 
         match self.screen {
@@ -750,26 +844,12 @@ impl App {
                 self.dispatch(keybindings.command_log_action_for(key))
             }
             Screen::Main if self.project_dropdown.is_some() => {
-                let action = if self.is_project_dropdown_filter_focused() {
-                    if key.code == KeyCode::Esc
-                        || key.code == KeyCode::Char('[')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        crate::components::generic::dropdown::DropdownAction::Close
-                    } else {
-                        crate::components::generic::dropdown::DropdownAction::Filter(
-                            keybindings.filter_action_for(key),
-                        )
-                    }
-                } else if key.code == KeyCode::Esc
-                    || key.code == KeyCode::Char('[')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    crate::components::generic::dropdown::DropdownAction::Close
-                } else {
-                    keybindings.project_dropdown_action_for(key)
-                };
-                self.dispatch(Action::ProjectDropdown(action));
+                self.dispatch(Action::ProjectDropdown(self.dropdown_key_action(
+                    key,
+                    keybindings,
+                    self.is_project_dropdown_filter_focused(),
+                    KeyBindings::project_dropdown_action_for,
+                )));
             }
             Screen::Main if self.filtered_tree.is_column_dropdown_open() => {
                 let action = if self.filtered_tree.is_column_dropdown_filter_focused() {
@@ -801,16 +881,396 @@ impl App {
         }
     }
 
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect, keybindings: &KeyBindings) {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        let point = (mouse.column, mouse.row);
+        let [frame_area, _status_area] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .areas(area);
+        let outer = crate::ui::chrome::tabbed_frame(
+            self.active_tab_index(),
+            self.tabs_view_mode(),
+            self.theme(),
+        );
+        let inner = outer.inner(frame_area);
+        if self.handle_open_dropdown_mouse(point, inner) {
+            return;
+        }
+        if area.height > 0 && point.1 == area.height - 1 {
+            if !self.current_project().is_empty()
+                && point.0
+                    >= area
+                        .width
+                        .saturating_sub(self.current_project().len() as u16 + 10)
+            {
+                self.open_project_dropdown();
+            }
+            return;
+        }
+
+        if !contains_point(inner, point) {
+            return;
+        }
+
+        if self.screen != Screen::Main || self.active_tab() != "List" {
+            return;
+        }
+
+        let [filter_row, content_area] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .areas(inner);
+        let trigger_width = 9u16.saturating_add(keybindings.open_columns_label().len() as u16);
+        let [filter_area, trigger_area] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(trigger_width),
+            ])
+            .areas(filter_row);
+        if contains_point(trigger_area, point) {
+            self.toggle_dropdown(DropdownKind::JiraColumns);
+            return;
+        }
+        if contains_point(filter_area, point) {
+            self.dispatch_jira_filtered_tree(JiraFilteredTreeAction::FilteredTree(
+                crate::components::generic::filtered_tree::FilteredTreeAction::FocusFilter,
+            ));
+            return;
+        }
+
+        let [content_main, _, _scrollbar_area] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .areas(content_area);
+        if !contains_point(content_main, point) {
+            return;
+        }
+
+        let rows_start_y = match self.filtered_tree_view_mode() {
+            FilteredTreeViewMode::List => content_main.y,
+            FilteredTreeViewMode::Table => content_main.y.saturating_add(1),
+        };
+        if point.1 < rows_start_y {
+            return;
+        }
+        let viewport_height = match self.filtered_tree_view_mode() {
+            FilteredTreeViewMode::List => content_main.height as usize,
+            FilteredTreeViewMode::Table => content_main.height.saturating_sub(1) as usize,
+        };
+        let visible_range = self.visible_issue_range(viewport_height);
+        let visible_pos = point.1.saturating_sub(rows_start_y) as usize;
+        let selected = visible_range.start.saturating_add(visible_pos);
+        let rows = self.visible_issue_rows();
+        if selected >= visible_range.end || selected >= rows.len() {
+            return;
+        }
+        self.filtered_tree.select_item_index(selected);
+
+        let row = &rows[selected];
+        let chevron_x = content_main.x.saturating_add((row.depth * 2) as u16);
+        if row.expandable && point.0 >= chevron_x && point.0 <= chevron_x.saturating_add(1) {
+            self.dispatch_jira_filtered_tree(JiraFilteredTreeAction::FilteredTree(
+                crate::components::generic::filtered_tree::FilteredTreeAction::Tree(
+                    crate::components::generic::tree::TreeAction::ToggleExpanded,
+                ),
+            ));
+        }
+    }
+
+    fn handle_open_dropdown_mouse(&mut self, point: (u16, u16), area: Rect) -> bool {
+        if self.quick_switcher.is_some() {
+            return self.handle_centered_dropdown_mouse(point, area, DropdownKind::QuickSwitcher);
+        }
+        if self.theme_dropdown.is_some() {
+            return self.handle_centered_dropdown_mouse(point, area, DropdownKind::ThemePicker);
+        }
+        if self.project_dropdown.is_some() {
+            return self.handle_centered_dropdown_mouse(point, area, DropdownKind::ProjectSwitcher);
+        }
+        if self.filtered_tree.is_column_dropdown_open() {
+            return self.handle_column_dropdown_mouse(point, area);
+        }
+        false
+    }
+
+    fn handle_centered_dropdown_mouse(
+        &mut self,
+        point: (u16, u16),
+        area: Rect,
+        kind: DropdownKind,
+    ) -> bool {
+        let (width, rows) = match kind {
+            DropdownKind::QuickSwitcher => self
+                .quick_switcher
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 34, 10)),
+            DropdownKind::ThemePicker => self
+                .theme_dropdown
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 34, 12)),
+            DropdownKind::ProjectSwitcher => self
+                .project_dropdown
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 32, 10)),
+            DropdownKind::JiraColumns => None,
+        }
+        .unwrap_or((0, 0));
+        if width == 0 || rows == 0 {
+            return false;
+        }
+
+        let rect = centered_rect(area, width, rows + 3);
+        if !contains_point(rect, point) {
+            return true;
+        }
+
+        let inner = inset_rect(rect, 1, 1);
+        let [_, padded_inner, _] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .areas(inner);
+        let [filter_area, options_area] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .areas(padded_inner);
+
+        if contains_point(filter_area, point) {
+            match kind {
+                DropdownKind::QuickSwitcher => {
+                    if let Some(dropdown) = &mut self.quick_switcher {
+                        dropdown.dispatch(
+                            crate::components::generic::dropdown::DropdownAction::FocusFilter,
+                        );
+                    }
+                }
+                DropdownKind::ThemePicker => {
+                    if let Some(dropdown) = &mut self.theme_dropdown {
+                        dropdown.dispatch(
+                            crate::components::generic::dropdown::DropdownAction::FocusFilter,
+                        );
+                    }
+                }
+                DropdownKind::ProjectSwitcher => {
+                    if let Some(dropdown) = &mut self.project_dropdown {
+                        dropdown.dispatch(
+                            crate::components::generic::dropdown::DropdownAction::FocusFilter,
+                        );
+                    }
+                }
+                DropdownKind::JiraColumns => {}
+            }
+            return true;
+        }
+
+        if !contains_point(options_area, point) {
+            return true;
+        }
+
+        let row = point.1.saturating_sub(options_area.y) as usize;
+        self.click_dropdown_option(kind, row, options_area.height as usize);
+        true
+    }
+
+    fn click_dropdown_option(&mut self, kind: DropdownKind, row: usize, height: usize) {
+        match kind {
+            DropdownKind::QuickSwitcher => {
+                let Some(index) = dropdown_index_at(self.quick_switcher.as_ref(), row, height)
+                else {
+                    return;
+                };
+                if let Some(dropdown) = &mut self.quick_switcher {
+                    dropdown.set_selected_index(index);
+                }
+                self.commit_quick_switcher_index(index);
+            }
+            DropdownKind::ThemePicker => {
+                let Some(index) = dropdown_index_at(self.theme_dropdown.as_ref(), row, height)
+                else {
+                    return;
+                };
+                if let Some(dropdown) = &mut self.theme_dropdown {
+                    dropdown.set_selected_index(index);
+                }
+                self.dispatch_theme_dropdown(
+                    crate::components::generic::dropdown::DropdownAction::ToggleSelected,
+                );
+            }
+            DropdownKind::ProjectSwitcher => {
+                let Some(index) = dropdown_index_at(self.project_dropdown.as_ref(), row, height)
+                else {
+                    return;
+                };
+                if let Some(dropdown) = &mut self.project_dropdown {
+                    dropdown.set_selected_index(index);
+                }
+                self.dispatch_project_dropdown(
+                    crate::components::generic::dropdown::DropdownAction::ToggleSelected,
+                );
+            }
+            DropdownKind::JiraColumns => {}
+        }
+    }
+
+    fn handle_column_dropdown_mouse(&mut self, point: (u16, u16), area: Rect) -> bool {
+        let Some(dropdown) = self.column_dropdown() else {
+            return false;
+        };
+        let longest = dropdown
+            .options()
+            .iter()
+            .map(|option| option.label.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let width = area.width.min((longest + 6).max(20));
+        let height = area.height.min(16);
+        let rect = Rect {
+            x: area.x + area.width.saturating_sub(width + 1),
+            y: area.y + 1,
+            width,
+            height,
+        };
+        if !contains_point(rect, point) {
+            return true;
+        }
+        let inner = inset_rect(rect, 1, 1);
+        let [_, padded_inner] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .areas(inner);
+        let [content_area, _] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .areas(padded_inner);
+        let [filter_area, options_area] = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .areas(content_area);
+        if contains_point(filter_area, point) {
+            self.dispatch_jira_filtered_tree(JiraFilteredTreeAction::Dropdown(
+                crate::components::generic::dropdown::DropdownAction::FocusFilter,
+            ));
+            return true;
+        }
+        if !contains_point(options_area, point) {
+            return true;
+        }
+        let row = point.1.saturating_sub(options_area.y) as usize;
+        self.filtered_tree
+            .click_column_dropdown_row(row, options_area.height as usize);
+        true
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent, keybindings: &KeyBindings) {
+        let item_count = keybindings
+            .help_items(self.screen(), self.active_tab())
+            .len();
+        match keybindings.help_dialog_action_for(key) {
+            crate::keymap::HelpDialogAction::Close => self.close_dialog(DialogKind::Help),
+            crate::keymap::HelpDialogAction::Up => self.move_help_selection(-1, item_count),
+            crate::keymap::HelpDialogAction::Down => self.move_help_selection(1, item_count),
+            crate::keymap::HelpDialogAction::PageUp => self.move_help_selection(-4, item_count),
+            crate::keymap::HelpDialogAction::PageDown => self.move_help_selection(4, item_count),
+            crate::keymap::HelpDialogAction::First => self.help_selected = 0,
+            crate::keymap::HelpDialogAction::Last => {
+                self.help_selected = item_count.saturating_sub(1)
+            }
+            crate::keymap::HelpDialogAction::None => {}
+        }
+    }
+
+    fn move_help_selection(&mut self, delta: isize, item_count: usize) {
+        if item_count == 0 {
+            self.help_selected = 0;
+            return;
+        }
+        self.help_selected = self
+            .help_selected
+            .saturating_add_signed(delta)
+            .min(item_count - 1);
+    }
+
+    fn dropdown_key_action(
+        &self,
+        key: KeyEvent,
+        keybindings: &KeyBindings,
+        filter_focused: bool,
+        normal_action: fn(
+            &KeyBindings,
+            KeyEvent,
+        ) -> crate::components::generic::dropdown::DropdownAction,
+    ) -> crate::components::generic::dropdown::DropdownAction {
+        if filter_focused {
+            if key.code == KeyCode::Enter {
+                return crate::components::generic::dropdown::DropdownAction::Filter(
+                    FilterAction::Submit,
+                );
+            }
+            if key.code == KeyCode::Esc
+                || key.code == KeyCode::Char('[') && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                crate::components::generic::dropdown::DropdownAction::Close
+            } else {
+                crate::components::generic::dropdown::DropdownAction::Filter(
+                    keybindings.filter_action_for(key),
+                )
+            }
+        } else if key.code == KeyCode::Esc
+            || key.code == KeyCode::Char('[') && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            crate::components::generic::dropdown::DropdownAction::Close
+        } else {
+            normal_action(keybindings, key)
+        }
+    }
+
     pub fn dispatch(&mut self, action: Action) {
         match action {
             Action::Tabs(action) => self.dispatch_tabs(action),
             Action::JiraFilteredTree(action) => self.dispatch_jira_filtered_tree(action),
             Action::ReloadList => self.reload_list(),
+            Action::Leader => self.leader_pending = true,
             Action::ToggleCommandLog => self.toggle_dialog(DialogKind::CommandLog),
+            Action::ToggleQuickSwitcher => self.toggle_dropdown(DropdownKind::QuickSwitcher),
             Action::ToggleProjectDropdown => self.toggle_dropdown(DropdownKind::ProjectSwitcher),
             Action::ToggleThemeDropdown => self.toggle_dropdown(DropdownKind::ThemePicker),
+            Action::GoToBoard => self.select_tab("Board"),
+            Action::GoToList => self.select_tab("List"),
+            Action::GoToTimeline => self.select_tab("Timeline"),
+            Action::GoToFilters => self.select_tab("Filters"),
             Action::OpenHelp => self.open_dialog(DialogKind::Help),
             Action::CloseHelp => self.close_dialog(DialogKind::Help),
+            Action::QuickSwitcher(action) => self.dispatch_quick_switcher(action),
             Action::ProjectDropdown(action) => self.dispatch_project_dropdown(action),
             Action::ThemeDropdown(action) => self.dispatch_theme_dropdown(action),
             Action::CloseCommandLog => self.close_dialog(DialogKind::CommandLog),
@@ -939,14 +1399,20 @@ impl App {
         self.close_overlays();
         match dialog {
             DialogKind::CommandLog => self.command_log_open = true,
-            DialogKind::Help => self.help_open = true,
+            DialogKind::Help => {
+                self.help_open = true;
+                self.reset_help_selection();
+            }
         }
     }
 
     fn close_dialog(&mut self, dialog: DialogKind) {
         match dialog {
             DialogKind::CommandLog => self.command_log_open = false,
-            DialogKind::Help => self.help_open = false,
+            DialogKind::Help => {
+                self.help_open = false;
+                self.reset_help_selection();
+            }
         }
     }
 
@@ -971,6 +1437,7 @@ impl App {
                 self.close_overlays();
                 self.filtered_tree.open_column_dropdown();
             }
+            DropdownKind::QuickSwitcher => self.open_quick_switcher(),
             DropdownKind::ProjectSwitcher => self.open_project_dropdown(),
             DropdownKind::ThemePicker => self.open_theme_dropdown(),
         }
@@ -979,28 +1446,57 @@ impl App {
     fn close_dropdown(&mut self, dropdown: DropdownKind) {
         match dropdown {
             DropdownKind::JiraColumns => self.filtered_tree.close_column_dropdown(),
+            DropdownKind::QuickSwitcher => self.quick_switcher = None,
             DropdownKind::ProjectSwitcher => self.project_dropdown = None,
-            DropdownKind::ThemePicker => self.theme_dropdown = None,
+            DropdownKind::ThemePicker => self.close_theme_dropdown_without_selection(),
         }
     }
 
     fn is_dropdown_open(&self, dropdown: DropdownKind) -> bool {
         match dropdown {
             DropdownKind::JiraColumns => self.filtered_tree.is_column_dropdown_open(),
+            DropdownKind::QuickSwitcher => self.quick_switcher.is_some(),
             DropdownKind::ProjectSwitcher => self.project_dropdown.is_some(),
             DropdownKind::ThemePicker => self.theme_dropdown.is_some(),
         }
     }
 
     fn close_dropdowns(&mut self) {
+        self.quick_switcher = None;
+        self.close_theme_dropdown_without_selection();
         self.project_dropdown = None;
-        self.theme_dropdown = None;
         self.filtered_tree.close_column_dropdown();
     }
 
     fn close_dialogs(&mut self) {
         self.command_log_open = false;
         self.help_open = false;
+        self.reset_help_selection();
+    }
+
+    fn open_quick_switcher(&mut self) {
+        self.close_overlays();
+        let mut actions = vec![
+            QuickAction::CommandLog,
+            QuickAction::ThemePicker,
+            QuickAction::ProjectPicker,
+            QuickAction::Board,
+            QuickAction::List,
+            QuickAction::Timeline,
+            QuickAction::Filters,
+        ];
+        if self.active_tab() == "List" {
+            actions.insert(3, QuickAction::ReloadList);
+        }
+        let options = actions
+            .into_iter()
+            .map(|action| DropdownOption {
+                selected: false,
+                label: action.label(),
+                value: action,
+            })
+            .collect();
+        self.quick_switcher = Some(MultiSelectDropdownState::new(options).single_select());
     }
 
     fn close_overlays(&mut self) {
@@ -1051,32 +1547,136 @@ impl App {
                 .single_select()
                 .focus_selected(),
         );
+        self.theme_preview_origin = Some(self.theme.clone());
+    }
+
+    fn close_theme_dropdown_without_selection(&mut self) {
+        self.theme_dropdown = None;
+        if let Some(theme) = self.theme_preview_origin.take() {
+            self.theme = theme;
+        }
+    }
+
+    fn preview_focused_theme(&mut self) {
+        let Some(dropdown) = &self.theme_dropdown else {
+            return;
+        };
+        let Some(choice) = dropdown
+            .options()
+            .get(dropdown.selected_index())
+            .map(|option| option.value)
+        else {
+            return;
+        };
+        let base = self.theme_preview_origin.as_ref().unwrap_or(&self.theme);
+        self.theme = base.with_name(choice.name);
     }
 
     fn dispatch_theme_dropdown(
         &mut self,
         action: crate::components::generic::dropdown::DropdownAction,
     ) {
-        let Some(dropdown) = &mut self.theme_dropdown else {
-            return;
+        let event = {
+            let Some(dropdown) = &mut self.theme_dropdown else {
+                return;
+            };
+            dropdown.dispatch(action)
         };
-        match dropdown.dispatch(action) {
-            Some(DropdownEvent::Closed) => {
-                self.theme_dropdown = None;
-            }
+        match event {
+            Some(DropdownEvent::Closed) => self.close_theme_dropdown_without_selection(),
             Some(DropdownEvent::Toggled(index)) => {
-                let Some(choice) = dropdown.options().get(index).map(|option| option.value) else {
+                let Some(choice) = self
+                    .theme_dropdown
+                    .as_ref()
+                    .and_then(|dropdown| dropdown.options().get(index))
+                    .map(|option| option.value)
+                else {
                     return;
                 };
+                let base = self
+                    .theme_preview_origin
+                    .take()
+                    .unwrap_or_else(|| self.theme.clone());
                 self.theme_dropdown = None;
-                self.set_theme(self.theme.with_name(choice.name));
+                self.set_theme(base.with_name(choice.name));
                 self.pending_effects.push(AppEffect::SaveTheme(choice.name));
                 self.status = format!("Theme switched to {}.", choice.name.label());
             }
+            None => self.preview_focused_theme(),
+        }
+    }
+
+    fn dispatch_quick_switcher(
+        &mut self,
+        action: crate::components::generic::dropdown::DropdownAction,
+    ) {
+        if matches!(
+            action,
+            crate::components::generic::dropdown::DropdownAction::Filter(FilterAction::Submit)
+        ) {
+            self.commit_quick_switcher_selection();
+            return;
+        }
+
+        let Some(dropdown) = &mut self.quick_switcher else {
+            return;
+        };
+        match dropdown.dispatch(action) {
+            Some(DropdownEvent::Closed) => self.quick_switcher = None,
+            Some(DropdownEvent::Toggled(index)) => self.commit_quick_switcher_index(index),
             None => {}
         }
     }
 
+    fn commit_quick_switcher_selection(&mut self) {
+        let Some(index) = self.quick_switcher.as_ref().and_then(|dropdown| {
+            let selected = dropdown.selected_index();
+            dropdown
+                .visible_options()
+                .into_iter()
+                .find(|(index, _)| *index == selected)
+                .or_else(|| dropdown.visible_options().into_iter().next())
+                .map(|(index, _)| index)
+        }) else {
+            return;
+        };
+        self.commit_quick_switcher_index(index);
+    }
+
+    fn commit_quick_switcher_index(&mut self, index: usize) {
+        let Some(choice) = self
+            .quick_switcher
+            .as_ref()
+            .and_then(|dropdown| dropdown.options().get(index))
+            .map(|option| option.value)
+        else {
+            return;
+        };
+        self.quick_switcher = None;
+        self.run_quick_action(choice);
+    }
+
+    fn run_quick_action(&mut self, action: QuickAction) {
+        match action {
+            QuickAction::CommandLog => self.open_dialog(DialogKind::CommandLog),
+            QuickAction::ThemePicker => self.open_theme_dropdown(),
+            QuickAction::ProjectPicker => self.open_project_dropdown(),
+            QuickAction::ReloadList => self.reload_list(),
+            QuickAction::Board => self.select_tab("Board"),
+            QuickAction::List => self.select_tab("List"),
+            QuickAction::Timeline => self.select_tab("Timeline"),
+            QuickAction::Filters => self.select_tab("Filters"),
+        }
+    }
+
+    fn select_tab(&mut self, title: &str) {
+        if let Some(index) = APP_TABS.iter().position(|tab| *tab == title) {
+            self.tabs.set_selected(index);
+            self.screen = Screen::Main;
+            self.filtered_tree.clear_transient_input();
+            self.close_overlays();
+        }
+    }
     fn dispatch_project_dropdown(
         &mut self,
         action: crate::components::generic::dropdown::DropdownAction,
@@ -1142,6 +1742,64 @@ impl App {
         self.status = String::from("Reloading Jira issues...");
         self.queue_jira_load(JiraLoadPurpose::Reload, credentials);
     }
+}
+
+fn dropdown_dimensions<T>(
+    dropdown: &MultiSelectDropdownState<T>,
+    area: Rect,
+    minimum_width: u16,
+    max_rows: u16,
+) -> (u16, u16) {
+    let longest = dropdown
+        .options()
+        .iter()
+        .map(|option| option.label.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let width = area.width.min((longest + 6).max(minimum_width));
+    let rows = dropdown.visible_row_count().min(max_rows as usize) as u16;
+    let height = area.height.min((rows + 3).max(5));
+    (width, height.saturating_sub(3))
+}
+
+fn dropdown_index_at<T>(
+    dropdown: Option<&MultiSelectDropdownState<T>>,
+    row: usize,
+    height: usize,
+) -> Option<usize> {
+    dropdown?
+        .visible_window(height)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            DropdownVisibleOption::Option { index, .. } => Some(index),
+            _ => None,
+        })
+        .nth(row)
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn inset_rect(area: Rect, x: u16, y: u16) -> Rect {
+    Rect {
+        x: area.x.saturating_add(x),
+        y: area.y.saturating_add(y),
+        width: area.width.saturating_sub(x.saturating_mul(2)),
+        height: area.height.saturating_sub(y.saturating_mul(2)),
+    }
+}
+
+fn contains_point(area: Rect, point: (u16, u16)) -> bool {
+    point.0 >= area.x
+        && point.0 < area.x.saturating_add(area.width)
+        && point.1 >= area.y
+        && point.1 < area.y.saturating_add(area.height)
 }
 
 fn tree_items_from_issues(issues: Vec<IssueSummary>) -> Vec<TreeItem> {

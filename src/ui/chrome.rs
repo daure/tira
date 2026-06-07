@@ -16,6 +16,18 @@ pub fn tabbed_frame(
     tabs::tabbed_frame(APP_TABS, active_tab, view_mode, theme)
 }
 
+pub fn border_separator(width: u16, theme: &crate::ui::theme::Theme) -> Paragraph<'static> {
+    let line = if width < 2 {
+        "─".repeat(width as usize)
+    } else {
+        format!("├{}┤", "─".repeat(width.saturating_sub(2) as usize))
+    };
+    Paragraph::new(Line::from(Span::styled(
+        line,
+        Style::reset().fg(theme.border_fg()),
+    )))
+}
+
 pub fn status_bar(app: &App, keybindings: &KeyBindings, width: u16) -> Paragraph<'static> {
     let theme = app.theme();
     let (mode_str, mode_bg) = if app.is_input_focused() {

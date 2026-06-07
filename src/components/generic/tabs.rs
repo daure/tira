@@ -40,6 +40,10 @@ impl TabsState {
         tabs.get(self.selected).copied()
     }
 
+    pub fn set_selected(&mut self, selected: usize) {
+        self.selected = selected;
+    }
+
     pub fn view_mode(&self) -> TabsViewMode {
         self.view_mode
     }

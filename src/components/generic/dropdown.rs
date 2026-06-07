@@ -145,6 +145,11 @@ impl<T> MultiSelectDropdownState<T> {
         self.selected_index
     }
 
+    pub fn set_selected_index(&mut self, selected_index: usize) {
+        self.selected_index = selected_index.min(self.options.len().saturating_sub(1));
+        self.scroll_to_selection();
+    }
+
     pub fn is_filter_focused(&self) -> bool {
         self.filter.is_focused()
     }
