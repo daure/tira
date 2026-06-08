@@ -52,12 +52,16 @@ pub fn status_bar(app: &App, keybindings: &KeyBindings, width: u16) -> Paragraph
         ),
     ];
 
-    let active_context = format!(
-        " {} · {} · {} ",
-        app.active_tab(),
-        app.status(),
-        status_hint(app, keybindings)
-    );
+    let active_context = if app.is_loading() {
+        format!(
+            " {} {} · {} ",
+            app.spinner_glyph(),
+            app.status(),
+            status_hint(app, keybindings)
+        )
+    } else {
+        format!(" {} · {} ", app.status(), status_hint(app, keybindings))
+    };
     let time_str = format!("  {} ", chrono::Local::now().format("%H:%M"));
     let project = app.current_project();
     let project_str = if project.is_empty() {

@@ -49,7 +49,7 @@ fn list_tree_orders_orphans_before_epics_and_children_expand_with_space() {
 }
 
 #[test]
-fn slash_focuses_filter_and_filters_matching_issues() {
+fn slash_focuses_filter_and_captures_query_text() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(vec![
         issue("KAN-1", "Checkout work", "Task", None),
@@ -61,11 +61,10 @@ fn slash_focuses_filter_and_filters_matching_issues() {
     app.handle_key(key('a'), &bindings);
     app.handle_key(key('t'), &bindings);
 
-    let rows = app.visible_issue_rows();
+    // Filtering is server-side: typing captures the query and focuses the
+    // input, but does not locally narrow the loaded rows.
     assert!(app.is_filter_focused());
     assert_eq!(app.filter(), "cat");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(app.issues()[rows[0].item_index].id, "KAN-2");
 }
 
 #[test]
@@ -257,7 +256,7 @@ fn focused_issue_filter_still_allows_help_binding() {
 }
 
 #[test]
-fn filter_enter_blurs_and_keeps_current_clamped_selection() {
+fn filter_enter_blurs_and_keeps_query_and_selection() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(vec![
         issue("KAN-1", "Checkout work", "Task", None),
@@ -266,17 +265,18 @@ fn filter_enter_blurs_and_keeps_current_clamped_selection() {
     ]);
 
     app.handle_key(key('j'), &bindings);
+    assert_eq!(app.selected_issue_key(), Some("KAN-2"));
     app.handle_key(key('/'), &bindings);
     for ch in "catalog".chars() {
         app.handle_key(key(ch), &bindings);
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &bindings);
 
+    // Enter blurs the input and keeps the query text; the search runs as a
+    // background effect, so the loaded rows and selection are unchanged here.
     assert!(!app.is_filter_focused());
     assert_eq!(app.filter(), "catalog");
-    assert_eq!(app.selected_issue_index(), 0);
-    let rows = app.visible_issue_rows();
-    assert_eq!(app.issues()[rows[0].item_index].id, "KAN-2");
+    assert_eq!(app.selected_issue_key(), Some("KAN-2"));
 }
 
 #[test]
@@ -377,12 +377,10 @@ fn ctrl_slash_inside_filter_only_exits_focus() {
 
     assert!(!app.is_filter_focused());
     assert_eq!(app.filter(), "cat");
-    assert_eq!(app.visible_issue_rows().len(), 1);
-    assert_eq!(app.selected_issue_index(), 0);
 }
 
 #[test]
-fn only_escape_or_ctrl_left_bracket_clear_filter_in_tree() {
+fn escape_blurs_filter_then_clears_query_text() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(vec![
         issue("KAN-1", "Checkout work", "Task", None),
@@ -393,21 +391,16 @@ fn only_escape_or_ctrl_left_bracket_clear_filter_in_tree() {
     app.handle_key(key('/'), &bindings);
     app.handle_key(key('c'), &bindings);
     app.handle_key(key('a'), &bindings);
+    // First Escape blurs the focused input but keeps the query text.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
+    assert!(!app.is_filter_focused());
     assert_eq!(app.filter(), "ca");
 
-    app.handle_key(key('j'), &bindings);
-    assert_eq!(app.selected_issue_index(), 1);
-
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &bindings);
-    assert_eq!(app.filter(), "ca");
-    assert_eq!(app.visible_issue_rows().len(), 2);
-
+    // A second Escape in the tree clears the query text.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
     assert_eq!(app.filter(), "");
-    assert_eq!(app.visible_issue_rows().len(), 3);
-    assert_eq!(app.selected_issue_key(), Some("KAN-1"));
 
+    // Ctrl-[ clears the query text the same way.
     app.handle_key(key('/'), &bindings);
     app.handle_key(key('c'), &bindings);
     app.handle_key(key('a'), &bindings);
@@ -416,10 +409,7 @@ fn only_escape_or_ctrl_left_bracket_clear_filter_in_tree() {
         KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL),
         &bindings,
     );
-
     assert_eq!(app.filter(), "");
-    assert_eq!(app.visible_issue_rows().len(), 3);
-    assert_eq!(app.selected_issue_key(), Some("KAN-1"));
 }
 
 #[test]

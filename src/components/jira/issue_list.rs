@@ -68,15 +68,21 @@ fn render_filtered_tree_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let item = &app.issues()[row.item_index];
         let row_style =
             style::selected_row_style(app.theme(), row_index == app.selected_issue_index());
-        let mut spans = tree_control_spans(app.theme(), row);
+        let mut spans = tree_control_spans(app.theme(), row, app.spinner_glyph());
         spans.push(Span::raw(" "));
         spans.extend(style::code_cell_spans(
             app.theme(),
             item,
-            app.filter(),
+            app.highlight_term(),
             row_style,
         ));
-        ListItem::new(Line::from(spans))
+        let list_item = ListItem::new(Line::from(spans));
+        if row.reloading {
+            // Stale rows under a subtree being refreshed: greyed until fresh.
+            list_item.style(Style::default().add_modifier(Modifier::DIM))
+        } else {
+            list_item
+        }
     });
 
     frame.render_widget(List::new(items), area);
@@ -154,35 +160,43 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
             let item = &app.issues()[row.item_index];
             let row_style =
                 style::selected_row_style(app.theme(), row_index == app.selected_issue_index());
+            let row_style = if row.reloading {
+                row_style.add_modifier(Modifier::DIM)
+            } else {
+                row_style
+            };
             let cells = columns
                 .iter()
                 .enumerate()
                 .map(|(column_index, column)| {
                     let is_first = column_index == 0;
                     let spans = match column {
-                        JiraIssueColumn::IssueKey => {
-                            style::code_cell_spans(app.theme(), item, app.filter(), row_style)
-                        }
+                        JiraIssueColumn::IssueKey => style::code_cell_spans(
+                            app.theme(),
+                            item,
+                            app.highlight_term(),
+                            row_style,
+                        ),
                         JiraIssueColumn::Summary => {
                             let truncated =
                                 layout::truncate_with_ellipsis(&item.label, description_width);
                             style::highlighted_spans_owned(
                                 app.theme(),
                                 &truncated,
-                                app.filter(),
+                                app.highlight_term(),
                                 row_style,
                             )
                         }
                         JiraIssueColumn::IssueType => style::highlighted_spans(
                             app.theme(),
                             &item.kind,
-                            app.filter(),
+                            app.highlight_term(),
                             row_style,
                         ),
                         JiraIssueColumn::Status => style::highlighted_spans(
                             app.theme(),
                             &item.status,
-                            app.filter(),
+                            app.highlight_term(),
                             row_style,
                         ),
                         JiraIssueColumn::Field { id, .. } => item
@@ -195,6 +209,7 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
                         spans,
                         row,
                         is_first && has_expandable,
+                        app.spinner_glyph(),
                     )))
                 })
                 .collect::<Vec<_>>();
@@ -438,10 +453,10 @@ fn column_trigger(
 
 fn field_spans(app: &App, field_id: &str, value: &str, base_style: Style) -> Vec<Span<'static>> {
     match field_id {
-        "priority" => priority::spans(app.theme(), value, app.filter(), base_style, true),
+        "priority" => priority::spans(app.theme(), value, app.highlight_term(), base_style, true),
         "assignee" | "reporter" => avatar::bubble_only_spans(app.theme(), value),
-        "labels" => label::spans(app.theme(), value, app.filter(), base_style),
-        _ => style::highlighted_spans_owned(app.theme(), value, app.filter(), base_style),
+        "labels" => label::spans(app.theme(), value, app.highlight_term(), base_style),
+        _ => style::highlighted_spans_owned(app.theme(), value, app.highlight_term(), base_style),
     }
 }
 
@@ -459,12 +474,13 @@ fn with_tree_prefix<'a>(
     mut spans: Vec<Span<'a>>,
     row: &TreeRow,
     include_prefix: bool,
+    spinner: &str,
 ) -> Vec<Span<'a>> {
     if !include_prefix {
         return spans;
     }
 
-    let mut prefixed = tree_control_spans(theme, row)
+    let mut prefixed = tree_control_spans(theme, row, spinner)
         .into_iter()
         .map(|span| Span::styled(span.content.into_owned(), span.style))
         .collect::<Vec<_>>();
@@ -473,9 +489,20 @@ fn with_tree_prefix<'a>(
     prefixed
 }
 
-fn tree_control_spans(theme: &crate::ui::theme::Theme, row: &TreeRow) -> Vec<Span<'static>> {
+fn tree_control_spans(
+    theme: &crate::ui::theme::Theme,
+    row: &TreeRow,
+    spinner: &str,
+) -> Vec<Span<'static>> {
     let indent = "  ".repeat(row.depth);
-    let indicator = if row.expandable {
+    let indicator = if row.loading {
+        // The spinner glyph is owned by the App and advances each tick; clone
+        // it into the span so the returned spans stay 'static.
+        return vec![
+            Span::raw(indent),
+            Span::styled(spinner.to_owned(), Style::default().fg(theme.border_fg())),
+        ];
+    } else if row.expandable {
         if row.expanded {
             expanded_icon()
         } else {

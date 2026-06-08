@@ -45,6 +45,7 @@ pub struct KeyBindings {
     board: BoardKeyBindings,
     tree: TreeKeyBindings,
     quit: KeySpec,
+    reload_node: KeySpec,
     reload_list: KeySpec,
     leader: KeySpec,
     leader_command_log: KeySpec,
@@ -81,7 +82,6 @@ struct TreeKeyBindings {
     expand: KeySpec,
     toggle_expand: KeySpec,
     collapse_all: KeySpec,
-    expand_all: KeySpec,
     open_columns: KeySpec,
     yank_issue_url: KeySpec,
     open_assignee: KeySpec,
@@ -203,7 +203,6 @@ impl Default for TreeKeyBindings {
             expand: KeySpec::plain('l'),
             toggle_expand: KeySpec::plain(' '),
             collapse_all: KeySpec::plain('z'),
-            expand_all: KeySpec::shifted('z'),
             open_columns: KeySpec::plain('c'),
             yank_issue_url: KeySpec::plain('y'),
             open_assignee: KeySpec::plain('a'),
@@ -223,7 +222,8 @@ impl Default for KeyBindings {
             board: BoardKeyBindings::default(),
             tree: TreeKeyBindings::default(),
             quit: KeySpec::code_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL),
-            reload_list: KeySpec::plain('r'),
+            reload_node: KeySpec::plain('r'),
+            reload_list: KeySpec::shifted('r'),
             leader: KeySpec::code_with_modifiers(KeyCode::Char('x'), KeyModifiers::CONTROL),
             leader_command_log: KeySpec::plain('c'),
             leader_project: KeySpec::plain('p'),
@@ -266,6 +266,7 @@ impl KeyBindings {
         };
 
         set_key(&value, "global", "quit", &mut bindings.quit);
+        set_key(&value, "global", "reload_node", &mut bindings.reload_node);
         set_key(&value, "global", "reload_list", &mut bindings.reload_list);
         set_key(&value, "global", "leader", &mut bindings.leader);
         set_key(
@@ -377,7 +378,6 @@ impl KeyBindings {
             "collapse_all",
             &mut bindings.tree.collapse_all,
         );
-        set_key(&value, "tree", "expand_all", &mut bindings.tree.expand_all);
         set_key(
             &value,
             "tree",
@@ -445,6 +445,8 @@ impl KeyBindings {
             Some(Action::ToggleQuickSwitcher)
         } else if self.reload_list.matches(key) {
             Some(Action::ReloadList)
+        } else if self.reload_node.matches(key) {
+            Some(Action::ReloadNode)
         } else if is_ctrl_q(key) {
             Some(Action::Quit)
         } else {
@@ -491,7 +493,7 @@ impl KeyBindings {
             Action::Board(BoardAction::ToggleCollapse)
         } else if self.tree.collapse_all.matches(key) {
             Action::Board(BoardAction::CollapseAllGroups)
-        } else if self.tree.expand_all.matches(key) {
+        } else if KeySpec::shifted('z').matches(key) {
             Action::Board(BoardAction::ExpandAllGroups)
         } else if matches_any(&self.board.move_left, key) {
             Action::Board(BoardAction::MoveLeft)
@@ -557,8 +559,6 @@ impl KeyBindings {
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             Some(FilteredTreeAction::Tree(TreeAction::CollapseAll))
-        } else if self.tree.expand_all.matches(key) {
-            Some(FilteredTreeAction::Tree(TreeAction::ExpandAll))
         } else if self.tree.go_to_end.matches(key) || key.code == KeyCode::End {
             Some(FilteredTreeAction::Tree(TreeAction::GoToEnd))
         } else if key.code == KeyCode::Home {
@@ -635,7 +635,7 @@ impl KeyBindings {
             key_labels(&self.board.move_up, &self.board.move_down),
             key_labels(&self.board.page_up, &self.board.page_down),
             self.tree.collapse_all.label(),
-            self.tree.expand_all.label(),
+            KeySpec::shifted('z').label(),
             self.open_help.label()
         )
     }
@@ -914,9 +914,15 @@ impl KeyBindings {
                         ));
                         items.push(self.help_item(
                             HelpScope::Local,
+                            self.reload_node.label(),
+                            "Reload node",
+                            "Reload the selected issue's children from Jira.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
                             self.reload_list.label(),
                             "Reload list",
-                            "Reload issues for the active Jira project.",
+                            "Reload all issues for the active Jira project.",
                         ));
                     }
                 }

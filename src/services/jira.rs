@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Url;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::config::JiraCredentials;
@@ -13,6 +14,7 @@ pub struct IssueSummary {
     pub status: String,
     pub issue_type: String,
     pub parent_key: Option<String>,
+    pub has_children: bool,
     pub field_values: BTreeMap<String, String>,
 }
 
@@ -55,7 +57,8 @@ pub struct JiraError(pub String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JiraLoadResult {
     pub issues: Result<Vec<IssueSummary>, JiraError>,
-    pub log: CommandLogEntry,
+    pub next_page_token: Option<String>,
+    pub logs: Vec<CommandLogEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,26 +141,224 @@ impl BoardData {
     }
 }
 
-pub fn load_project_issues(credentials: &JiraCredentials) -> JiraLoadResult {
-    let site = credentials.site.trim().trim_end_matches('/');
+/// Issues per page when walking the root issue list.
+pub const ROOT_PAGE_SIZE: u32 = 100;
+/// Upper bound for a single child probe / child fetch response.
+const CHILD_PAGE_SIZE: u32 = 5_000;
+
+/// Loads one page of top-level issues (no parent) for the default project,
+/// most-recently-updated first, then probes which of them have children so the
+/// tree can show expansion chevrons without fetching the children themselves.
+pub fn load_root_issues(
+    credentials: &JiraCredentials,
+    fields: &str,
+    page_token: Option<&str>,
+) -> JiraLoadResult {
     let jql = format!(
-        "project = {} ORDER BY created DESC",
+        "project = {} AND parent IS EMPTY ORDER BY updated DESC",
         credentials.default_project.trim()
     );
-    let query = [
-        ("jql", jql.as_str()),
-        ("maxResults", "50"),
-        ("fields", "*all"),
+    let (issues, token, log) = run_search(credentials, &jql, fields, page_token, ROOT_PAGE_SIZE);
+    annotate_with_children(credentials, issues, token, log)
+}
+
+/// Loads the direct children of `parent_key`, most-recently-updated first, and
+/// probes which of them have grandchildren so they can be expanded in turn.
+pub fn load_child_issues(
+    credentials: &JiraCredentials,
+    parent_key: &str,
+    fields: &str,
+) -> JiraLoadResult {
+    let jql = format!("parent = {parent_key} ORDER BY updated DESC");
+    let (issues, token, log) = run_search(credentials, &jql, fields, None, CHILD_PAGE_SIZE);
+    annotate_with_children(credentials, issues, token, log)
+}
+
+/// Runs a server-side text search over the default project. Results are a flat
+/// list (no hierarchy), so children are not probed.
+pub fn search_issues(
+    credentials: &JiraCredentials,
+    term: &str,
+    fields: &str,
+    page_token: Option<&str>,
+) -> JiraLoadResult {
+    let project = credentials.default_project.trim();
+    let jql = match search_match_clause(term) {
+        Some(clause) => format!("project = {project} AND {clause} ORDER BY updated DESC"),
+        // Nothing searchable remained after sanitizing (e.g. only punctuation):
+        // fall back to the plain project listing rather than a broken query.
+        None => format!("project = {project} ORDER BY updated DESC"),
+    };
+    let (issues, next_page_token, log) =
+        run_search(credentials, &jql, fields, page_token, ROOT_PAGE_SIZE);
+    JiraLoadResult {
+        issues,
+        next_page_token,
+        logs: vec![log],
+    }
+}
+
+/// Builds the match portion of a search query from a raw term.
+///
+/// The term is split into words. Each word becomes a clause and all clauses are
+/// AND-ed together so every typed word must match. A word that looks like an
+/// issue key (`PROJ-123`) also matches the issue key exactly (case-insensitive),
+/// since keys never appear in the summary text. Every other word is sanitized to
+/// plain alphanumerics — so characters Lucene treats specially (`- + ! * ?` …)
+/// can't become operators — and matched as a prefix wildcard, so partial words
+/// like `adjustmen` still match `Adjustment` while the user is mid-type. Returns
+/// `None` when no searchable token remains.
+fn search_match_clause(term: &str) -> Option<String> {
+    let clauses: Vec<String> = term
+        .split_whitespace()
+        .filter_map(word_match_clause)
+        .collect();
+    (!clauses.is_empty()).then(|| clauses.join(" AND "))
+}
+
+/// Builds the match clause for a single whitespace-delimited word.
+fn word_match_clause(word: &str) -> Option<String> {
+    let token: String = word.chars().filter(|ch| ch.is_alphanumeric()).collect();
+    if token.is_empty() {
+        return None;
+    }
+    match issue_key(word) {
+        // Match the exact key (keys aren't in the summary) or a summary prefix.
+        Some(key) => Some(format!("(key = \"{key}\" OR summary ~ \"{token}*\")")),
+        None => Some(format!("summary ~ \"{token}*\"")),
+    }
+}
+
+/// Recognizes a `PROJ-123` issue key and returns it upper-cased, or `None`.
+fn issue_key(word: &str) -> Option<String> {
+    let (project, number) = word.split_once('-')?;
+    let project_ok = !project.is_empty() && project.chars().all(|ch| ch.is_ascii_alphabetic());
+    let number_ok = !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit());
+    (project_ok && number_ok).then(|| format!("{}-{number}", project.to_ascii_uppercase()))
+}
+
+/// Probes which of `parent_keys` have at least one child, then stamps
+/// `has_children` onto the matching issues.
+fn annotate_with_children(
+    credentials: &JiraCredentials,
+    issues: Result<Vec<IssueSummary>, JiraError>,
+    next_page_token: Option<String>,
+    search_log: CommandLogEntry,
+) -> JiraLoadResult {
+    let Ok(mut issues) = issues else {
+        return JiraLoadResult {
+            issues,
+            next_page_token,
+            logs: vec![search_log],
+        };
+    };
+    if issues.is_empty() {
+        return JiraLoadResult {
+            issues: Ok(issues),
+            next_page_token,
+            logs: vec![search_log],
+        };
+    }
+
+    let keys = issues
+        .iter()
+        .map(|issue| issue.key.clone())
+        .collect::<Vec<_>>();
+    let (parents_with_children, probe_log) = probe_children(credentials, &keys);
+    for issue in &mut issues {
+        issue.has_children = parents_with_children.contains(issue.key.as_str());
+    }
+
+    JiraLoadResult {
+        issues: Ok(issues),
+        next_page_token,
+        logs: vec![search_log, probe_log],
+    }
+}
+
+/// Returns the subset of `parent_keys` that have at least one child issue.
+/// Best-effort: on failure the set is empty (chevrons stay hidden) but the log
+/// records the error.
+fn probe_children(
+    credentials: &JiraCredentials,
+    parent_keys: &[String],
+) -> (HashSet<String>, CommandLogEntry) {
+    let jql = format!(
+        "parent in ({}) ORDER BY created DESC",
+        parent_keys.join(",")
+    );
+    let (parsed, log) =
+        fetch_search::<ParentProbeResponse>(credentials, &jql, "parent", None, CHILD_PAGE_SIZE);
+    let parents = parsed
+        .map(|payload| {
+            payload
+                .issues
+                .into_iter()
+                .filter_map(|issue| issue.fields.parent.map(|parent| parent.key))
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    (parents, log)
+}
+
+/// Executes a single `GET /search/jql` request and maps the page into issue
+/// summaries plus a pagination cursor.
+fn run_search(
+    credentials: &JiraCredentials,
+    jql: &str,
+    fields: &str,
+    page_token: Option<&str>,
+    max_results: u32,
+) -> (
+    Result<Vec<IssueSummary>, JiraError>,
+    Option<String>,
+    CommandLogEntry,
+) {
+    let (parsed, log) =
+        fetch_search::<SearchResponse>(credentials, jql, fields, page_token, max_results);
+    match parsed {
+        Ok(payload) => {
+            let token = payload.next_page_token.filter(|_| !payload.is_last);
+            let issues = payload
+                .issues
+                .into_iter()
+                .map(issue_summary_from_search_issue)
+                .collect();
+            (Ok(issues), token, log)
+        }
+        Err(error) => (Err(error), None, log),
+    }
+}
+
+/// Issues a single `GET /search/jql` request and deserializes the body into `T`.
+/// Centralizes auth, URL building, timing, and logging for every search-shaped
+/// query (roots, children, probe, search).
+fn fetch_search<T: DeserializeOwned>(
+    credentials: &JiraCredentials,
+    jql: &str,
+    fields: &str,
+    page_token: Option<&str>,
+    max_results: u32,
+) -> (Result<T, JiraError>, CommandLogEntry) {
+    let site = credentials.site.trim().trim_end_matches('/');
+    let max_results = max_results.to_string();
+    let mut query = vec![
+        ("jql", jql),
+        ("maxResults", max_results.as_str()),
+        ("fields", fields),
     ];
+    if let Some(token) = page_token {
+        query.push(("nextPageToken", token));
+    }
     let method = "GET";
     let timestamp = current_time_string();
     let url = match Url::parse_with_params(&format!("{site}/rest/api/3/search/jql"), &query) {
         Ok(url) => url,
         Err(error) => {
-            return JiraLoadResult {
-                issues: Err(JiraError(format!("Invalid Jira site URL: {error}"))),
-                log: failed_log(timestamp, method, "/search/jql"),
-            };
+            return (
+                Err(JiraError(format!("Invalid Jira site URL: {error}"))),
+                failed_log(timestamp, method, "/search/jql"),
+            );
         }
     };
     let started_at = Instant::now();
@@ -182,35 +383,29 @@ pub fn load_project_issues(credentials: &JiraCredentials) -> JiraLoadResult {
             };
 
             if !status.is_success() {
-                return JiraLoadResult {
-                    issues: Err(JiraError(format!("Jira returned HTTP {status}"))),
-                    log,
-                };
+                return (Err(JiraError(format!("Jira returned HTTP {status}"))), log);
             }
 
-            let issues = response
-                .json::<SearchResponse>()
-                .map_err(|error| JiraError(format!("Jira response could not be read: {error}")))
-                .map(|payload| {
-                    payload
-                        .issues
-                        .into_iter()
-                        .map(issue_summary_from_search_issue)
-                        .collect()
-                });
-
-            JiraLoadResult { issues, log }
+            match response.json::<T>() {
+                Ok(payload) => (Ok(payload), log),
+                Err(error) => (
+                    Err(JiraError(format!(
+                        "Jira response could not be read: {error}"
+                    ))),
+                    log,
+                ),
+            }
         }
-        Err(error) => JiraLoadResult {
-            issues: Err(JiraError(format!("Jira request failed: {error}"))),
-            log: CommandLogEntry {
+        Err(error) => (
+            Err(JiraError(format!("Jira request failed: {error}"))),
+            CommandLogEntry {
                 timestamp,
                 method,
                 path,
                 status: String::from("ERR"),
                 duration_ms,
             },
-        },
+        ),
     }
 }
 
@@ -743,8 +938,30 @@ struct AssignIssuePayload<'a> {
     account_id: Option<&'a str>,
 }
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchResponse {
     issues: Vec<SearchIssue>,
+    #[serde(default)]
+    next_page_token: Option<String>,
+    #[serde(default)]
+    is_last: bool,
+}
+
+/// Minimal response for the child-presence probe: only the `parent` field is
+/// requested, so the issue's other fields (summary/status/type) are absent.
+#[derive(Debug, Deserialize)]
+struct ParentProbeResponse {
+    issues: Vec<ParentProbeIssue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParentProbeIssue {
+    fields: ParentProbeFields,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParentProbeFields {
+    parent: Option<IssueParent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -830,6 +1047,7 @@ fn issue_summary_from_search_issue(issue: SearchIssue) -> IssueSummary {
         status: issue.fields.status.name,
         issue_type: issue.fields.issue_type.name,
         parent_key,
+        has_children: false,
         field_values,
     }
 }
@@ -1173,6 +1391,7 @@ fn issue_summary_from_board_issue(key: &str, value: &serde_json::Value) -> Issue
             .or_else(|| text_property(value, &["typeName", "issueTypeName"]))
             .unwrap_or_else(|| String::from("Issue")),
         parent_key,
+        has_children: false,
         field_values,
     }
 }
@@ -1226,10 +1445,42 @@ fn format_field_value(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SearchResponse, board_data_from_greenhopper, issue_summary_from_search_issue, log_path,
+        ParentProbeResponse, SearchResponse, board_data_from_greenhopper,
+        issue_summary_from_search_issue, log_path, search_match_clause,
     };
     use reqwest::Url;
     use serde_json::json;
+
+    #[test]
+    fn search_clause_matches_each_word_as_a_prefix() {
+        assert_eq!(
+            search_match_clause("admin adjustmen").as_deref(),
+            Some("summary ~ \"admin*\" AND summary ~ \"adjustmen*\"")
+        );
+    }
+
+    #[test]
+    fn search_clause_drops_punctuation_only_tokens() {
+        // The lone "-" carries no searchable text and must not become an operator.
+        assert_eq!(
+            search_match_clause("admin - adjustment").as_deref(),
+            Some("summary ~ \"admin*\" AND summary ~ \"adjustment*\"")
+        );
+    }
+
+    #[test]
+    fn search_clause_matches_issue_keys_by_key_or_summary() {
+        assert_eq!(
+            search_match_clause("dpp-2193").as_deref(),
+            Some("(key = \"DPP-2193\" OR summary ~ \"dpp2193*\")")
+        );
+    }
+
+    #[test]
+    fn search_clause_is_none_when_nothing_searchable() {
+        assert_eq!(search_match_clause("   ").as_deref(), None);
+        assert_eq!(search_match_clause("-").as_deref(), None);
+    }
 
     #[test]
     fn log_path_decodes_query_values_for_readable_command_log() {
@@ -1484,5 +1735,54 @@ mod tests {
             vec!["KAN-1"]
         );
         assert_eq!(board.swimlanes[0].issue_keys, vec!["KAN-1"]);
+    }
+    fn search_response_reads_pagination_cursor() {
+        let payload: SearchResponse = serde_json::from_value(json!({
+            "issues": [],
+            "nextPageToken": "abc123",
+            "isLast": false
+        }))
+        .expect("search response");
+
+        assert_eq!(payload.next_page_token.as_deref(), Some("abc123"));
+        assert!(!payload.is_last);
+    }
+
+    #[test]
+    fn search_response_defaults_pagination_when_absent() {
+        let payload: SearchResponse =
+            serde_json::from_value(json!({ "issues": [] })).expect("search response");
+
+        assert_eq!(payload.next_page_token, None);
+        assert!(!payload.is_last);
+    }
+
+    #[test]
+    fn parent_probe_parses_parent_only_payload_and_collects_parents() {
+        // The probe requests `fields=parent`, so issues have no summary/status/
+        // issuetype. A strict issue parser would fail here, silently hiding all
+        // chevrons; this minimal parser must succeed.
+        let payload: ParentProbeResponse = serde_json::from_value(json!({
+            "issues": [
+                { "key": "KAN-2", "fields": { "parent": { "key": "KAN-1" } } },
+                { "key": "KAN-3", "fields": { "parent": { "key": "KAN-1" } } },
+                { "key": "KAN-9", "fields": { "parent": null } }
+            ]
+        }))
+        .expect("parent probe response");
+
+        let parents: Vec<Option<String>> = payload
+            .issues
+            .into_iter()
+            .map(|issue| issue.fields.parent.map(|parent| parent.key))
+            .collect();
+        assert_eq!(
+            parents,
+            vec![
+                Some(String::from("KAN-1")),
+                Some(String::from("KAN-1")),
+                None
+            ]
+        );
     }
 }

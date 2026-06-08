@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use super::{
     filter::{FilterAction, FilterEvent, FilterState},
-    tree::{TreeAction, TreeItem, TreeRow, TreeState},
+    tree::{TreeAction, TreeEvent, TreeItem, TreeRow, TreeState},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,9 +18,15 @@ pub enum FilteredTreeAction {
     ClearFilter,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilteredTreeEvent {
     Quit,
+    /// The selected item was expanded but its children are not loaded yet.
+    LoadChildren(String),
+    /// The filter text changed; the new value should drive a server search.
+    FilterChanged(String),
+    /// The filter was cleared; browse state should be restored.
+    FilterCleared,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -43,17 +51,68 @@ impl FilteredTreeState {
 
     pub fn update_item_field(&mut self, item_id: &str, field_id: &str, value: Option<String>) {
         self.tree.update_item_field(item_id, field_id, value);
-        self.tree.clamp_selection(self.filter.value());
+        self.tree.clamp_selection();
     }
 
-    pub fn set_items(&mut self, items: Vec<TreeItem>) {
-        self.tree.set_items(items);
-        self.tree.clamp_selection(self.filter.value());
+    pub fn set_items(&mut self, items: Vec<TreeItem>, preserve_expanded: &HashSet<String>) {
+        self.tree.set_items(items, preserve_expanded);
+        self.tree.clamp_selection();
     }
 
-    pub fn set_searchable_field_ids(&mut self, field_ids: Option<Vec<String>>) {
-        self.tree.set_searchable_field_ids(field_ids);
-        self.tree.clamp_selection(self.filter.value());
+    pub fn set_flat(&mut self, flat: bool) {
+        self.tree.set_flat(flat);
+    }
+
+    pub fn add_children(&mut self, parent_id: &str, children: Vec<TreeItem>) {
+        self.tree.add_children(parent_id, children);
+    }
+
+    pub fn append_items(&mut self, items: Vec<TreeItem>) {
+        self.tree.append_items(items);
+    }
+
+    pub fn mark_children_failed(&mut self, parent_id: &str) {
+        self.tree.mark_children_failed(parent_id);
+    }
+
+    pub fn reload_children(&mut self, parent_id: &str) -> bool {
+        self.tree.reload_children(parent_id)
+    }
+
+    pub fn merge_root_items(&mut self, incoming: Vec<TreeItem>) {
+        self.tree.merge_root_items(incoming);
+    }
+
+    pub fn retain_roots(&mut self, keep: &HashSet<String>) {
+        self.tree.retain_roots(keep);
+    }
+
+    pub fn begin_soft_reload(&mut self, expanded: &HashSet<String>) -> Vec<String> {
+        self.tree.begin_soft_reload(expanded)
+    }
+
+    pub fn replace_children(&mut self, parent_id: &str, incoming: Vec<TreeItem>) {
+        self.tree.replace_children(parent_id, incoming);
+    }
+
+    pub fn mark_children_loaded(&mut self, parent_id: &str) {
+        self.tree.mark_children_loaded(parent_id);
+    }
+
+    pub fn expanded_item_ids(&self) -> &HashSet<String> {
+        self.tree.expanded_item_ids()
+    }
+
+    pub fn expanded_descendant_ids(&self, parent_id: &str) -> HashSet<String> {
+        self.tree.expanded_descendant_ids(parent_id)
+    }
+
+    pub fn contains_item(&self, id: &str) -> bool {
+        self.tree.contains_item(id)
+    }
+
+    pub fn nodes_needing_child_reload(&mut self, restore: &HashSet<String>) -> Vec<String> {
+        self.tree.nodes_needing_child_reload(restore)
     }
 
     pub fn tick(&mut self, dt: std::time::Duration) {
@@ -62,6 +121,10 @@ impl FilteredTreeState {
 
     pub fn is_animating(&self) -> bool {
         self.tree.is_animating()
+    }
+
+    pub fn any_loading(&self) -> bool {
+        self.tree.any_loading()
     }
 
     pub fn view_mode(&self) -> FilteredTreeViewMode {
@@ -77,11 +140,19 @@ impl FilteredTreeState {
     }
 
     pub fn select_item_index(&mut self, index: usize) {
-        self.tree.select_row(index, self.filter.value());
+        self.tree.select_row(index);
     }
 
     pub fn selected_item_id(&self) -> Option<&str> {
         self.tree.selected_item_id()
+    }
+
+    pub fn selected_root_ancestor_id(&self) -> Option<String> {
+        self.tree.selected_root_ancestor_id()
+    }
+
+    pub fn select_item_by_id(&mut self, id: &str) {
+        self.tree.select_item_by_id(id);
     }
 
     pub fn scroll_offset(&self) -> usize {
@@ -89,8 +160,7 @@ impl FilteredTreeState {
     }
 
     pub fn scroll_viewport(&mut self, delta: isize, height: usize) {
-        self.tree
-            .scroll_viewport(delta, self.filter.value(), height);
+        self.tree.scroll_viewport(delta, height);
     }
 
     pub fn filter(&self) -> &str {
@@ -110,23 +180,30 @@ impl FilteredTreeState {
     }
 
     pub fn visible_rows(&self) -> Vec<TreeRow> {
-        self.tree.rows(self.filter.value())
+        self.tree.rows()
     }
 
     pub fn visible_range(&self, height: usize) -> std::ops::Range<usize> {
-        self.tree.visible_range(self.filter.value(), height)
+        self.tree.visible_range(height)
     }
 
-    pub fn dispatch(&mut self, action: FilteredTreeAction) {
+    pub fn dispatch(&mut self, action: FilteredTreeAction) -> Option<FilteredTreeEvent> {
         match action {
-            FilteredTreeAction::Tree(action) => self.tree.dispatch(action, self.filter.value()),
+            FilteredTreeAction::Tree(action) => {
+                let event = self.tree.dispatch(action)?;
+                match event {
+                    TreeEvent::LoadChildren(id) => Some(FilteredTreeEvent::LoadChildren(id)),
+                }
+            }
             FilteredTreeAction::FocusFilter => {
                 self.filter.focus();
                 self.tree.clear_pending_prefix();
+                None
             }
             FilteredTreeAction::ClearFilter => {
+                let had_filter = !self.filter.value().is_empty();
                 self.filter.clear();
-                self.tree.select_row(0, self.filter.value());
+                had_filter.then_some(FilteredTreeEvent::FilterCleared)
             }
         }
     }
@@ -136,31 +213,35 @@ impl FilteredTreeState {
             return Some(FilteredTreeEvent::Quit);
         }
 
-        let event = self.filter.dispatch(action);
-        if matches!(event, Some(FilterEvent::Changed | FilterEvent::Blurred)) {
-            if self.filter.value().is_empty() {
-                self.tree.select_row(0, self.filter.value());
-            } else {
-                self.tree.clamp_selection(self.filter.value());
+        match self.filter.dispatch(action) {
+            Some(FilterEvent::Changed) => {
+                let value = self.filter.value();
+                if value.is_empty() {
+                    Some(FilteredTreeEvent::FilterCleared)
+                } else {
+                    Some(FilteredTreeEvent::FilterChanged(value.to_owned()))
+                }
             }
+            Some(FilterEvent::Blurred) | None => None,
         }
-        None
     }
 
     pub fn clear_transient_input(&mut self) {
         self.filter.clear_focus();
         self.tree.clear_pending_prefix();
-        self.tree.clamp_selection(self.filter.value());
+        self.tree.clamp_selection();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::super::{
         filter::FilterAction,
-        tree::{TreeAction, TreeItem},
+        tree::{Children, TreeAction, TreeItem},
     };
-    use super::{FilteredTreeAction, FilteredTreeState, FilteredTreeViewMode};
+    use super::{FilteredTreeAction, FilteredTreeEvent, FilteredTreeState, FilteredTreeViewMode};
 
     #[test]
     fn supports_switching_between_list_and_table_view() {
@@ -172,61 +253,52 @@ mod tests {
     }
 
     #[test]
-    fn filter_blur_keeps_filter_text_and_current_clamped_selection() {
+    fn typing_filter_emits_filter_changed_with_current_value() {
         let mut filtered_tree = FilteredTreeState::new(vec![
-            item("ONE", "Cart", None),
+            item("ONE", "Checkout", None),
             item("TWO", "Catalog", None),
-            item("THREE", "Other", None),
         ]);
 
-        filtered_tree.dispatch(FilteredTreeAction::Tree(TreeAction::MoveDown));
-        filtered_tree.dispatch(FilteredTreeAction::Tree(TreeAction::MoveDown));
         filtered_tree.dispatch(FilteredTreeAction::FocusFilter);
         filtered_tree.dispatch_filter(FilterAction::Text('c'));
-        filtered_tree.dispatch_filter(FilterAction::Text('a'));
-        filtered_tree.dispatch_filter(FilterAction::Exit);
+        let event = filtered_tree.dispatch_filter(FilterAction::Text('a'));
 
+        assert_eq!(
+            event,
+            Some(FilteredTreeEvent::FilterChanged(String::from("ca")))
+        );
         assert_eq!(filtered_tree.filter(), "ca");
-        assert!(!filtered_tree.is_filter_focused());
-        assert_eq!(filtered_tree.selected_item_index(), 1);
     }
 
     #[test]
-    fn typing_filter_clamps_selection_without_jumping_to_first_row() {
-        let mut filtered_tree = FilteredTreeState::new(vec![
-            item("ONE", "Checkout", None),
-            item("TWO", "Catalog", None),
-            item("THREE", "Other", None),
-        ]);
+    fn emptying_filter_by_backspace_emits_filter_cleared() {
+        let mut filtered_tree = FilteredTreeState::new(vec![item("ONE", "Checkout", None)]);
 
-        filtered_tree.dispatch(FilteredTreeAction::Tree(TreeAction::MoveDown));
-        filtered_tree.dispatch(FilteredTreeAction::Tree(TreeAction::MoveDown));
         filtered_tree.dispatch(FilteredTreeAction::FocusFilter);
         filtered_tree.dispatch_filter(FilterAction::Text('c'));
+        let event = filtered_tree.dispatch_filter(FilterAction::Backspace);
 
-        assert_eq!(filtered_tree.visible_rows().len(), 2);
-        assert_eq!(filtered_tree.selected_item_index(), 1);
-    }
-
-    #[test]
-    fn clear_filter_restores_all_rows_without_resetting_selection() {
-        let mut filtered_tree = FilteredTreeState::new(vec![
-            item("ONE", "Checkout", None),
-            item("TWO", "Catalog", None),
-        ]);
-
-        filtered_tree.dispatch(FilteredTreeAction::Tree(TreeAction::MoveDown));
-        filtered_tree.dispatch(FilteredTreeAction::FocusFilter);
-        filtered_tree.dispatch_filter(FilterAction::Text('c'));
-        assert_eq!(filtered_tree.visible_rows().len(), 2);
-        assert_eq!(filtered_tree.selected_item_index(), 1);
-
-        filtered_tree.dispatch(FilteredTreeAction::ClearFilter);
-
+        assert_eq!(event, Some(FilteredTreeEvent::FilterCleared));
         assert_eq!(filtered_tree.filter(), "");
-        assert!(!filtered_tree.is_filter_focused());
-        assert_eq!(filtered_tree.visible_rows().len(), 2);
-        assert_eq!(filtered_tree.selected_item_index(), 0);
+    }
+
+    #[test]
+    fn clear_filter_action_emits_cleared_only_when_filter_was_set() {
+        let mut filtered_tree = FilteredTreeState::new(vec![item("ONE", "Checkout", None)]);
+
+        assert_eq!(
+            filtered_tree.dispatch(FilteredTreeAction::ClearFilter),
+            None
+        );
+
+        filtered_tree.dispatch(FilteredTreeAction::FocusFilter);
+        filtered_tree.dispatch_filter(FilterAction::Text('c'));
+
+        assert_eq!(
+            filtered_tree.dispatch(FilteredTreeAction::ClearFilter),
+            Some(FilteredTreeEvent::FilterCleared)
+        );
+        assert_eq!(filtered_tree.filter(), "");
     }
 
     #[test]
@@ -240,29 +312,43 @@ mod tests {
     }
 
     #[test]
-    fn refreshed_items_preserve_filter_and_selected_id() {
+    fn expanding_not_loaded_item_emits_load_children() {
+        let mut root = item("EPIC", "Parent", None);
+        root.children = Children::NotLoaded;
+        let mut filtered_tree = FilteredTreeState::new(vec![root]);
+
+        let event = filtered_tree.dispatch(FilteredTreeAction::Tree(TreeAction::ToggleExpanded));
+
+        assert_eq!(
+            event,
+            Some(FilteredTreeEvent::LoadChildren(String::from("EPIC")))
+        );
+    }
+
+    #[test]
+    fn refreshed_items_preserve_selected_id() {
         let mut filtered_tree = FilteredTreeState::new(vec![
             item("ONE", "Checkout", None),
             item("TWO", "Catalog", None),
             item("THREE", "Cart", None),
         ]);
-        filtered_tree.dispatch(FilteredTreeAction::FocusFilter);
-        filtered_tree.dispatch_filter(FilterAction::Text('c'));
-        filtered_tree.dispatch_filter(FilterAction::Text('a'));
-        filtered_tree.dispatch_filter(FilterAction::Exit);
+        filtered_tree.dispatch(FilteredTreeAction::Tree(TreeAction::MoveDown));
         filtered_tree.dispatch(FilteredTreeAction::Tree(TreeAction::MoveDown));
         assert_eq!(filtered_tree.selected_item_id(), Some("THREE"));
 
-        filtered_tree.set_items(vec![
-            item("THREE", "Cart refreshed", None),
-            item("TWO", "Catalog refreshed", None),
-            item("ONE", "Checkout refreshed", None),
-        ]);
+        filtered_tree.set_items(
+            vec![
+                item("THREE", "Cart refreshed", None),
+                item("TWO", "Catalog refreshed", None),
+                item("ONE", "Checkout refreshed", None),
+            ],
+            &HashSet::new(),
+        );
 
-        assert_eq!(filtered_tree.filter(), "ca");
         assert_eq!(filtered_tree.selected_item_id(), Some("THREE"));
         assert_eq!(filtered_tree.selected_item_index(), 0);
     }
+
     fn item(id: &str, label: &str, parent_id: Option<&str>) -> TreeItem {
         TreeItem {
             id: id.to_owned(),
@@ -272,6 +358,7 @@ mod tests {
             parent_id: parent_id.map(str::to_owned),
             field_values: std::collections::BTreeMap::new(),
             root_order: 0,
+            children: Children::Unknown,
         }
     }
 }
