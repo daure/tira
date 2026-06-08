@@ -45,6 +45,7 @@ pub fn issue(key: &str, summary: &str, issue_type: &str, parent_key: Option<&str
         status: String::from("To Do"),
         issue_type: issue_type.to_owned(),
         parent_key: parent_key.map(str::to_owned),
+        has_children: false,
         field_values: std::collections::BTreeMap::new(),
     }
 }

@@ -86,7 +86,10 @@ fn issue_url_yank_binding_is_configurable_separately_from_columns() {
 fn leader_keys_are_mapped() {
     let bindings = KeyBindings::default();
 
-    assert_eq!(bindings.global_action_for(shift('r')), None);
+    assert_eq!(
+        bindings.global_action_for(shift('r')),
+        Some(Action::ReloadList)
+    );
     assert_eq!(bindings.global_action_for(ctrl('x')), Some(Action::Leader));
     assert_eq!(
         bindings.leader_action_for(key('c')),
@@ -102,7 +105,7 @@ fn leader_keys_are_mapped() {
     );
     assert_eq!(
         bindings.global_action_for(key('r')),
-        Some(Action::ReloadList)
+        Some(Action::ReloadNode)
     );
 }
 

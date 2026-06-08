@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::components::generic::{
     dropdown::{
         DropdownAction, DropdownEvent, DropdownOption, DropdownVisibleOption,
@@ -62,6 +64,31 @@ impl JiraIssueColumn {
             Self::Field { label, .. } => label,
         }
     }
+
+    /// The Jira field id this column reads from a search response, if any.
+    /// `IssueKey`/`Summary`/`IssueType`/`Status` are always requested as base
+    /// fields, so they report `None` here.
+    pub fn field_id(&self) -> Option<&str> {
+        match self {
+            Self::Field { id, .. } => Some(id.as_str()),
+            Self::IssueKey | Self::Summary | Self::IssueType | Self::Status => None,
+        }
+    }
+
+    /// Builds the comma-separated `fields` query value for `/search/jql` that
+    /// covers the base fields the tree always needs plus every dynamic field the
+    /// given columns render. Order is stable and de-duplicated.
+    pub fn fields_param<'a>(columns: impl IntoIterator<Item = &'a Self>) -> String {
+        let mut fields = vec!["summary", "status", "issuetype", "parent"];
+        for column in columns {
+            if let Some(id) = column.field_id()
+                && !fields.contains(&id)
+            {
+                fields.push(id);
+            }
+        }
+        fields.join(",")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +105,12 @@ pub enum JiraFilteredTreeEvent {
     IssueUrlCopyRequested(String),
     IssueUrlCopyUnavailable(String),
     ColumnsChanged(Vec<JiraIssueColumn>),
+    /// The selected issue was expanded but its children are not loaded yet.
+    LoadChildren(String),
+    /// The search filter changed; drive a server-side search with this term.
+    FilterChanged(String),
+    /// The search filter was cleared; restore the browse view.
+    FilterCleared,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -98,24 +131,78 @@ impl JiraFilteredTreeState {
             .filter(|column| !column.is_fixed())
             .cloned()
             .collect::<Vec<_>>();
-        let mut state = Self {
+        Self {
             filtered_tree: FilteredTreeState::new(items),
             jira_site: None,
             column_dropdown: None,
             visible_columns: default_columns,
             available_columns,
             pending_yank: false,
-        };
-        state.sync_searchable_fields();
-        state
+        }
     }
 
     pub fn set_jira_site(&mut self, site: impl Into<String>) {
         self.jira_site = Some(site.into());
     }
 
-    pub fn set_items(&mut self, items: Vec<TreeItem>) {
-        self.filtered_tree.set_items(items);
+    pub fn set_items(&mut self, items: Vec<TreeItem>, preserve_expanded: &HashSet<String>) {
+        self.filtered_tree.set_items(items, preserve_expanded);
+    }
+
+    pub fn set_flat(&mut self, flat: bool) {
+        self.filtered_tree.set_flat(flat);
+    }
+
+    pub fn add_children(&mut self, parent_id: &str, children: Vec<TreeItem>) {
+        self.filtered_tree.add_children(parent_id, children);
+    }
+
+    pub fn append_items(&mut self, items: Vec<TreeItem>) {
+        self.filtered_tree.append_items(items);
+    }
+
+    pub fn mark_children_failed(&mut self, parent_id: &str) {
+        self.filtered_tree.mark_children_failed(parent_id);
+    }
+
+    pub fn reload_children(&mut self, parent_id: &str) -> bool {
+        self.filtered_tree.reload_children(parent_id)
+    }
+
+    pub fn merge_root_items(&mut self, incoming: Vec<TreeItem>) {
+        self.filtered_tree.merge_root_items(incoming);
+    }
+
+    pub fn retain_roots(&mut self, keep: &HashSet<String>) {
+        self.filtered_tree.retain_roots(keep);
+    }
+
+    pub fn begin_soft_reload(&mut self, expanded: &HashSet<String>) -> Vec<String> {
+        self.filtered_tree.begin_soft_reload(expanded)
+    }
+
+    pub fn replace_children(&mut self, parent_id: &str, incoming: Vec<TreeItem>) {
+        self.filtered_tree.replace_children(parent_id, incoming);
+    }
+
+    pub fn mark_children_loaded(&mut self, parent_id: &str) {
+        self.filtered_tree.mark_children_loaded(parent_id);
+    }
+
+    pub fn expanded_item_ids(&self) -> &HashSet<String> {
+        self.filtered_tree.expanded_item_ids()
+    }
+
+    pub fn expanded_descendant_ids(&self, parent_id: &str) -> HashSet<String> {
+        self.filtered_tree.expanded_descendant_ids(parent_id)
+    }
+
+    pub fn contains_item(&self, id: &str) -> bool {
+        self.filtered_tree.contains_item(id)
+    }
+
+    pub fn nodes_needing_child_reload(&mut self, restore: &HashSet<String>) -> Vec<String> {
+        self.filtered_tree.nodes_needing_child_reload(restore)
     }
 
     pub fn update_assignee(&mut self, issue_key: &str, assignee_name: Option<String>) {
@@ -147,6 +234,10 @@ impl JiraFilteredTreeState {
                 .is_some_and(MultiSelectDropdownState::is_animating)
     }
 
+    pub fn any_loading(&self) -> bool {
+        self.filtered_tree.any_loading()
+    }
+
     pub fn view_mode(&self) -> FilteredTreeViewMode {
         self.filtered_tree.view_mode()
     }
@@ -169,6 +260,14 @@ impl JiraFilteredTreeState {
 
     pub fn selected_item_id(&self) -> Option<&str> {
         self.filtered_tree.selected_item_id()
+    }
+
+    pub fn selected_root_ancestor_id(&self) -> Option<String> {
+        self.filtered_tree.selected_root_ancestor_id()
+    }
+
+    pub fn select_item_by_id(&mut self, id: &str) {
+        self.filtered_tree.select_item_by_id(id);
     }
 
     pub fn scroll_offset(&self) -> usize {
@@ -258,8 +357,9 @@ impl JiraFilteredTreeState {
         match action {
             JiraFilteredTreeAction::FilteredTree(action) => {
                 self.pending_yank = false;
-                self.filtered_tree.dispatch(action);
-                None
+                self.filtered_tree
+                    .dispatch(action)
+                    .map(Self::map_tree_event)
             }
             JiraFilteredTreeAction::Dropdown(action) => self.dispatch_dropdown(action),
             JiraFilteredTreeAction::OpenColumns => {
@@ -277,7 +377,17 @@ impl JiraFilteredTreeState {
     ) -> Option<JiraFilteredTreeEvent> {
         self.filtered_tree
             .dispatch_filter(action)
-            .map(|FilteredTreeEvent::Quit| JiraFilteredTreeEvent::Quit)
+            .map(Self::map_tree_event)
+    }
+
+    /// Maps a generic filtered-tree event onto the Jira-specific event surface.
+    fn map_tree_event(event: FilteredTreeEvent) -> JiraFilteredTreeEvent {
+        match event {
+            FilteredTreeEvent::Quit => JiraFilteredTreeEvent::Quit,
+            FilteredTreeEvent::LoadChildren(id) => JiraFilteredTreeEvent::LoadChildren(id),
+            FilteredTreeEvent::FilterChanged(term) => JiraFilteredTreeEvent::FilterChanged(term),
+            FilteredTreeEvent::FilterCleared => JiraFilteredTreeEvent::FilterCleared,
+        }
     }
 
     pub fn clear_transient_input(&mut self) {
@@ -339,7 +449,6 @@ impl JiraFilteredTreeState {
             .collect::<Vec<_>>();
         self.visible_columns = JiraIssueColumn::fixed_columns();
         self.visible_columns.extend(selected);
-        self.sync_searchable_fields();
     }
 
     fn selector_label(column: &JiraIssueColumn) -> String {
@@ -348,20 +457,6 @@ impl JiraFilteredTreeState {
             JiraIssueColumn::Field { id, .. } if id == "assignee" => String::from("Assignee"),
             _ => column.label().to_owned(),
         }
-    }
-    fn sync_searchable_fields(&mut self) {
-        let field_ids = self
-            .visible_columns
-            .iter()
-            .map(|column| match column {
-                JiraIssueColumn::IssueKey => String::from("key"),
-                JiraIssueColumn::Summary => String::from("summary"),
-                JiraIssueColumn::IssueType => String::from("issuetype"),
-                JiraIssueColumn::Status => String::from("status"),
-                JiraIssueColumn::Field { id, .. } => id.clone(),
-            })
-            .collect();
-        self.filtered_tree.set_searchable_field_ids(Some(field_ids));
     }
 
     fn dispatch_yank_prefix(&mut self) -> Option<JiraFilteredTreeEvent> {
@@ -402,6 +497,7 @@ mod tests {
             parent_id: None,
             field_values: std::collections::BTreeMap::new(),
             root_order: 0,
+            children: crate::components::generic::tree::Children::Unknown,
         }
     }
 
@@ -417,33 +513,57 @@ mod tests {
     }
 
     #[test]
-    fn filter_uses_only_visible_jira_columns() {
-        let mut hidden_only = item("KAN-1");
-        hidden_only
-            .field_values
-            .insert(String::from("reporter"), String::from("Marlo Vlietstra"));
-        let mut assignee = item("KAN-2");
-        assignee
-            .field_values
-            .insert(String::from("assignee"), String::from("Marlo Vlietstra"));
-        let mut tree = JiraFilteredTreeState::new(vec![hidden_only, assignee]);
-        tree.set_available_columns(vec![
+    fn filter_input_emits_filter_changed_event_for_server_search() {
+        let mut tree = JiraFilteredTreeState::new(vec![item("KAN-1"), item("KAN-2")]);
+
+        let mut last = None;
+        for ch in "price".chars() {
+            last = tree.dispatch_filter(crate::FilterAction::Text(ch));
+        }
+
+        assert_eq!(
+            last,
+            Some(JiraFilteredTreeEvent::FilterChanged(String::from("price")))
+        );
+    }
+
+    #[test]
+    fn expanding_not_loaded_issue_emits_load_children_event() {
+        let mut root = item("KAN-1");
+        root.children = crate::components::generic::tree::Children::NotLoaded;
+        let mut tree = JiraFilteredTreeState::new(vec![root]);
+
+        let event = tree.dispatch(JiraFilteredTreeAction::FilteredTree(
+            crate::components::generic::filtered_tree::FilteredTreeAction::Tree(
+                crate::components::generic::tree::TreeAction::ToggleExpanded,
+            ),
+        ));
+
+        assert_eq!(
+            event,
+            Some(JiraFilteredTreeEvent::LoadChildren(String::from("KAN-1")))
+        );
+    }
+
+    #[test]
+    fn fields_param_includes_base_fields_and_dynamic_columns_without_duplicates() {
+        let columns = vec![
             JiraIssueColumn::IssueKey,
             JiraIssueColumn::Summary,
-            JiraIssueColumn::IssueType,
             JiraIssueColumn::Status,
             JiraIssueColumn::Field {
                 id: String::from("assignee"),
                 label: String::from("Assignee"),
             },
-        ]);
+            JiraIssueColumn::Field {
+                id: String::from("priority"),
+                label: String::from("Priority"),
+            },
+        ];
 
-        for ch in "marlo vlietstra".chars() {
-            tree.dispatch_filter(crate::FilterAction::Text(ch));
-        }
-
-        let rows = tree.visible_rows();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(tree.items()[rows[0].item_index].id, "KAN-2");
+        assert_eq!(
+            JiraIssueColumn::fields_param(&columns),
+            "summary,status,issuetype,parent,assignee,priority"
+        );
     }
 }

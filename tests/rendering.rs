@@ -73,6 +73,23 @@ fn status_bar_uses_configured_help_binding() {
 }
 
 #[test]
+fn status_bar_omits_active_tab_name() {
+    let backend = TestBackend::new(160, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let app = App::with_issues(vec![issue("KAN-1", "Work", "Task", None)]);
+    let bindings = KeyBindings::default();
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (_, bottom_row) = rendered_text(&terminal);
+    assert!(bottom_row.contains("NORMAL"));
+    // The footer no longer prefixes the status with the active tab name.
+    assert!(!bottom_row.contains("List ·"));
+}
+
+#[test]
 fn help_dialog_renders_local_and_global_sections() {
     let backend = TestBackend::new(160, 20);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -122,6 +139,7 @@ fn column_dropdown_separator_connects_to_border() {
         purpose: JiraLoadPurpose::Initial,
         credentials,
         result: JiraProjectLoadResult {
+            next_page_token: None,
             issues: Ok(vec![issue(
                 "KAN-1",
                 "Legacy placeholder task",
@@ -172,6 +190,7 @@ fn duplicate_field_labels_append_field_id_to_differentiate() {
         credentials,
         result: JiraProjectLoadResult {
             issues: Ok(Vec::new()),
+            next_page_token: None,
             fields: Ok(vec![
                 FieldSummary {
                     id: String::from("project"),
@@ -232,6 +251,7 @@ fn priority_and_assignee_fields_render_with_components() {
         credentials,
         result: JiraProjectLoadResult {
             issues: Ok(vec![issue]),
+            next_page_token: None,
             fields: Ok(vec![
                 FieldSummary {
                     id: String::from("priority"),

@@ -11,10 +11,13 @@ use crate::{
 
 pub fn selected_row_style(theme: &Theme, is_selected: bool) -> Style {
     if is_selected {
+        // Deliberately no BOLD: the bold modifier renders some nerd-font icons
+        // (work-item type glyphs) at a different width than their regular
+        // weight, so toggling it on selection made icons visibly grow/shrink as
+        // the cursor moved. Background + foreground alone mark the selection.
         Style::default()
             .fg(theme.selected_fg())
             .bg(theme.selected_bg())
-            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     }

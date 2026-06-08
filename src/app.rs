@@ -8,7 +8,7 @@ use crate::{
             filtered_tree::FilteredTreeViewMode,
             notification::Notification,
             tabs::{TabAction, TabsState},
-            tree::{TreeItem, TreeRow},
+            tree::{Children, TreeItem, TreeRow},
         },
         jira::filtered_tree::{
             JiraFilteredTreeAction, JiraFilteredTreeEvent, JiraFilteredTreeState, JiraIssueColumn,
@@ -17,7 +17,8 @@ use crate::{
     config::JiraCredentials,
     keymap::KeyBindings,
     services::jira::{
-        CommandLogEntry, FieldSummary, IssueSummary, JiraError, ProjectSummary, UserSummary,
+        CommandLogEntry, FieldSummary, IssueSummary, JiraError, JiraLoadResult, ProjectSummary,
+        UserSummary,
     },
     ui::theme::{Theme, ThemeChoice, ThemeName},
 };
@@ -33,6 +34,7 @@ pub enum Action {
     Tabs(TabAction),
     JiraFilteredTree(JiraFilteredTreeAction),
     ReloadList,
+    ReloadNode,
     Leader,
     ToggleCommandLog,
     CloseCommandLog,
@@ -62,6 +64,25 @@ pub enum AppEffect {
         request_id: u64,
         purpose: JiraLoadPurpose,
         credentials: JiraCredentials,
+        fields: String,
+    },
+    LoadMoreRoots {
+        request_id: u64,
+        credentials: JiraCredentials,
+        fields: String,
+        page_token: String,
+    },
+    LoadChildren {
+        request_id: u64,
+        credentials: JiraCredentials,
+        parent_key: String,
+        fields: String,
+    },
+    SearchIssues {
+        request_id: u64,
+        credentials: JiraCredentials,
+        term: String,
+        fields: String,
     },
     CopyToClipboard(String),
     SaveTheme(ThemeName),
@@ -80,6 +101,20 @@ pub enum AppEvent {
         purpose: JiraLoadPurpose,
         credentials: JiraCredentials,
         result: JiraProjectLoadResult,
+    },
+    RootsPageLoaded {
+        request_id: u64,
+        result: JiraLoadResult,
+    },
+    ChildrenLoaded {
+        request_id: u64,
+        parent_key: String,
+        result: JiraLoadResult,
+    },
+    SearchLoaded {
+        request_id: u64,
+        term: String,
+        result: JiraLoadResult,
     },
     CredentialsSaveFailed {
         request_id: u64,
@@ -108,9 +143,60 @@ pub enum JiraLoadPurpose {
     SwitchProject,
 }
 
+/// Which content the List screen is showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ListView {
+    /// Browsing the paginated root issue tree.
+    Browse,
+    /// Showing flat server-side search results for this term.
+    Search(String),
+}
+
+impl ListView {
+    /// Whether this is a search view for exactly `term` (no allocation).
+    fn is_searching_for(&self, term: &str) -> bool {
+        matches!(self, Self::Search(current) if current == term)
+    }
+}
+
+/// Braille dot frames for the loading spinner, cycling clockwise.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Plain-icon fallback frames (no Nerd/Unicode braille).
+const SPINNER_FRAMES_PLAIN: [&str; 4] = ["|", "/", "-", "\\"];
+/// Wall-clock time each spinner frame is shown.
+const SPINNER_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// Tracks the current animated-spinner frame, advanced by elapsed wall time.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Spinner {
+    frame: usize,
+    elapsed: std::time::Duration,
+}
+
+impl Spinner {
+    /// Advances the frame by the number of whole intervals in `dt`.
+    fn tick(&mut self, dt: std::time::Duration) {
+        self.elapsed += dt;
+        while self.elapsed >= SPINNER_FRAME_INTERVAL {
+            self.elapsed -= SPINNER_FRAME_INTERVAL;
+            self.frame = self.frame.wrapping_add(1);
+        }
+    }
+
+    /// The glyph for the current frame, honoring the plain-icon preference.
+    fn glyph(&self) -> &'static str {
+        if crate::ui::theme::prefers_plain_icons() {
+            SPINNER_FRAMES_PLAIN[self.frame % SPINNER_FRAMES_PLAIN.len()]
+        } else {
+            SPINNER_FRAMES[self.frame % SPINNER_FRAMES.len()]
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JiraProjectLoadResult {
     pub issues: Result<Vec<IssueSummary>, JiraError>,
+    pub next_page_token: Option<String>,
     pub fields: Result<Vec<FieldSummary>, JiraError>,
     pub projects: Result<Vec<ProjectSummary>, JiraError>,
     pub users: Result<Vec<UserSummary>, JiraError>,
@@ -363,6 +449,41 @@ pub struct App {
     active_load_request_id: Option<u64>,
     next_request_id: u64,
     pending_assignment_requests: std::collections::BTreeMap<String, u64>,
+    /// Whether the list is browsing the project tree or showing search results.
+    view: ListView,
+    /// Cursor for the next page of root issues while browsing; `None` when the
+    /// last page has been loaded or a load is not in progress.
+    next_root_page_token: Option<String>,
+    /// Request id of the in-flight root page load, if any.
+    pending_roots_request_id: Option<u64>,
+    /// Request id of the most recent search; only its result is applied.
+    search_request_id: Option<u64>,
+    /// The search term that produced the issues currently displayed. Highlights
+    /// match this, not the live filter input, so they only change when results
+    /// arrive. `None` while browsing.
+    applied_search_term: Option<String>,
+    /// In-flight child-load request ids keyed by parent issue key.
+    pending_child_requests: std::collections::BTreeMap<String, u64>,
+    /// Issue ids whose expansion should be restored as the tree reloads. Seeded
+    /// when a full or node reload starts; consumed incrementally as nodes
+    /// reappear and their children arrive, so nested expanded subtrees are
+    /// re-fetched in parallel and re-opened.
+    expansion_to_restore: std::collections::HashSet<String>,
+    /// Parent ids whose children are being refreshed in place by a seamless
+    /// reload. Their `ChildrenLoaded` results are merged (not appended) so the
+    /// stale subtree is swapped without collapsing or moving the view.
+    soft_reload_parents: std::collections::HashSet<String>,
+    /// While a paginated seamless reload collects root pages, accumulates every
+    /// root id seen so far. Once paging finishes, roots absent from this set
+    /// (deleted server-side) are pruned. `None` outside a reload.
+    reload_root_ids: Option<std::collections::HashSet<String>>,
+    /// Set when the next project load should be applied as a seamless in-place
+    /// reload (`Shift+R`) — merging into the current browse tree rather than
+    /// rebuilding it. Other project loads (initial, project switch, returning
+    /// from search) rebuild from scratch and leave this `false`.
+    pending_reload_seamless: bool,
+    /// Animated spinner for in-flight node loads.
+    spinner: Spinner,
 }
 
 impl Default for App {
@@ -403,6 +524,17 @@ impl App {
             active_load_request_id: None,
             next_request_id: 1,
             pending_assignment_requests: std::collections::BTreeMap::new(),
+            view: ListView::Browse,
+            next_root_page_token: None,
+            pending_roots_request_id: None,
+            search_request_id: None,
+            applied_search_term: None,
+            pending_child_requests: std::collections::BTreeMap::new(),
+            expansion_to_restore: std::collections::HashSet::new(),
+            soft_reload_parents: std::collections::HashSet::new(),
+            reload_root_ids: None,
+            pending_reload_seamless: false,
+            spinner: Spinner::default(),
         }
     }
 
@@ -437,6 +569,17 @@ impl App {
             active_load_request_id: None,
             next_request_id: 1,
             pending_assignment_requests: std::collections::BTreeMap::new(),
+            view: ListView::Browse,
+            next_root_page_token: None,
+            pending_roots_request_id: None,
+            search_request_id: None,
+            applied_search_term: None,
+            pending_child_requests: std::collections::BTreeMap::new(),
+            expansion_to_restore: std::collections::HashSet::new(),
+            soft_reload_parents: std::collections::HashSet::new(),
+            reload_root_ids: None,
+            pending_reload_seamless: false,
+            spinner: Spinner::default(),
         }
     }
 
@@ -470,7 +613,7 @@ impl App {
     }
 
     pub fn from_credentials(credentials: JiraCredentials) -> Self {
-        let mut app = Self::setup("Loading Jira issues...");
+        let mut app = Self::setup("Loading Jira issues");
         app.screen = Screen::Main;
         app.credentials = Some(credentials.clone());
         app.filtered_tree.set_jira_site(credentials.site.clone());
@@ -515,11 +658,29 @@ impl App {
         if let Some(dropdown) = &mut self.assignee_dropdown {
             dropdown.tick(dt);
         }
+        if self.is_loading() {
+            self.spinner.tick(dt);
+        }
         for notification in &mut self.notifications {
             notification.tick(dt);
         }
         self.notifications
             .retain(|notification| !notification.is_expired());
+    }
+
+    /// The current spinner glyph for rendering in-flight loads.
+    pub fn spinner_glyph(&self) -> &'static str {
+        self.spinner.glyph()
+    }
+
+    /// Whether a *foreground* Jira request is in flight: the initial/reload/
+    /// project load, a server search, or a node child fetch. Background root
+    /// pagination is intentionally excluded — it fills the list incrementally
+    /// and must not keep the footer spinner running after the first page shows.
+    pub fn is_loading(&self) -> bool {
+        self.active_load_request_id.is_some()
+            || self.search_request_id.is_some()
+            || self.filtered_tree.any_loading()
     }
 
     pub fn is_animating(&self) -> bool {
@@ -541,6 +702,7 @@ impl App {
                 .as_ref()
                 .is_some_and(MultiSelectDropdownState::is_animating)
             || self.notifications.iter().any(Notification::is_animating)
+            || self.is_loading()
     }
 
     pub fn take_effects(&mut self) -> Vec<AppEffect> {
@@ -555,6 +717,19 @@ impl App {
                 credentials,
                 result,
             } => self.apply_jira_project_result(request_id, purpose, credentials, result),
+            AppEvent::RootsPageLoaded { request_id, result } => {
+                self.apply_roots_page_result(request_id, result)
+            }
+            AppEvent::ChildrenLoaded {
+                request_id,
+                parent_key,
+                result,
+            } => self.apply_children_result(request_id, parent_key, result),
+            AppEvent::SearchLoaded {
+                request_id,
+                term,
+                result,
+            } => self.apply_search_result(request_id, term, result),
             AppEvent::CredentialsSaveFailed {
                 request_id,
                 purpose,
@@ -639,11 +814,36 @@ impl App {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.active_load_request_id = Some(request_id);
+        // A fresh project load resets browse/search/pagination state.
+        self.view = ListView::Browse;
+        self.next_root_page_token = None;
+        self.pending_roots_request_id = None;
+        self.search_request_id = None;
+        self.applied_search_term = None;
+        self.pending_child_requests.clear();
+        // Default to no expansion restore; reload paths re-seed this afterwards.
+        self.expansion_to_restore.clear();
+        self.soft_reload_parents.clear();
+        self.reload_root_ids = None;
+        self.pending_reload_seamless = false;
+        self.filtered_tree.set_flat(false);
         self.pending_effects.push(AppEffect::LoadJiraProject {
             request_id,
             purpose,
             credentials,
+            fields: self.current_fields_param(),
         });
+    }
+
+    /// The `fields` query value for the current visible columns.
+    fn current_fields_param(&self) -> String {
+        JiraIssueColumn::fields_param(self.filtered_tree.visible_columns())
+    }
+
+    fn next_request_id(&mut self) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        request_id
     }
 
     fn is_current_load(&self, request_id: u64) -> bool {
@@ -710,7 +910,20 @@ impl App {
                 if let Some(credentials) = &self.credentials {
                     self.filtered_tree.set_jira_site(credentials.site.clone());
                 }
-                self.filtered_tree.set_items(tree_items_from_issues(issues));
+                self.filtered_tree.set_flat(false);
+                self.view = ListView::Browse;
+                let roots = tree_items_from_issues(issues);
+                if std::mem::take(&mut self.pending_reload_seamless) {
+                    self.begin_seamless_reload(roots, result.next_page_token);
+                } else {
+                    self.filtered_tree
+                        .set_items(roots, &self.expansion_to_restore);
+                    self.next_root_page_token = result.next_page_token;
+                    self.maybe_queue_next_root_page();
+                    // Re-open and re-fetch any roots whose expansion is being
+                    // restored; nested levels follow as their children arrive.
+                    self.drive_expansion_restore();
+                }
                 self.screen = Screen::Main;
                 self.status = match purpose {
                     JiraLoadPurpose::Initial | JiraLoadPurpose::Reload => {
@@ -728,6 +941,286 @@ impl App {
                 self.status = error.0;
             }
         }
+    }
+
+    /// Queues the next page of root issues if one is pending and no root-page
+    /// load is already in flight. Browsing only.
+    fn maybe_queue_next_root_page(&mut self) {
+        if self.pending_roots_request_id.is_some() || self.view != ListView::Browse {
+            return;
+        }
+        let Some(token) = self.next_root_page_token.clone() else {
+            return;
+        };
+        let Some(credentials) = self.credentials.clone() else {
+            return;
+        };
+        let request_id = self.next_request_id();
+        self.pending_roots_request_id = Some(request_id);
+        self.pending_effects.push(AppEffect::LoadMoreRoots {
+            request_id,
+            credentials,
+            fields: self.current_fields_param(),
+            page_token: token,
+        });
+    }
+
+    /// Applies the first root page of a seamless (in-place) reload: merges the
+    /// fresh roots without tearing the tree down, kicks off paging for the rest,
+    /// and starts background refreshes of the previously-expanded subtrees. The
+    /// selection, scroll, and expansion stay exactly where they were.
+    fn begin_seamless_reload(&mut self, roots: Vec<TreeItem>, next_token: Option<String>) {
+        let mut seen: std::collections::HashSet<String> =
+            roots.iter().map(|item| item.id.clone()).collect();
+        self.filtered_tree.merge_root_items(roots);
+        self.next_root_page_token = next_token;
+        if self.next_root_page_token.is_some() {
+            // More pages coming: hold the accumulator and prune once they land.
+            self.reload_root_ids = Some(std::mem::take(&mut seen));
+            self.maybe_queue_next_root_page();
+        } else {
+            // Single page: prune any roots deleted server-side right away.
+            self.filtered_tree.retain_roots(&seen);
+            self.reload_root_ids = None;
+        }
+
+        // Refresh each previously-expanded subtree in place. The stale children
+        // stay visible (greyed) until the fresh set arrives.
+        let expanded = std::mem::take(&mut self.expansion_to_restore);
+        for parent in self.filtered_tree.begin_soft_reload(&expanded) {
+            self.soft_reload_parents.insert(parent.clone());
+            self.request_children(parent);
+        }
+    }
+
+    fn apply_roots_page_result(&mut self, request_id: u64, result: JiraLoadResult) {
+        self.command_log.extend(result.logs);
+        if self.pending_roots_request_id != Some(request_id) {
+            // Superseded by a newer load (reload, project switch, or search).
+            return;
+        }
+        self.pending_roots_request_id = None;
+
+        match result.issues {
+            Ok(issues) => {
+                let items = tree_items_from_issues(issues);
+                if self.reload_root_ids.is_some() {
+                    // Seamless reload paging: merge in place and accumulate ids.
+                    if let Some(seen) = self.reload_root_ids.as_mut() {
+                        seen.extend(items.iter().map(|item| item.id.clone()));
+                    }
+                    self.filtered_tree.merge_root_items(items);
+                    self.next_root_page_token = result.next_page_token;
+                    if self.next_root_page_token.is_some() {
+                        self.maybe_queue_next_root_page();
+                    } else if let Some(seen) = self.reload_root_ids.take() {
+                        // Final page: prune roots deleted server-side.
+                        self.filtered_tree.retain_roots(&seen);
+                    }
+                } else {
+                    if self.view == ListView::Browse {
+                        self.filtered_tree.append_items(items);
+                    }
+                    self.next_root_page_token = result.next_page_token;
+                    self.maybe_queue_next_root_page();
+                }
+            }
+            Err(error) => {
+                self.next_root_page_token = None;
+                self.reload_root_ids = None;
+                self.notifications
+                    .push(Notification::error("Could not load more issues", error.0));
+            }
+        }
+    }
+
+    fn request_children(&mut self, parent_key: String) {
+        let Some(credentials) = self.credentials.clone() else {
+            return;
+        };
+        let request_id = self.next_request_id();
+        self.pending_child_requests
+            .insert(parent_key.clone(), request_id);
+        self.pending_effects.push(AppEffect::LoadChildren {
+            request_id,
+            credentials,
+            parent_key,
+            fields: self.current_fields_param(),
+        });
+    }
+
+    /// Removes `parent_key` from the restore set once its children have arrived
+    /// (or failed), so the restoration is considered complete for that node.
+    fn parent_key_done_restoring(&mut self, parent_key: &str) {
+        self.expansion_to_restore.remove(parent_key);
+    }
+
+    /// Advances expansion restoration one step: marks every present node in the
+    /// restore set that still needs its children (`NotLoaded`) as loading, and
+    /// fires a child fetch for each — in parallel. Re-invoked after each child
+    /// batch arrives so deeper levels restore as they reappear. No-op when the
+    /// restore set is empty.
+    fn drive_expansion_restore(&mut self) {
+        if !self.expansion_to_restore.is_empty() {
+            // Take the set out to avoid borrowing `self` twice; the retain below
+            // reinstates whatever still needs restoring.
+            let restore = std::mem::take(&mut self.expansion_to_restore);
+            let to_fetch = self.filtered_tree.nodes_needing_child_reload(&restore);
+            for parent_key in to_fetch {
+                self.request_children(parent_key);
+            }
+            // Settle the set: drop ids that are present but no longer awaiting
+            // work (already loaded/reopened). Keep ids still in flight and ids
+            // not yet materialized — deeper levels appear once their parent's
+            // children load.
+            self.expansion_to_restore = restore;
+            self.expansion_to_restore.retain(|id| {
+                !self.filtered_tree.contains_item(id)
+                    || self.pending_child_requests.contains_key(id.as_str())
+            });
+        }
+    }
+
+    fn apply_children_result(
+        &mut self,
+        request_id: u64,
+        parent_key: String,
+        result: JiraLoadResult,
+    ) {
+        self.command_log.extend(result.logs);
+        if self.pending_child_requests.get(parent_key.as_str()) != Some(&request_id) {
+            // The node was collapsed/reloaded, or a newer request superseded this.
+            return;
+        }
+        self.pending_child_requests.remove(parent_key.as_str());
+
+        // A seamless reload refreshes this subtree in place: swap the stale
+        // children for the fresh set without collapsing or moving the view.
+        if self.soft_reload_parents.remove(&parent_key) {
+            match result.issues {
+                Ok(issues) => {
+                    self.filtered_tree
+                        .replace_children(&parent_key, tree_items_from_issues(issues));
+                }
+                Err(error) => {
+                    // Keep the stale subtree on screen; just clear the spinner.
+                    self.filtered_tree.mark_children_loaded(&parent_key);
+                    self.notifications.push(Notification::error(
+                        "Could not refresh child issues",
+                        error.0,
+                    ));
+                }
+            }
+            return;
+        }
+
+        match result.issues {
+            Ok(issues) => {
+                self.filtered_tree
+                    .add_children(&parent_key, tree_items_from_issues(issues));
+                // Newly-arrived children may themselves be nodes whose expansion
+                // is being restored; fetch and re-open them too.
+                self.parent_key_done_restoring(&parent_key);
+                self.drive_expansion_restore();
+            }
+            Err(error) => {
+                self.filtered_tree.mark_children_failed(&parent_key);
+                self.parent_key_done_restoring(&parent_key);
+                self.notifications
+                    .push(Notification::error("Could not load child issues", error.0));
+            }
+        }
+    }
+
+    /// Starts a server-side search for `term`, or restores the browse view when
+    /// `term` is empty.
+    fn run_search(&mut self, term: String) {
+        if term.trim().is_empty() {
+            self.restore_browse_view();
+            return;
+        }
+        let Some(credentials) = self.credentials.clone() else {
+            return;
+        };
+        // Entering search abandons any in-flight browse expansion restore and
+        // lazy child loads; their results must not touch the flat search view.
+        self.pending_child_requests.clear();
+        self.expansion_to_restore.clear();
+        // Likewise drop any in-flight seamless-reload paging/refresh so a late
+        // root page or child batch can't merge into the search results.
+        self.pending_roots_request_id = None;
+        self.next_root_page_token = None;
+        self.reload_root_ids = None;
+        self.soft_reload_parents.clear();
+        self.pending_reload_seamless = false;
+        self.view = ListView::Search(term.clone());
+        let request_id = self.next_request_id();
+        self.search_request_id = Some(request_id);
+        self.status = format!("Searching for \"{term}\"");
+        self.pending_effects.push(AppEffect::SearchIssues {
+            request_id,
+            credentials,
+            term,
+            fields: self.current_fields_param(),
+        });
+    }
+
+    fn apply_search_result(&mut self, request_id: u64, term: String, result: JiraLoadResult) {
+        self.command_log.extend(result.logs);
+        // Only the most recent search is applied (debounce-by-latest), and only
+        // while still searching for the same term.
+        if self.search_request_id != Some(request_id) || !self.view.is_searching_for(&term) {
+            return;
+        }
+        self.search_request_id = None;
+
+        match result.issues {
+            Ok(issues) => {
+                self.filtered_tree.set_flat(true);
+                self.filtered_tree.set_items(
+                    tree_items_from_issues(issues),
+                    &std::collections::HashSet::new(),
+                );
+                // Highlights now follow the term that produced these results.
+                self.applied_search_term = Some(term.clone());
+                let count = self.filtered_tree.items().len();
+                self.status = format!("{count} result(s) for \"{term}\".");
+            }
+            Err(error) => {
+                self.status = error.0;
+            }
+        }
+    }
+
+    /// After the visible columns change, the required `fields` set changes too.
+    /// Re-fetch the current view so newly-shown columns get populated.
+    fn reload_current_view_fields(&mut self) {
+        match &self.view {
+            ListView::Browse => {
+                let Some(credentials) = self.credentials.clone() else {
+                    return;
+                };
+                self.queue_jira_load(JiraLoadPurpose::Reload, credentials);
+            }
+            ListView::Search(term) => {
+                let term = term.clone();
+                self.run_search(term);
+            }
+        }
+    }
+    /// Reloads the browse tree from scratch after leaving search.
+    fn restore_browse_view(&mut self) {
+        if self.view == ListView::Browse {
+            return;
+        }
+        self.view = ListView::Browse;
+        self.search_request_id = None;
+        self.applied_search_term = None;
+        let Some(credentials) = self.credentials.clone() else {
+            return;
+        };
+        self.status = String::from("Loading Jira issues");
+        self.queue_jira_load(JiraLoadPurpose::Reload, credentials);
     }
 
     fn apply_available_columns(&mut self, fields: Vec<FieldSummary>) {
@@ -782,6 +1275,14 @@ impl App {
 
     pub fn selected_issue_key(&self) -> Option<&str> {
         self.filtered_tree.selected_item_id()
+    }
+
+    /// The term highlights should match: the search term that produced the
+    /// currently displayed results, not the live filter input. Empty while
+    /// browsing or before the first search result arrives, so stale rows are
+    /// never highlighted against a not-yet-applied query.
+    pub fn highlight_term(&self) -> &str {
+        self.applied_search_term.as_deref().unwrap_or("")
     }
 
     pub fn issue_scroll_offset(&self) -> usize {
@@ -1739,6 +2240,7 @@ impl App {
             Action::Tabs(action) => self.dispatch_tabs(action),
             Action::JiraFilteredTree(action) => self.dispatch_jira_filtered_tree(action),
             Action::ReloadList => self.reload_list(),
+            Action::ReloadNode => self.reload_node(),
             Action::Leader => self.leader_pending = true,
             Action::ToggleCommandLog => self.toggle_dialog(DialogKind::CommandLog),
             Action::ToggleQuickSwitcher => self.toggle_dropdown(DropdownKind::QuickSwitcher),
@@ -1872,7 +2374,10 @@ impl App {
             JiraFilteredTreeEvent::IssueUrlCopyUnavailable(message) => self
                 .notifications
                 .push(Notification::error("Issue URL not copied", message)),
-            JiraFilteredTreeEvent::ColumnsChanged(_) => {}
+            JiraFilteredTreeEvent::ColumnsChanged(_) => self.reload_current_view_fields(),
+            JiraFilteredTreeEvent::LoadChildren(parent_key) => self.request_children(parent_key),
+            JiraFilteredTreeEvent::FilterChanged(term) => self.run_search(term),
+            JiraFilteredTreeEvent::FilterCleared => self.restore_browse_view(),
         }
     }
 
@@ -2265,8 +2770,8 @@ impl App {
         };
 
         self.status = match assignee.as_ref() {
-            Some(user) => format!("Assigning {issue_key} to {}...", user.display_name),
-            None => format!("Unassigning {issue_key}..."),
+            Some(user) => format!("Assigning {issue_key} to {}", user.display_name),
+            None => format!("Unassigning {issue_key}"),
         };
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
@@ -2315,7 +2820,7 @@ impl App {
         }
 
         credentials.default_project = project.key.clone();
-        self.status = format!("Loading Jira project {}...", project.key);
+        self.status = format!("Loading Jira project {}", project.key);
         self.queue_jira_load(JiraLoadPurpose::SwitchProject, credentials);
     }
 
@@ -2325,7 +2830,7 @@ impl App {
             return;
         };
 
-        self.status = String::from("Loading Jira issues...");
+        self.status = String::from("Loading Jira issues");
         self.credentials = Some(credentials.clone());
         self.filtered_tree.set_jira_site(credentials.site.clone());
         self.queue_jira_load(JiraLoadPurpose::Setup, credentials);
@@ -2341,8 +2846,45 @@ impl App {
             return;
         };
 
-        self.status = String::from("Reloading Jira issues...");
+        // A seamless reload refreshes the existing tree in place rather than
+        // tearing it down, so the selection, scroll position, and expanded
+        // subtrees stay put — no anchoring to the root, no jump to the top.
+        // Capture the currently-expanded nodes so their children are refreshed
+        // in the background. Must be set after queue_jira_load, which clears the
+        // restore set for non-reload loads.
+        let expanded = self.filtered_tree.expanded_item_ids().clone();
+        self.status = String::from("Reloading Jira issues");
         self.queue_jira_load(JiraLoadPurpose::Reload, credentials);
+        self.expansion_to_restore = expanded;
+        self.pending_reload_seamless = true;
+    }
+
+    /// Refreshes the children of the selected tree node in place, keeping the
+    /// stale subtree visible (greyed) until the fresh set arrives so the node
+    /// never collapses or jumps. Does nothing when the selection has no loaded
+    /// children (or there is no selection); only `Shift+R` reloads the whole
+    /// list.
+    fn reload_node(&mut self) {
+        if !self.tabs.is_active(APP_TABS, "List") || self.view != ListView::Browse {
+            return;
+        }
+        let Some(node_id) = self.filtered_tree.selected_item_id().map(str::to_owned) else {
+            return;
+        };
+        // Refresh the node and any open descendant subtrees in place, in
+        // parallel. `begin_soft_reload` marks each as loading without dropping
+        // its children and returns the ids to refetch.
+        let mut targets = self.filtered_tree.expanded_descendant_ids(&node_id);
+        targets.insert(node_id.clone());
+        let to_fetch = self.filtered_tree.begin_soft_reload(&targets);
+        if to_fetch.is_empty() {
+            return;
+        }
+        self.status = format!("Reloading {node_id}");
+        for parent in to_fetch {
+            self.soft_reload_parents.insert(parent.clone());
+            self.request_children(parent);
+        }
     }
 }
 
@@ -2405,16 +2947,22 @@ fn contains_point(area: Rect, point: (u16, u16)) -> bool {
 }
 
 fn tree_items_from_issues(issues: Vec<IssueSummary>) -> Vec<TreeItem> {
-    issues
-        .into_iter()
-        .map(|issue| TreeItem {
-            id: issue.key,
-            label: issue.summary,
-            status: issue.status,
-            kind: issue.issue_type.clone(),
-            parent_id: issue.parent_key,
-            field_values: issue.field_values,
-            root_order: 0,
-        })
-        .collect()
+    issues.into_iter().map(tree_item_from_issue).collect()
+}
+
+fn tree_item_from_issue(issue: IssueSummary) -> TreeItem {
+    TreeItem {
+        id: issue.key,
+        label: issue.summary,
+        status: issue.status,
+        kind: issue.issue_type,
+        parent_id: issue.parent_key,
+        field_values: issue.field_values,
+        root_order: 0,
+        children: if issue.has_children {
+            Children::NotLoaded
+        } else {
+            Children::Unknown
+        },
+    }
 }

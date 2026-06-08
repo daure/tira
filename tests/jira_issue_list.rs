@@ -3,7 +3,7 @@ mod support;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tira::{App, KeyBindings};
 
-use support::{issue, key, shift};
+use support::{issue, key};
 
 #[test]
 fn column_picker_yank_and_expansion_keys_apply_to_issue_list() {
@@ -57,18 +57,25 @@ fn column_picker_yank_and_expansion_keys_apply_to_issue_list() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
 
-    app.handle_key(shift('z'), &bindings);
+    // Selection is on the epic (KAN-1); expand it with `l` to reveal its child.
+    app.handle_key(key('l'), &bindings);
     assert_eq!(app.visible_issue_rows().len(), 2);
 
+    // Ctrl-c collapses all loaded nodes.
     app.handle_key(
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         &bindings,
     );
     assert_eq!(app.visible_issue_rows().len(), 1);
 
-    app.handle_key(shift('z'), &bindings);
+    // Space toggles expansion of the selected node back open.
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        &bindings,
+    );
     assert_eq!(app.visible_issue_rows().len(), 2);
 
+    // `z` collapses all loaded nodes.
     app.handle_key(key('z'), &bindings);
     assert_eq!(app.visible_issue_rows().len(), 1);
 }
