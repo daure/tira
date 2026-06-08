@@ -495,6 +495,12 @@ impl KeyBindings {
             Action::Board(BoardAction::CollapseAllGroups)
         } else if KeySpec::shifted('z').matches(key) {
             Action::Board(BoardAction::ExpandAllGroups)
+        } else if self.tree.open_assignee.matches(key) {
+            Action::ToggleAssigneeDropdown
+        } else if self.tree.assign_to_me.matches(key) {
+            Action::AssignSelectedToMe
+        } else if self.tree.unassign.matches(key) {
+            Action::UnassignSelected
         } else if matches_any(&self.board.move_left, key) {
             Action::Board(BoardAction::MoveLeft)
         } else if matches_any(&self.board.move_right, key) {
@@ -819,6 +825,24 @@ impl KeyBindings {
                                 + &key_list_label(&self.board.last),
                             "Start / End",
                             "Jump to the first or last board issue.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.open_assignee.label(),
+                            "Assign",
+                            "Open the assignee selector for the selected board card.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.assign_to_me.label(),
+                            "Assign to me",
+                            "Assign the selected board card to the current Jira user.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.unassign.label(),
+                            "Unassign",
+                            "Clear the selected board card assignee.",
                         ));
                         items.push(self.help_item(
                             HelpScope::Local,

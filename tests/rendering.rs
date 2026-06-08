@@ -9,7 +9,7 @@ use tira::{
     config::JiraCredentials,
     draw,
     services::jira::{
-        BoardColumnSummary, BoardData, BoardSwimlaneSummary, FieldSummary, JiraError,
+        BoardColumnSummary, BoardData, BoardSwimlaneSummary, FieldSummary, JiraError, UserSummary,
     },
     ui::theme::{Theme, ThemeName},
 };
@@ -634,6 +634,74 @@ fn board_cards_use_display_name_avatar_from_issue_search() {
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains("@MV"));
     assert!(!screen.contains("@76"));
+}
+
+#[test]
+fn board_grouping_resolves_assignee_account_ids_from_users() {
+    let backend = TestBackend::new(100, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let credentials = JiraCredentials {
+        site: String::from("https://example.atlassian.net"),
+        email: String::from("test@example.com"),
+        api_key: String::from("test"),
+        default_project: String::from("KAN"),
+    };
+    let mut board_issue = issue("KAN-2", "Assigned board issue", "Story", None);
+    board_issue.status = String::from("To Do");
+    board_issue
+        .field_values
+        .insert(String::from("assignee"), String::from("7616e38d"));
+    let mut app = App::from_credentials(credentials.clone());
+    let AppEffect::LoadJiraProject { request_id, .. } = app.take_effects().remove(0) else {
+        panic!("expected Jira load effect");
+    };
+    app.handle_event(AppEvent::JiraProjectLoaded {
+        request_id,
+        purpose: JiraLoadPurpose::Initial,
+        credentials,
+        result: JiraProjectLoadResult {
+            issues: Ok(Vec::new()),
+            board: Ok(BoardData {
+                id: 2,
+                name: String::from("Kanban"),
+                columns: vec![BoardColumnSummary {
+                    name: String::from("To Do"),
+                    statuses: vec![String::from("To Do")],
+                }],
+                swimlanes: vec![BoardSwimlaneSummary {
+                    id: None,
+                    name: String::from("Issues"),
+                    issue_keys: vec![String::from("KAN-2")],
+                }],
+                issues: vec![board_issue],
+            }),
+            next_page_token: None,
+            fields: Ok(Vec::new()),
+            projects: Ok(Vec::new()),
+            users: Ok(vec![UserSummary {
+                account_id: String::from("7616e38d"),
+                display_name: String::from("Marlo Vlietstra"),
+            }]),
+            current_user: Err(JiraError(String::new())),
+            logs: Vec::new(),
+        },
+    });
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    let bindings = KeyBindings::default();
+    app.handle_key(key('g'), &bindings);
+    app.handle_key(ctrl('j'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("Marlo Vlietstra"));
+    assert!(!screen.contains("7616e38d"));
 }
 
 #[test]

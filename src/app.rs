@@ -417,6 +417,23 @@ impl BoardState {
         self.collapsed_groups.contains(group)
     }
 
+    fn update_assignee(&mut self, issue_key: &str, assignee_name: Option<String>) {
+        let Some(data) = &mut self.data else {
+            return;
+        };
+        let Some(issue) = data.issues.iter_mut().find(|issue| issue.key == issue_key) else {
+            return;
+        };
+        match assignee_name {
+            Some(name) => {
+                issue.field_values.insert(String::from("assignee"), name);
+            }
+            None => {
+                issue.field_values.remove("assignee");
+            }
+        }
+    }
+
     pub fn selected_issue_index(&self, search: &str, grouping: BoardGrouping) -> usize {
         let Some(data) = &self.data else {
             return 0;
@@ -867,6 +884,27 @@ fn merge_board_issue_fields(board: &mut BoardData, list_issues: &[IssueSummary])
                     .field_values
                     .entry(key.clone())
                     .or_insert_with(|| value.clone());
+            }
+        }
+    }
+}
+
+fn normalize_board_user_fields(
+    board: &mut BoardData,
+    users: &[UserSummary],
+    current_user: Option<&UserSummary>,
+) {
+    for issue in &mut board.issues {
+        for field in ["assignee", "reporter"] {
+            let Some(value) = issue.field_values.get_mut(field) else {
+                continue;
+            };
+            if let Some(user) = users
+                .iter()
+                .chain(current_user)
+                .find(|user| user.account_id == *value)
+            {
+                *value = user.display_name.clone();
             }
         }
     }
@@ -1436,12 +1474,17 @@ impl App {
             Ok(log) => {
                 self.command_log.push(log);
                 let assignee_name = assignee.as_ref().map(|user| user.display_name.clone());
-                self.filtered_tree
-                    .update_assignee(issue_key.as_str(), assignee_name.clone());
-                self.status = match assignee_name {
+                let status = match assignee_name.as_ref() {
                     Some(name) => format!("{issue_key} assigned to {name}."),
                     None => format!("{issue_key} unassigned."),
                 };
+                self.filtered_tree
+                    .update_assignee(issue_key.as_str(), assignee_name.clone());
+                self.board
+                    .update_assignee(issue_key.as_str(), assignee_name.clone());
+                self.status = status.clone();
+                self.notifications
+                    .push(Notification::success("Assignee updated", status));
             }
             Err((error, log)) => {
                 self.command_log.push(log);
@@ -1572,6 +1615,11 @@ impl App {
                 }
                 match board {
                     Ok(mut board) => {
+                        normalize_board_user_fields(
+                            &mut board,
+                            &self.users,
+                            self.current_user.as_ref(),
+                        );
                         merge_board_issue_fields(&mut board, &fallback_board_issues);
                         self.board.set_data(board);
                     }
@@ -2023,6 +2071,30 @@ impl App {
         self.filtered_tree.visible_range(height)
     }
 
+    fn selected_assignment_issue_key(&self) -> Option<&str> {
+        if self.active_tab() == "Board" {
+            self.selected_board_issue_key()
+        } else {
+            self.selected_issue_key()
+        }
+    }
+
+    fn selected_assignment_assignee(&self, issue_key: &str) -> Option<String> {
+        if self.active_tab() == "Board" {
+            return self
+                .board
+                .data()
+                .and_then(|data| data.issues.iter().find(|issue| issue.key == issue_key))
+                .and_then(|issue| issue.field_values.get("assignee"))
+                .cloned();
+        }
+        self.issues()
+            .iter()
+            .find(|item| item.id == issue_key)
+            .and_then(|item| item.field_values.get("assignee"))
+            .cloned()
+    }
+
     pub fn filtered_tree_view_mode(&self) -> FilteredTreeViewMode {
         self.filtered_tree.view_mode()
     }
@@ -2379,6 +2451,9 @@ impl App {
                             | Action::JiraFilteredTree(_)
                             | Action::FocusBoardFilter
                             | Action::ToggleBoardGrouping
+                            | Action::ToggleAssigneeDropdown
+                            | Action::AssignSelectedToMe
+                            | Action::UnassignSelected
                     )
                 {
                     return;
@@ -3412,16 +3487,11 @@ impl App {
     }
 
     fn open_assignee_dropdown(&mut self) {
-        let Some(issue_key) = self.selected_issue_key().map(str::to_owned) else {
+        let Some(issue_key) = self.selected_assignment_issue_key().map(str::to_owned) else {
             self.status = String::from("No issue selected.");
             return;
         };
-        let current_assignee = self
-            .issues()
-            .iter()
-            .find(|item| item.id == issue_key)
-            .and_then(|item| item.field_values.get("assignee"))
-            .cloned();
+        let current_assignee = self.selected_assignment_assignee(&issue_key);
 
         if self.users.is_empty() && current_assignee.is_none() {
             self.status = String::from("No assignable Jira users available.");
@@ -3680,7 +3750,7 @@ impl App {
     }
 
     fn queue_selected_assignment(&mut self, assignee: Option<UserSummary>) {
-        let Some(issue_key) = self.selected_issue_key().map(str::to_owned) else {
+        let Some(issue_key) = self.selected_assignment_issue_key().map(str::to_owned) else {
             self.status = String::from("No issue selected.");
             return;
         };

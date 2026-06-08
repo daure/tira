@@ -673,6 +673,77 @@ fn assign_to_me_and_unassign_shortcuts_queue_assignment_effects() {
     assert_eq!(issue_key, "KAN-1");
     assert_eq!(assignee, &None);
 }
+
+#[test]
+fn board_assignment_shortcuts_update_selected_card_and_notify() {
+    let bindings = KeyBindings::default();
+    let marlo = UserSummary {
+        account_id: String::from("account-1"),
+        display_name: String::from("Marlo Vlietstra"),
+    };
+    let mut card = support::issue("KAN-1", "Board work", "Task", None);
+    card.status = String::from("To Do");
+    let mut app =
+        App::with_issues_projects_and_users(vec![card], Vec::new(), vec![marlo.clone()], "KAN");
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(key('a'), &bindings);
+    assert!(app.is_assignee_dropdown_open());
+    let mut app = App::with_issues_projects_and_users(
+        vec![support::issue("KAN-1", "Board work", "Task", None)],
+        Vec::new(),
+        vec![marlo.clone()],
+        "KAN",
+    );
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(key('i'), &bindings);
+    let effects = app.take_effects();
+    let AppEffect::AssignIssue {
+        request_id,
+        issue_key,
+        assignee,
+        ..
+    } = &effects[0]
+    else {
+        panic!("expected assign issue effect");
+    };
+    assert_eq!(issue_key, "KAN-1");
+    assert_eq!(assignee.as_ref(), Some(&marlo));
+
+    app.handle_event(AppEvent::IssueAssigned {
+        request_id: *request_id,
+        issue_key: issue_key.clone(),
+        assignee: assignee.clone(),
+        result: Ok(CommandLogEntry {
+            timestamp: String::from("10:00:00"),
+            method: "PUT",
+            path: String::from("/issue/KAN-1/assignee"),
+            status: String::from("204"),
+            duration_ms: 12,
+        }),
+    });
+
+    let board_issue = &app.board().data().expect("board").issues[0];
+    assert_eq!(
+        board_issue.field_values.get("assignee").map(String::as_str),
+        Some("Marlo Vlietstra")
+    );
+    assert_eq!(app.notifications()[0].title(), "Assignee updated");
+
+    app.handle_key(key('u'), &bindings);
+    let effects = app.take_effects();
+    let AppEffect::AssignIssue {
+        issue_key,
+        assignee,
+        ..
+    } = &effects[0]
+    else {
+        panic!("expected unassign issue effect");
+    };
+    assert_eq!(issue_key, "KAN-1");
+    assert_eq!(assignee, &None);
+}
 #[test]
 fn old_global_project_theme_log_keys_are_unbound() {
     let bindings = KeyBindings::default();
