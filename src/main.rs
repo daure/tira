@@ -155,11 +155,13 @@ fn load_jira_project_data(credentials: &config::JiraCredentials) -> JiraProjectL
     let projects_credentials = credentials.clone();
     let users_credentials = credentials.clone();
     let issues_credentials = credentials.clone();
+    let board_credentials = credentials.clone();
 
     let fields_handle = thread::spawn(move || jira::load_issue_fields(&fields_credentials));
     let projects_handle = thread::spawn(move || jira::load_projects(&projects_credentials));
     let users_handle = thread::spawn(move || jira::load_assignable_users(&users_credentials));
     let issues_handle = thread::spawn(move || jira::load_project_issues(&issues_credentials));
+    let board_handle = thread::spawn(move || jira::load_project_board(&board_credentials));
 
     let fields = fields_handle.join().expect("jira fields thread panicked");
     let projects = projects_handle
@@ -167,14 +169,17 @@ fn load_jira_project_data(credentials: &config::JiraCredentials) -> JiraProjectL
         .expect("jira projects thread panicked");
     let users = users_handle.join().expect("jira users thread panicked");
     let issues = issues_handle.join().expect("jira issues thread panicked");
+    let board = board_handle.join().expect("jira board thread panicked");
 
     let mut logs = vec![fields.log.clone(), projects.log.clone()];
     logs.extend(users.logs.clone());
+    logs.extend(board.logs.clone());
     logs.push(issues.log.clone());
 
     JiraProjectLoadResult {
         logs,
         fields: fields.fields,
+        board: board.board,
         projects: projects.projects,
         users: users.users,
         current_user: users.current_user,

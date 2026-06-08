@@ -7,8 +7,8 @@ pub mod tui;
 pub mod ui;
 
 pub use app::{
-    Action, App, AppEffect, AppEvent, CredentialField, CredentialForm, JiraLoadPurpose,
-    JiraProjectLoadResult, Screen, SetupAction,
+    Action, App, AppEffect, AppEvent, BoardAction, BoardGrouping, BoardState, CredentialField,
+    CredentialForm, JiraLoadPurpose, JiraProjectLoadResult, Screen, SetupAction,
 };
 pub use components::{
     generic::{

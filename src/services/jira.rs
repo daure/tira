@@ -77,6 +77,67 @@ pub struct JiraUsersResult {
     pub logs: Vec<CommandLogEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardLoadResult {
+    pub board: Result<BoardData, JiraError>,
+    pub logs: Vec<CommandLogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardData {
+    pub id: u64,
+    pub name: String,
+    pub columns: Vec<BoardColumnSummary>,
+    pub swimlanes: Vec<BoardSwimlaneSummary>,
+    pub issues: Vec<IssueSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardColumnSummary {
+    pub name: String,
+    pub statuses: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardSwimlaneSummary {
+    pub id: Option<String>,
+    pub name: String,
+    pub issue_keys: Vec<String>,
+}
+
+impl BoardData {
+    pub fn from_issues(issues: Vec<IssueSummary>) -> Self {
+        let mut columns = Vec::new();
+        let mut seen_statuses = std::collections::BTreeSet::new();
+        for issue in &issues {
+            if seen_statuses.insert(issue.status.clone()) {
+                columns.push(BoardColumnSummary {
+                    name: issue.status.clone(),
+                    statuses: vec![issue.status.clone()],
+                });
+            }
+        }
+        if columns.is_empty() {
+            columns.push(BoardColumnSummary {
+                name: String::from("Issues"),
+                statuses: Vec::new(),
+            });
+        }
+
+        Self {
+            id: 0,
+            name: String::from("Project board"),
+            columns,
+            swimlanes: vec![BoardSwimlaneSummary {
+                id: None,
+                name: String::from("Issues"),
+                issue_keys: issues.iter().map(|issue| issue.key.clone()).collect(),
+            }],
+            issues,
+        }
+    }
+}
+
 pub fn load_project_issues(credentials: &JiraCredentials) -> JiraLoadResult {
     let site = credentials.site.trim().trim_end_matches('/');
     let jql = format!(
@@ -306,6 +367,167 @@ pub fn load_assignable_users(credentials: &JiraCredentials) -> JiraUsersResult {
         users: assignable.users,
         current_user: current.current_user,
         logs: vec![assignable.log, current.log],
+    }
+}
+
+pub fn load_project_board(credentials: &JiraCredentials) -> BoardLoadResult {
+    let board_search = load_project_boards(credentials);
+    let mut logs = vec![board_search.log];
+
+    let board = match board_search.board {
+        Ok(board) => board,
+        Err(error) => {
+            return BoardLoadResult {
+                board: Err(error),
+                logs,
+            };
+        }
+    };
+
+    let data = load_greenhopper_board_data(credentials, board.id, board.name);
+    logs.push(data.log);
+    BoardLoadResult {
+        board: data.board,
+        logs,
+    }
+}
+
+struct BoardSearchLoad {
+    board: Result<BoardDetails, JiraError>,
+    log: CommandLogEntry,
+}
+
+struct BoardDataLoad {
+    board: Result<BoardData, JiraError>,
+    log: CommandLogEntry,
+}
+
+fn load_project_boards(credentials: &JiraCredentials) -> BoardSearchLoad {
+    let site = credentials.site.trim().trim_end_matches('/');
+    let project = credentials.default_project.trim();
+    let query = [("projectKeyOrId", project), ("maxResults", "50")];
+    let method = "GET";
+    let timestamp = current_time_string();
+    let url = match Url::parse_with_params(&format!("{site}/rest/agile/1.0/board"), &query) {
+        Ok(url) => url,
+        Err(error) => {
+            return BoardSearchLoad {
+                board: Err(JiraError(format!("Invalid Jira site URL: {error}"))),
+                log: failed_log(timestamp, method, "/board"),
+            };
+        }
+    };
+    let started_at = Instant::now();
+    let response = reqwest::blocking::Client::new()
+        .get(url.clone())
+        .basic_auth(credentials.email.trim(), Some(credentials.api_key.trim()))
+        .send();
+    let duration_ms = started_at.elapsed().as_millis();
+    let path = log_path(&url);
+
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let log = CommandLogEntry {
+                timestamp,
+                method,
+                path,
+                status: status.as_u16().to_string(),
+                duration_ms,
+            };
+            if !status.is_success() {
+                return BoardSearchLoad {
+                    board: Err(JiraError(format!("Jira returned HTTP {status}"))),
+                    log,
+                };
+            }
+
+            let board = response
+                .json::<BoardSearchResponse>()
+                .map_err(|error| JiraError(format!("Jira boards could not be read: {error}")))
+                .and_then(|payload| {
+                    payload.values.into_iter().next().ok_or_else(|| {
+                        JiraError(format!("No Jira board found for project {project}"))
+                    })
+                });
+            BoardSearchLoad { board, log }
+        }
+        Err(error) => BoardSearchLoad {
+            board: Err(JiraError(format!("Jira boards request failed: {error}"))),
+            log: CommandLogEntry {
+                timestamp,
+                method,
+                path,
+                status: String::from("ERR"),
+                duration_ms,
+            },
+        },
+    }
+}
+
+fn load_greenhopper_board_data(
+    credentials: &JiraCredentials,
+    board_id: u64,
+    board_name: String,
+) -> BoardDataLoad {
+    let site = credentials.site.trim().trim_end_matches('/');
+    let rapid_view_id = board_id.to_string();
+    let query = [("rapidViewId", rapid_view_id.as_str())];
+    let method = "GET";
+    let timestamp = current_time_string();
+    let url = match Url::parse_with_params(
+        &format!("{site}/rest/greenhopper/1.0/xboard/work/allData.json"),
+        &query,
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return BoardDataLoad {
+                board: Err(JiraError(format!("Invalid Jira site URL: {error}"))),
+                log: failed_log(timestamp, method, "/xboard/work/allData.json"),
+            };
+        }
+    };
+    let started_at = Instant::now();
+    let response = reqwest::blocking::Client::new()
+        .get(url.clone())
+        .basic_auth(credentials.email.trim(), Some(credentials.api_key.trim()))
+        .send();
+    let duration_ms = started_at.elapsed().as_millis();
+    let path = log_path(&url);
+
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let log = CommandLogEntry {
+                timestamp,
+                method,
+                path,
+                status: status.as_u16().to_string(),
+                duration_ms,
+            };
+            if !status.is_success() {
+                return BoardDataLoad {
+                    board: Err(JiraError(format!("Jira returned HTTP {status}"))),
+                    log,
+                };
+            }
+
+            let board = response
+                .json::<serde_json::Value>()
+                .map_err(|error| JiraError(format!("Jira board data could not be read: {error}")))
+                .and_then(|payload| board_data_from_greenhopper(board_id, board_name, payload));
+            BoardDataLoad { board, log }
+        }
+        Err(error) => BoardDataLoad {
+            board: Err(JiraError(format!("Jira board request failed: {error}"))),
+            log: CommandLogEntry {
+                timestamp,
+                method,
+                path,
+                status: String::from("ERR"),
+                duration_ms,
+            },
+        },
     }
 }
 
@@ -575,6 +797,17 @@ struct ProjectDetails {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct BoardSearchResponse {
+    values: Vec<BoardDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BoardDetails {
+    id: u64,
+    name: String,
+}
+
 fn issue_summary_from_search_issue(issue: SearchIssue) -> IssueSummary {
     let parent_key = issue
         .fields
@@ -601,6 +834,374 @@ fn issue_summary_from_search_issue(issue: SearchIssue) -> IssueSummary {
     }
 }
 
+fn board_data_from_greenhopper(
+    board_id: u64,
+    board_name: String,
+    payload: serde_json::Value,
+) -> Result<BoardData, JiraError> {
+    let columns_value = payload
+        .pointer("/columnsData/columns")
+        .or_else(|| payload.get("columns"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| JiraError(String::from("Jira board data did not include columns")))?;
+    let issues_value = payload
+        .pointer("/issuesData/issues")
+        .or_else(|| payload.pointer("/issuesData"))
+        .or_else(|| payload.get("issuesData"))
+        .ok_or_else(|| {
+            JiraError(String::from(
+                "Jira board data did not include issue details",
+            ))
+        })?;
+
+    let mut columns = columns_value
+        .iter()
+        .map(board_column_from_value)
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|(position, _)| *position);
+    let columns = columns
+        .into_iter()
+        .map(|(_, column)| column)
+        .collect::<Vec<_>>();
+
+    let visible_issue_ids = board_visible_issue_ids(&payload);
+    let mut issues = board_issues_from_value(Some(issues_value));
+    filter_board_card_issues(&mut issues);
+    filter_board_visible_issues(visible_issue_ids.as_ref(), &mut issues);
+    let swimlane_values = payload
+        .pointer("/swimlanesData/swimlanes")
+        .or_else(|| payload.pointer("/swimlaneData/swimlanes"))
+        .or_else(|| payload.get("swimlanes"))
+        .and_then(serde_json::Value::as_array);
+    let mut swimlanes = swimlane_values
+        .map(|swimlanes| {
+            let mut swimlanes = swimlanes
+                .iter()
+                .map(board_swimlane_from_value)
+                .collect::<Vec<_>>();
+            swimlanes.sort_by_key(|(position, _)| *position);
+            swimlanes
+                .into_iter()
+                .map(|(_, mut swimlane)| {
+                    if swimlane.issue_keys.is_empty()
+                        && let Some(id) = swimlane.id.as_deref()
+                    {
+                        swimlane.issue_keys = issues
+                            .iter()
+                            .filter(|issue| {
+                                issue.field_values.get("swimlane_id").map(String::as_str)
+                                    == Some(id)
+                            })
+                            .map(|issue| issue.key.clone())
+                            .collect();
+                    }
+                    swimlane
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    normalize_swimlane_issue_keys(&issues, &mut swimlanes);
+
+    let assigned_count = swimlanes
+        .iter()
+        .map(|lane| lane.issue_keys.len())
+        .sum::<usize>();
+    if swimlanes.is_empty() || assigned_count == 0 {
+        swimlanes.clear();
+        swimlanes.push(BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: issues.iter().map(|issue| issue.key.clone()).collect(),
+        });
+    } else {
+        let mut assigned = std::collections::BTreeSet::new();
+        for swimlane in &swimlanes {
+            assigned.extend(swimlane.issue_keys.iter().cloned());
+        }
+        let other_keys = issues
+            .iter()
+            .filter(|issue| !assigned.contains(&issue.key))
+            .map(|issue| issue.key.clone())
+            .collect::<Vec<_>>();
+        if !other_keys.is_empty() {
+            swimlanes.push(BoardSwimlaneSummary {
+                id: None,
+                name: String::from("Other issues"),
+                issue_keys: other_keys,
+            });
+        }
+    }
+
+    Ok(BoardData {
+        id: board_id,
+        name: board_name,
+        columns,
+        swimlanes,
+        issues,
+    })
+}
+
+fn board_column_from_value(value: &serde_json::Value) -> (i64, BoardColumnSummary) {
+    let name = text_property(value, &["name"]).unwrap_or_else(|| String::from("Column"));
+    let statuses = value
+        .get("statusIds")
+        .or_else(|| value.get("statuses"))
+        .and_then(serde_json::Value::as_array)
+        .map(|statuses| {
+            statuses
+                .iter()
+                .filter_map(|status| {
+                    text_property(status, &["id", "statusId", "name"])
+                        .or_else(|| format_field_value(status))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    (
+        value
+            .get("position")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+        BoardColumnSummary { name, statuses },
+    )
+}
+
+fn board_swimlane_from_value(value: &serde_json::Value) -> (i64, BoardSwimlaneSummary) {
+    let id = text_property(value, &["swimlaneId", "id"]);
+    let name = text_property(value, &["name"]).unwrap_or_else(|| String::from("Swimlane"));
+    let issue_keys = value
+        .get("issueKeys")
+        .or_else(|| value.get("issues"))
+        .or_else(|| value.get("issueIds"))
+        .and_then(serde_json::Value::as_array)
+        .map(|issues| {
+            issues
+                .iter()
+                .filter_map(|issue| {
+                    issue
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| text_property(issue, &["key", "issueKey", "id"]))
+                        .or_else(|| format_field_value(issue))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (
+        value
+            .get("position")
+            .or_else(|| value.get("pos"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+        BoardSwimlaneSummary {
+            id,
+            name,
+            issue_keys,
+        },
+    )
+}
+
+fn normalize_swimlane_issue_keys(issues: &[IssueSummary], swimlanes: &mut [BoardSwimlaneSummary]) {
+    let key_set = issues
+        .iter()
+        .map(|issue| issue.key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let id_to_key = issues
+        .iter()
+        .filter_map(|issue| {
+            issue
+                .field_values
+                .get("id")
+                .map(|id| (id.as_str(), issue.key.as_str()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for swimlane in swimlanes {
+        for key in &mut swimlane.issue_keys {
+            if !key_set.contains(key.as_str())
+                && let Some(issue_key) = id_to_key.get(key.as_str())
+            {
+                *key = (*issue_key).to_owned();
+            }
+        }
+        swimlane
+            .issue_keys
+            .retain(|key| key_set.contains(key.as_str()));
+    }
+}
+
+fn board_visible_issue_ids(
+    payload: &serde_json::Value,
+) -> Option<std::collections::BTreeSet<String>> {
+    let mut ids = std::collections::BTreeSet::new();
+    collect_issue_ids_from_array(payload.get("issues"), &mut ids);
+    if !ids.is_empty() {
+        return Some(ids);
+    }
+    if let Some(columns) = payload
+        .pointer("/columnsData/columns")
+        .or_else(|| payload.get("columns"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for column in columns {
+            collect_issue_ids_from_array(column.get("issues"), &mut ids);
+            collect_issue_ids_from_array(column.get("issueIds"), &mut ids);
+            collect_issue_ids_from_array(column.get("issueKeys"), &mut ids);
+        }
+    }
+    (!ids.is_empty()).then_some(ids)
+}
+
+fn collect_issue_ids_from_array(
+    value: Option<&serde_json::Value>,
+    ids: &mut std::collections::BTreeSet<String>,
+) {
+    let Some(values) = value.and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    ids.extend(values.iter().filter_map(|value| {
+        text_property(value, &["key", "issueKey", "id"]).or_else(|| format_field_value(value))
+    }));
+}
+
+fn filter_board_card_issues(issues: &mut Vec<IssueSummary>) {
+    if issues
+        .iter()
+        .any(|issue| issue.field_values.contains_key("typeHierarchyLevel"))
+    {
+        issues.retain(|issue| {
+            issue
+                .field_values
+                .get("typeHierarchyLevel")
+                .is_some_and(|level| level == "0")
+        });
+    }
+}
+fn filter_board_visible_issues(
+    visible_ids: Option<&std::collections::BTreeSet<String>>,
+    issues: &mut Vec<IssueSummary>,
+) {
+    let Some(visible_ids) = visible_ids else {
+        return;
+    };
+    issues.retain(|issue| {
+        visible_ids.contains(&issue.key)
+            || issue
+                .field_values
+                .get("id")
+                .is_some_and(|id| visible_ids.contains(id))
+    });
+}
+
+fn board_issues_from_value(value: Option<&serde_json::Value>) -> Vec<IssueSummary> {
+    match value {
+        Some(serde_json::Value::Object(issues)) => issues
+            .iter()
+            .map(|(id, value)| {
+                let key = text_property(value, &["key", "issueKey"]).unwrap_or_else(|| id.clone());
+                let mut issue = issue_summary_from_board_issue(key.as_str(), value);
+                issue
+                    .field_values
+                    .entry(String::from("id"))
+                    .or_insert_with(|| id.clone());
+                issue
+            })
+            .collect(),
+        Some(serde_json::Value::Array(issues)) => issues
+            .iter()
+            .filter_map(|issue| {
+                text_property(issue, &["key", "issueKey", "id"])
+                    .map(|key| issue_summary_from_board_issue(key.as_str(), issue))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn issue_summary_from_board_issue(key: &str, value: &serde_json::Value) -> IssueSummary {
+    let fields = value.get("fields").unwrap_or(value);
+    let status = fields.get("status").or_else(|| value.get("status"));
+    let issue_type = fields
+        .get("issuetype")
+        .or_else(|| fields.get("issueType"))
+        .or_else(|| value.get("issueType"));
+    let parent = fields.get("parent").or_else(|| value.get("parent"));
+    let parent_key = parent
+        .and_then(|parent| text_property(parent, &["key", "issueKey", "id"]))
+        .or_else(|| text_property(value, &["parentKey", "parentIssueKey"]));
+    let mut field_values = BTreeMap::new();
+    collect_board_field_values(fields, &mut field_values);
+    if let Some(epic_summary) = value
+        .get("epicField")
+        .or_else(|| fields.get("epicField"))
+        .and_then(|epic| text_property(epic, &["summary", "epicKey"]))
+    {
+        field_values.insert(String::from("epic_summary"), epic_summary);
+    }
+    if !std::ptr::eq(fields, value) {
+        collect_board_field_values(value, &mut field_values);
+    }
+    if let Some(status_id) = status
+        .and_then(|status| text_property(status, &["id", "statusId"]))
+        .or_else(|| text_property(fields, &["statusId"]))
+        .or_else(|| text_property(value, &["statusId"]))
+    {
+        field_values.insert(String::from("status_id"), status_id);
+    }
+    if let Some(swimlane_id) =
+        text_property(value, &["swimlaneId"]).or_else(|| text_property(fields, &["swimlaneId"]))
+    {
+        field_values.insert(String::from("swimlane_id"), swimlane_id);
+    }
+    if let Some(parent_key) = &parent_key {
+        field_values.insert(String::from("parent"), parent_key.clone());
+    }
+
+    IssueSummary {
+        key: key.to_owned(),
+        summary: text_property(fields, &["summary"])
+            .or_else(|| text_property(value, &["summary"]))
+            .unwrap_or_else(|| key.to_owned()),
+        status: status
+            .and_then(|status| text_property(status, &["name", "statusName"]))
+            .or_else(|| text_property(value, &["statusName"]))
+            .unwrap_or_else(|| String::from("Unknown")),
+        issue_type: issue_type
+            .and_then(|issue_type| text_property(issue_type, &["name", "typeName"]))
+            .or_else(|| text_property(value, &["typeName", "issueTypeName"]))
+            .unwrap_or_else(|| String::from("Issue")),
+        parent_key,
+        field_values,
+    }
+}
+
+fn collect_board_field_values(
+    value: &serde_json::Value,
+    field_values: &mut BTreeMap<String, String>,
+) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (key, value) in object {
+        if matches!(
+            key.as_str(),
+            "fields" | "summary" | "status" | "issuetype" | "issueType"
+        ) {
+            continue;
+        }
+        if let Some(text) = format_field_value(value) {
+            field_values.entry(key.clone()).or_insert(text);
+        }
+    }
+}
+
+fn text_property(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(format_field_value))
+}
+
 fn format_field_value(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Null => None,
@@ -624,7 +1225,9 @@ fn format_field_value(value: &serde_json::Value) -> Option<String> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{SearchResponse, issue_summary_from_search_issue, log_path};
+    use super::{
+        SearchResponse, board_data_from_greenhopper, issue_summary_from_search_issue, log_path,
+    };
     use reqwest::Url;
     use serde_json::json;
 
@@ -676,5 +1279,210 @@ mod tests {
             issue.field_values.get("timespent").map(String::as_str),
             Some("120")
         );
+    }
+
+    #[test]
+    fn greenhopper_board_data_preserves_columns_swimlanes_and_status_mapping() {
+        let board = board_data_from_greenhopper(
+            7,
+            String::from("Kanban"),
+            json!({
+                "columnsData": {
+                    "columns": [
+                        { "name": "To Do", "position": 0, "statusIds": ["100"] },
+                        { "name": "Done", "position": 1, "statusIds": ["300"] }
+                    ]
+                },
+                "issuesData": {
+                    "issues": [
+                        {
+                            "id": 10001,
+                            "key": "KAN-1",
+                            "summary": "Browse catalog",
+                            "statusId": "100",
+                            "status": { "name": "To Do" },
+                            "typeName": "Story",
+                            "swimlaneId": "11"
+                        },
+                        {
+                            "key": "KAN-2",
+                            "summary": "Checkout",
+                            "statusId": "300",
+                            "status": { "name": "Done" },
+                            "typeName": "Task",
+                            "swimlaneId": "12"
+                        }
+                    ]
+                },
+                "swimlanesData": {
+                    "swimlanes": [
+                        { "swimlaneId": "11", "name": "Shopping cart", "position": 0, "issueIds": [10001] },
+                        { "swimlaneId": "12", "name": "Payments", "position": 1 }
+                    ]
+                }
+            }),
+        )
+        .expect("board data");
+
+        assert_eq!(board.id, 7);
+        assert_eq!(board.columns[0].name, "To Do");
+        assert_eq!(board.columns[0].statuses, vec!["100"]);
+        assert_eq!(board.swimlanes[0].name, "Shopping cart");
+        assert_eq!(board.swimlanes[0].issue_keys, vec!["KAN-1"]);
+        assert_eq!(board.swimlanes[1].issue_keys, vec!["KAN-2"]);
+        assert_eq!(board.swimlanes.len(), 2);
+        assert_eq!(
+            board.issues[0]
+                .field_values
+                .get("status_id")
+                .map(String::as_str),
+            Some("100")
+        );
+    }
+
+    #[test]
+    fn greenhopper_board_data_uses_issue_key_when_issue_map_is_keyed_by_id() {
+        let board = board_data_from_greenhopper(
+            7,
+            String::from("Kanban"),
+            json!({
+                "columnsData": {
+                    "columns": [
+                        { "name": "To Do", "position": 0, "statusIds": ["100"] }
+                    ]
+                },
+                "issuesData": {
+                    "issues": {
+                        "10001": {
+                            "id": 10001,
+                            "key": "KAN-1",
+                            "summary": "Browse catalog",
+                            "statusId": "100",
+                            "status": { "name": "To Do" },
+                            "typeName": "Story"
+                        }
+                    }
+                },
+                "swimlanesData": {
+                    "swimlanes": [
+                        { "swimlaneId": "11", "name": "Shopping cart", "position": 0, "issueIds": [10001] }
+                    ]
+                }
+            }),
+        )
+        .expect("board data");
+
+        assert_eq!(board.issues[0].key, "KAN-1");
+        assert_eq!(board.swimlanes[0].issue_keys, vec!["KAN-1"]);
+    }
+
+    #[test]
+    fn greenhopper_board_data_keeps_only_root_visible_issues() {
+        let board = board_data_from_greenhopper(
+            7,
+            String::from("Kanban"),
+            json!({
+                "columnsData": {
+                    "columns": [
+                        { "name": "To Do", "position": 0, "statusIds": ["100"] }
+                    ]
+                },
+                "issues": [10001],
+                "issuesData": {
+                    "10001": {
+                        "key": "KAN-1",
+                        "summary": "Visible card",
+                        "statusId": "100",
+                        "status": { "name": "To Do" },
+                        "typeName": "Story"
+                    },
+                    "10002": {
+                        "key": "KAN-2",
+                        "summary": "Hidden raw issue",
+                        "statusId": "100",
+                        "status": { "name": "To Do" },
+                        "typeName": "Subtask"
+                    }
+                },
+                "swimlanesData": {
+                    "swimlanes": [
+                        { "id": 11, "name": "Visible", "position": 0, "issues": [10001, 10002] }
+                    ]
+                }
+            }),
+        )
+        .expect("board data");
+
+        assert_eq!(
+            board
+                .issues
+                .iter()
+                .map(|issue| issue.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["KAN-1"]
+        );
+        assert_eq!(board.swimlanes[0].issue_keys, vec!["KAN-1"]);
+    }
+
+    #[test]
+    fn greenhopper_board_data_keeps_only_base_level_cards() {
+        let board = board_data_from_greenhopper(
+            7,
+            String::from("Kanban"),
+            json!({
+                "columnsData": {
+                    "columns": [
+                        { "name": "To Do", "position": 0, "statusIds": ["100"] }
+                    ]
+                },
+                "issuesData": {
+                    "issues": [
+                        {
+                            "id": 10001,
+                            "key": "KAN-1",
+                            "summary": "Visible story",
+                            "statusId": "100",
+                            "status": { "name": "To Do" },
+                            "typeName": "Story",
+                            "typeHierarchyLevel": 0
+                        },
+                        {
+                            "id": 10002,
+                            "key": "KAN-2",
+                            "summary": "Epic hidden from board card list",
+                            "statusId": "100",
+                            "status": { "name": "To Do" },
+                            "typeName": "Epic",
+                            "typeHierarchyLevel": 1
+                        },
+                        {
+                            "id": 10003,
+                            "key": "KAN-3",
+                            "summary": "Subtask hidden from board card list",
+                            "statusId": "100",
+                            "status": { "name": "To Do" },
+                            "typeName": "Subtask",
+                            "typeHierarchyLevel": -1
+                        }
+                    ]
+                },
+                "swimlanesData": {
+                    "swimlanes": [
+                        { "id": 11, "name": "Visible", "position": 0, "issues": [10001, 10002, 10003] }
+                    ]
+                }
+            }),
+        )
+        .expect("board data");
+
+        assert_eq!(
+            board
+                .issues
+                .iter()
+                .map(|issue| issue.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["KAN-1"]
+        );
+        assert_eq!(board.swimlanes[0].issue_keys, vec!["KAN-1"]);
     }
 }

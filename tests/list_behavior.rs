@@ -498,5 +498,43 @@ fn only_ctrl_q_quits_app() {
     );
     let mut configured_app = App::with_issues(Vec::new());
     configured_app.handle_key(key('q'), &configured_bindings);
-    assert!(!configured_app.is_running());
+    assert!(configured_app.is_running());
+    let mut configured_ctrl_app = App::with_issues(Vec::new());
+    configured_ctrl_app.handle_key(ctrl('q'), &configured_bindings);
+    assert!(!configured_ctrl_app.is_running());
+}
+
+#[test]
+fn ctrl_q_quits_even_after_pending_leader_key() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(Vec::new());
+
+    app.handle_key(ctrl('x'), &bindings);
+    app.handle_key(ctrl('q'), &bindings);
+
+    assert!(!app.is_running());
+}
+
+#[test]
+fn ctrl_q_quits_across_terminal_encodings() {
+    let bindings = KeyBindings::default();
+    let mut uppercase_app = App::with_issues(Vec::new());
+    uppercase_app.handle_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('Q'),
+            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+        ),
+        &bindings,
+    );
+    assert!(!uppercase_app.is_running());
+
+    let mut control_code_app = App::with_issues(Vec::new());
+    control_code_app.handle_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('\u{11}'),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        &bindings,
+    );
+    assert!(!control_code_app.is_running());
 }

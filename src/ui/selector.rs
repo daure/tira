@@ -31,7 +31,7 @@ pub fn render_single_select<T>(
     show_cursor: bool,
 ) where
     T: HasShortcut,
- {
+{
     let longest_option = dropdown
         .options()
         .iter()

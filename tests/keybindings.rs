@@ -2,8 +2,12 @@ mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tira::{
-    Action, App, AppEffect, AppEvent, JiraFilteredTreeAction, KeyBindings, Screen, TabAction,
-    services::jira::{CommandLogEntry, UserSummary},
+    Action, App, AppEffect, AppEvent, BoardAction, JiraFilteredTreeAction, JiraLoadPurpose,
+    KeyBindings, Screen, TabAction,
+    config::JiraCredentials,
+    services::jira::{
+        BoardColumnSummary, BoardData, BoardSwimlaneSummary, CommandLogEntry, UserSummary,
+    },
     ui::theme::ThemeName,
 };
 
@@ -61,6 +65,409 @@ fn configured_tab_keys_override_defaults() {
     assert_eq!(bindings.action_for(key(']')), Action::None);
 }
 
+#[test]
+fn board_navigation_uses_configurable_tree_keys_and_edges() {
+    let bindings = KeyBindings::default();
+
+    assert_eq!(
+        bindings.board_action_for(key('h')),
+        Action::Board(BoardAction::MoveLeft)
+    );
+    assert_eq!(
+        bindings.board_action_for(key('l')),
+        Action::Board(BoardAction::MoveRight)
+    );
+    assert_eq!(
+        bindings.board_action_for(key('k')),
+        Action::Board(BoardAction::MoveUp)
+    );
+    assert_eq!(
+        bindings.board_action_for(key('j')),
+        Action::Board(BoardAction::MoveDown)
+    );
+    assert_eq!(
+        bindings.board_action_for(ctrl('u')),
+        Action::Board(BoardAction::HalfPageUp)
+    );
+    assert_eq!(
+        bindings.board_action_for(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+        Action::Board(BoardAction::HalfPageUp)
+    );
+    assert_eq!(
+        bindings.board_action_for(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+        Action::Board(BoardAction::HalfPageDown)
+    );
+    assert_eq!(
+        bindings.board_action_for(ctrl('d')),
+        Action::Board(BoardAction::HalfPageDown)
+    );
+    assert_eq!(
+        bindings.board_action_for(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+        Action::Board(BoardAction::GoToStart)
+    );
+    assert_eq!(
+        bindings.board_action_for(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+        Action::Board(BoardAction::GoToEnd)
+    );
+    assert_eq!(
+        bindings.board_action_for(key('g')),
+        Action::ToggleBoardGrouping
+    );
+    assert_eq!(
+        bindings.board_action_for(shift('g')),
+        Action::Board(BoardAction::GoToEnd)
+    );
+    assert_eq!(
+        bindings.board_action_for(key('z')),
+        Action::Board(BoardAction::CollapseAllGroups)
+    );
+    assert_eq!(
+        bindings.board_action_for(shift('z')),
+        Action::Board(BoardAction::ExpandAllGroups)
+    );
+}
+
+#[test]
+fn board_tab_keys_reach_all_cards() {
+    let bindings = KeyBindings::default();
+    let mut todo = support::issue("KAN-1", "Todo", "Task", None);
+    todo.status = String::from("To Do");
+    let mut doing = support::issue("KAN-2", "Doing", "Task", None);
+    doing.status = String::from("In Progress");
+    let mut done = support::issue("KAN-3", "Done", "Task", None);
+    done.status = String::from("Done");
+    let mut app = App::with_issues(vec![todo, doing, done]);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(key('l'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-2"));
+
+    app.handle_key(key('h'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-3"));
+
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+
+    app.handle_key(key('j'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+}
+
+#[test]
+fn board_down_stops_at_end_of_swimlane_column() {
+    let bindings = KeyBindings::default();
+    let mut first = support::issue("KAN-1", "First lane", "Task", None);
+    first.status = String::from("To Do");
+    let mut second = support::issue("KAN-2", "Second lane", "Task", None);
+    second.status = String::from("To Do");
+    let board = BoardData {
+        id: 2,
+        name: String::from("Kanban"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+        }],
+        swimlanes: vec![
+            BoardSwimlaneSummary {
+                id: None,
+                name: String::from("Lane A"),
+                issue_keys: vec![String::from("KAN-1")],
+            },
+            BoardSwimlaneSummary {
+                id: None,
+                name: String::from("Lane B"),
+                issue_keys: vec![String::from("KAN-2")],
+            },
+        ],
+        issues: vec![first, second],
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('j'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+}
+
+#[test]
+fn board_shift_g_jumps_to_end_and_g_opens_grouping() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(support::test_issues(5));
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(shift('g'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-5"));
+
+    app.handle_key(key('g'), &bindings);
+    assert!(app.board_group_dropdown().is_some());
+}
+
+#[test]
+fn board_group_rows_can_be_selected_and_collapsed() {
+    let bindings = KeyBindings::default();
+    let mut assigned = support::issue("KAN-1", "Assigned", "Task", None);
+    assigned.status = String::from("To Do");
+    assigned
+        .field_values
+        .insert(String::from("assignee"), String::from("Marlo Vlietstra"));
+    let mut unassigned = support::issue("KAN-2", "Unassigned", "Task", None);
+    unassigned.status = String::from("To Do");
+    let mut app = App::with_issues(vec![assigned, unassigned]);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('g'), &bindings);
+    app.handle_key(ctrl('j'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
+
+    app.dispatch(Action::Board(BoardAction::GoToStart));
+    assert_eq!(app.selected_board_group(), Some("Marlo Vlietstra"));
+
+    app.handle_key(key(' '), &bindings);
+    assert!(app.is_board_group_collapsed("Marlo Vlietstra"));
+    app.handle_key(key('l'), &bindings);
+    assert!(!app.is_board_group_collapsed("Marlo Vlietstra"));
+    app.handle_key(key('z'), &bindings);
+    assert!(app.is_board_group_collapsed("Marlo Vlietstra"));
+    assert!(app.is_board_group_collapsed("Unassigned"));
+    app.handle_key(shift('z'), &bindings);
+    assert!(!app.is_board_group_collapsed("Marlo Vlietstra"));
+    assert!(!app.is_board_group_collapsed("Unassigned"));
+}
+
+#[test]
+fn board_horizontal_keys_move_between_group_rows_and_first_column() {
+    let bindings = KeyBindings::default();
+    let mut first = support::issue("KAN-1", "Assigned first column", "Task", None);
+    first.status = String::from("To Do");
+    first
+        .field_values
+        .insert(String::from("assignee"), String::from("Marlo Vlietstra"));
+    let board = BoardData {
+        id: 2,
+        name: String::from("Kanban"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+        }],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1")],
+        }],
+        issues: vec![first],
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('g'), &bindings);
+    app.handle_key(ctrl('j'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
+
+    app.dispatch(Action::Board(BoardAction::GoToStart));
+    app.handle_key(key('j'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+
+    app.handle_key(key('h'), &bindings);
+    assert_eq!(app.selected_board_group(), Some("Marlo Vlietstra"));
+
+    app.handle_key(key('l'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+}
+
+#[test]
+fn board_collapse_all_keeps_focus_on_current_group() {
+    let bindings = KeyBindings::default();
+    let mut assigned = support::issue("KAN-1", "Assigned", "Task", None);
+    assigned.status = String::from("To Do");
+    assigned
+        .field_values
+        .insert(String::from("assignee"), String::from("Marlo Vlietstra"));
+    let mut unassigned = support::issue("KAN-2", "Unassigned", "Task", None);
+    unassigned.status = String::from("To Do");
+    let mut app = App::with_issues(vec![assigned, unassigned]);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('g'), &bindings);
+    app.handle_key(ctrl('j'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
+
+    app.dispatch(Action::Board(BoardAction::GoToStart));
+    app.handle_key(key('j'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+
+    app.handle_key(key('z'), &bindings);
+    assert_eq!(app.selected_board_group(), Some("Marlo Vlietstra"));
+    assert!(app.is_board_group_collapsed("Marlo Vlietstra"));
+    assert!(app.is_board_group_collapsed("Unassigned"));
+}
+
+#[test]
+fn board_page_keys_transcend_groups_within_same_swimlane() {
+    let bindings = KeyBindings::default();
+    let mut assigned = support::issue("KAN-1", "Assigned card", "Task", None);
+    assigned.status = String::from("To Do");
+    assigned
+        .field_values
+        .insert(String::from("assignee"), String::from("Marlo Vlietstra"));
+    let mut unassigned = support::issue("KAN-2", "Unassigned card", "Task", None);
+    unassigned.status = String::from("To Do");
+    let board = BoardData {
+        id: 2,
+        name: String::from("Kanban"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+        }],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1"), String::from("KAN-2")],
+        }],
+        issues: vec![assigned, unassigned],
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('g'), &bindings);
+    app.handle_key(ctrl('j'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
+
+    app.dispatch(Action::Board(BoardAction::GoToStart));
+    app.handle_key(key('j'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+
+    app.handle_key(ctrl('d'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-2"));
+
+    app.handle_key(ctrl('u'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+}
+
+#[test]
+fn board_navigation_respects_active_search_filter() {
+    let bindings = KeyBindings::default();
+    let mut hidden = support::issue("KAN-1", "Hidden card", "Task", None);
+    hidden.status = String::from("To Do");
+    let mut visible = support::issue("KAN-2", "Visible card", "Task", None);
+    visible.status = String::from("To Do");
+    visible
+        .field_values
+        .insert(String::from("dueDate"), String::from("2026-06-10"));
+    let mut app = App::with_issues(vec![hidden, visible]);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(key('/'), &bindings);
+    for c in "2026".chars() {
+        app.handle_key(key(c), &bindings);
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &bindings);
+    app.handle_key(key('j'), &bindings);
+
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-2"));
+}
+
+#[test]
+fn board_page_keys_move_across_many_cards() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(support::test_issues(12));
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(ctrl('d'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-5"));
+
+    app.handle_key(
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        &bindings,
+    );
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-9"));
+
+    app.handle_key(ctrl('u'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-5"));
+
+    app.handle_key(
+        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+        &bindings,
+    );
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+}
+
+#[test]
+fn board_page_keys_stop_at_swimlane_edges() {
+    let bindings = KeyBindings::default();
+    let mut first = support::issue("KAN-1", "First lane one", "Task", None);
+    first.status = String::from("To Do");
+    let mut second = support::issue("KAN-2", "First lane two", "Task", None);
+    second.status = String::from("To Do");
+    let mut third = support::issue("KAN-3", "Second lane one", "Task", None);
+    third.status = String::from("To Do");
+    let board = BoardData {
+        id: 2,
+        name: String::from("Kanban"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+        }],
+        swimlanes: vec![
+            BoardSwimlaneSummary {
+                id: None,
+                name: String::from("Lane A"),
+                issue_keys: vec![String::from("KAN-1"), String::from("KAN-2")],
+            },
+            BoardSwimlaneSummary {
+                id: None,
+                name: String::from("Lane B"),
+                issue_keys: vec![String::from("KAN-3")],
+            },
+        ],
+        issues: vec![first, second, third],
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(ctrl('d'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-2"));
+
+    app.handle_key(
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        &bindings,
+    );
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-2"));
+
+    app.handle_key(ctrl('u'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+
+    app.handle_key(
+        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+        &bindings,
+    );
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+}
+
+#[test]
+fn board_escape_clears_filter_and_selects_top_left() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(support::test_issues(5));
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(shift('g'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-5"));
+
+    app.handle_key(key('/'), &bindings);
+    for c in "KAN-5".chars() {
+        app.handle_key(key(c), &bindings);
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
+
+    assert_eq!(app.board_filter(), "");
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+}
 #[test]
 fn issue_url_yank_binding_is_configurable_separately_from_columns() {
     let bindings = KeyBindings::from_toml_str(
@@ -304,14 +711,58 @@ fn help_items_use_configured_leader_bindings() {
 }
 
 #[test]
-fn reload_help_entry_is_list_local_only() {
+fn reload_help_entries_are_tab_scoped() {
     let bindings = KeyBindings::default();
 
     let list_items = bindings.help_items(Screen::Main, "List", false);
     let board_items = bindings.help_items(Screen::Main, "Board", false);
 
     assert!(list_items.iter().any(|item| item.summary == "Reload list"));
+    assert!(!list_items.iter().any(|item| item.summary == "Reload board"));
+    assert!(
+        board_items
+            .iter()
+            .any(|item| item.summary == "Reload board")
+    );
     assert!(!board_items.iter().any(|item| item.summary == "Reload list"));
+    assert!(
+        board_items
+            .iter()
+            .any(|item| item.summary == "Search board")
+    );
+    assert!(
+        board_items
+            .iter()
+            .any(|item| item.summary == "Move columns")
+    );
+    assert!(board_items.iter().any(|item| item.summary == "Page cards"));
+}
+
+#[test]
+fn board_help_uses_custom_navigation_labels() {
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [board]
+        move_up = "w"
+        move_down = "s"
+        move_left = "a"
+        move_right = "d"
+        page_up = "ctrl+b"
+        page_down = "ctrl+f"
+        first = "home"
+        last = "end"
+        "##,
+    );
+
+    let board_items = bindings.help_items(Screen::Main, "Board", false);
+
+    assert!(board_items.iter().any(|item| item.binding == "a/d"));
+    assert!(board_items.iter().any(|item| item.binding == "w/s"));
+    assert!(
+        board_items
+            .iter()
+            .any(|item| item.binding == "Ctrl+b / Ctrl+f")
+    );
 }
 
 #[test]
@@ -588,28 +1039,103 @@ fn quick_switcher_opens_command_log_and_jumps_to_tabs() {
 }
 
 #[test]
-fn quick_switcher_only_lists_reload_on_list_tab() {
+fn quick_switcher_lists_tab_scoped_reload_actions() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(Vec::new());
 
     app.handle_key(ctrl('k'), &bindings);
+    let list_options = app.quick_switcher().expect("quick switcher").options();
     assert!(
-        app.quick_switcher()
-            .expect("quick switcher")
-            .options()
+        list_options
             .iter()
             .any(|option| option.label == "Reload list")
+    );
+    assert!(
+        !list_options
+            .iter()
+            .any(|option| option.label == "Reload board")
+    );
+    let list_shortcuts = list_options
+        .iter()
+        .map(|option| (option.label.clone(), option.value))
+        .collect::<Vec<_>>();
+
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(ctrl('k'), &bindings);
+    let board_options = app.quick_switcher().expect("quick switcher").options();
+    assert!(
+        board_options
+            .iter()
+            .any(|option| option.label == "Reload board")
+    );
+    assert!(
+        !board_options
+            .iter()
+            .any(|option| option.label == "Reload list")
+    );
+    let board_shortcuts = board_options
+        .iter()
+        .map(|option| (option.label.clone(), option.value))
+        .collect::<Vec<_>>();
+    for (label, action) in list_shortcuts.iter().chain(board_shortcuts.iter()) {
+        assert!(
+            !bindings.quick_action_shortcut_label(*action).is_empty(),
+            "{label} is missing a shortcut",
+        );
+    }
+}
+
+#[test]
+fn r_reloads_board_on_board_tab() {
+    let bindings = KeyBindings::default();
+    let credentials = JiraCredentials {
+        site: String::from("https://example.atlassian.net"),
+        email: String::from("test@example.com"),
+        api_key: String::from("test"),
+        default_project: String::from("KAN"),
+    };
+    let mut app = App::from_credentials(credentials);
+    app.take_effects();
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(key('r'), &bindings);
+
+    assert_eq!(app.status(), "Reloading Jira board...");
+    let effects = app.take_effects();
+    let AppEffect::LoadJiraProject { purpose, .. } = effects.first().expect("reload effect") else {
+        panic!("expected Jira reload effect");
+    };
+    assert_eq!(*purpose, JiraLoadPurpose::ReloadBoard);
+}
+
+#[test]
+fn quick_switcher_reload_board_queues_board_reload() {
+    let bindings = KeyBindings::default();
+    let credentials = JiraCredentials {
+        site: String::from("https://example.atlassian.net"),
+        email: String::from("test@example.com"),
+        api_key: String::from("test"),
+        default_project: String::from("KAN"),
+    };
+    let mut app = App::from_credentials(credentials);
+    app.take_effects();
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(ctrl('k'), &bindings);
+    for c in "Reload board".chars() {
+        app.handle_key(key(c), &bindings);
+    }
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
     );
 
-    app.dispatch(Action::Tabs(TabAction::Next));
-    app.handle_key(ctrl('k'), &bindings);
-    assert!(
-        !app.quick_switcher()
-            .expect("quick switcher")
-            .options()
-            .iter()
-            .any(|option| option.label == "Reload list")
-    );
+    assert_eq!(app.status(), "Reloading Jira board...");
+    let effects = app.take_effects();
+    let AppEffect::LoadJiraProject { purpose, .. } = effects.first().expect("reload effect") else {
+        panic!("expected Jira reload effect");
+    };
+    assert_eq!(*purpose, JiraLoadPurpose::ReloadBoard);
 }
 
 #[test]

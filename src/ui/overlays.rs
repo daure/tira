@@ -7,10 +7,8 @@ use ratatui::{
 };
 
 use crate::{
-    App, KeyBindings,
-    components::generic::dialog::Dialog,
-    components::generic::notification::NotificationKind,
-    keymap::HelpScope,
+    App, KeyBindings, components::generic::dialog::Dialog,
+    components::generic::notification::NotificationKind, keymap::HelpScope,
     services::jira::CommandLogEntry,
 };
 

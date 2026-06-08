@@ -120,6 +120,7 @@ pub fn status_bar(app: &App, keybindings: &KeyBindings, width: u16) -> Paragraph
 fn status_hint(app: &App, keybindings: &KeyBindings) -> String {
     match app.screen() {
         crate::Screen::Setup => keybindings.setup_hint_text(),
+        crate::Screen::Main if app.active_tab() == "Board" => keybindings.board_hint_text(),
         crate::Screen::Main => keybindings.list_hint_text(),
     }
 }

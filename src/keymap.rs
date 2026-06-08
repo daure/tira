@@ -3,7 +3,7 @@ use std::{env, fs, io, path::PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    app::{Action, QuickAction, Screen, SetupAction},
+    app::{Action, BoardAction, QuickAction, Screen, SetupAction},
     components::{
         generic::{
             dropdown::DropdownAction, filter::FilterAction, filtered_tree::FilteredTreeAction,
@@ -42,6 +42,7 @@ pub enum HelpDialogAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyBindings {
     tabs: TabsKeyBindings,
+    board: BoardKeyBindings,
     tree: TreeKeyBindings,
     quit: KeySpec,
     reload_list: KeySpec,
@@ -91,6 +92,41 @@ struct TreeKeyBindings {
     focus_filter: KeySpec,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoardKeyBindings {
+    move_left: Vec<KeySpec>,
+    move_right: Vec<KeySpec>,
+    move_up: Vec<KeySpec>,
+    move_down: Vec<KeySpec>,
+    page_up: Vec<KeySpec>,
+    page_down: Vec<KeySpec>,
+    first: Vec<KeySpec>,
+    last: Vec<KeySpec>,
+}
+
+impl Default for BoardKeyBindings {
+    fn default() -> Self {
+        Self {
+            move_left: vec![KeySpec::plain('h')],
+            move_right: vec![KeySpec::plain('l')],
+            move_up: vec![KeySpec::plain('k')],
+            move_down: vec![KeySpec::plain('j')],
+            page_up: vec![
+                KeySpec::code_with_modifiers(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                KeySpec::code(KeyCode::PageUp),
+            ],
+            page_down: vec![
+                KeySpec::code_with_modifiers(KeyCode::Char('d'), KeyModifiers::CONTROL),
+                KeySpec::code(KeyCode::PageDown),
+            ],
+            first: vec![KeySpec::code(KeyCode::Home)],
+            last: vec![
+                KeySpec::code(KeyCode::End),
+                KeySpec::code_with_modifiers(KeyCode::Char('g'), KeyModifiers::SHIFT),
+            ],
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DropdownKeyBindings {
     close: KeySpec,
@@ -184,6 +220,7 @@ impl Default for KeyBindings {
     fn default() -> Self {
         Self {
             tabs: TabsKeyBindings::default(),
+            board: BoardKeyBindings::default(),
             tree: TreeKeyBindings::default(),
             quit: KeySpec::code_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL),
             reload_list: KeySpec::plain('r'),
@@ -299,6 +336,19 @@ impl KeyBindings {
         set_key(&value, "help", "last", &mut bindings.help.last);
         set_key(&value, "tabs", "previous_tab", &mut bindings.tabs.previous);
         set_key(&value, "tabs", "next_tab", &mut bindings.tabs.next);
+        set_keys(&value, "board", "move_left", &mut bindings.board.move_left);
+        set_keys(
+            &value,
+            "board",
+            "move_right",
+            &mut bindings.board.move_right,
+        );
+        set_keys(&value, "board", "move_up", &mut bindings.board.move_up);
+        set_keys(&value, "board", "move_down", &mut bindings.board.move_down);
+        set_keys(&value, "board", "page_up", &mut bindings.board.page_up);
+        set_keys(&value, "board", "page_down", &mut bindings.board.page_down);
+        set_keys(&value, "board", "first", &mut bindings.board.first);
+        set_keys(&value, "board", "last", &mut bindings.board.last);
         set_key(&value, "tree", "move_up", &mut bindings.tree.move_up);
         set_key(&value, "tree", "move_down", &mut bindings.tree.move_down);
         set_key(
@@ -395,11 +445,15 @@ impl KeyBindings {
             Some(Action::ToggleQuickSwitcher)
         } else if self.reload_list.matches(key) {
             Some(Action::ReloadList)
-        } else if self.quit.matches(key) {
+        } else if is_ctrl_q(key) {
             Some(Action::Quit)
         } else {
             None
         }
+    }
+
+    pub fn is_forced_quit(&self, key: KeyEvent) -> bool {
+        is_ctrl_q(key)
     }
 
     pub fn leader_action_for(&self, key: KeyEvent) -> Action {
@@ -424,6 +478,42 @@ impl KeyBindings {
 
     pub fn action_for(&self, key: KeyEvent) -> Action {
         self.jira_filtered_tree_action_for(key)
+    }
+
+    pub fn board_action_for(&self, key: KeyEvent) -> Action {
+        if self.tabs.previous.matches(key) {
+            Action::Tabs(TabAction::Previous)
+        } else if self.tabs.next.matches(key) {
+            Action::Tabs(TabAction::Next)
+        } else if self.tree.focus_filter.matches(key) {
+            Action::FocusBoardFilter
+        } else if key.code == KeyCode::Char(' ') {
+            Action::Board(BoardAction::ToggleCollapse)
+        } else if self.tree.collapse_all.matches(key) {
+            Action::Board(BoardAction::CollapseAllGroups)
+        } else if self.tree.expand_all.matches(key) {
+            Action::Board(BoardAction::ExpandAllGroups)
+        } else if matches_any(&self.board.move_left, key) {
+            Action::Board(BoardAction::MoveLeft)
+        } else if matches_any(&self.board.move_right, key) {
+            Action::Board(BoardAction::MoveRight)
+        } else if matches_any(&self.board.move_up, key) {
+            Action::Board(BoardAction::MoveUp)
+        } else if matches_any(&self.board.move_down, key) {
+            Action::Board(BoardAction::MoveDown)
+        } else if matches_any(&self.board.page_up, key) {
+            Action::Board(BoardAction::HalfPageUp)
+        } else if matches_any(&self.board.page_down, key) {
+            Action::Board(BoardAction::HalfPageDown)
+        } else if self.tree.go_to_start_prefix.matches(key) {
+            Action::ToggleBoardGrouping
+        } else if matches_any(&self.board.first, key) {
+            Action::Board(BoardAction::GoToStart)
+        } else if matches_any(&self.board.last, key) {
+            Action::Board(BoardAction::GoToEnd)
+        } else {
+            Action::None
+        }
     }
 
     pub fn jira_filtered_tree_action_for(&self, key: KeyEvent) -> Action {
@@ -487,7 +577,7 @@ impl KeyBindings {
     pub fn command_log_action_for(&self, key: KeyEvent) -> Action {
         if is_escape_key(key) {
             Action::CloseCommandLog
-        } else if self.quit.matches(key) {
+        } else if is_ctrl_q(key) {
             Action::Quit
         } else {
             Action::None
@@ -528,11 +618,26 @@ impl KeyBindings {
             QuickAction::ThemePicker => self.leader_shortcut_label(&self.leader_theme),
             QuickAction::ProjectPicker => self.leader_shortcut_label(&self.leader_project),
             QuickAction::ReloadList => self.reload_list.label(),
+            QuickAction::ReloadBoard => self.reload_list.label(),
             QuickAction::Board => self.leader_shortcut_label(&self.leader_board),
             QuickAction::List => self.leader_shortcut_label(&self.leader_list),
             QuickAction::Timeline => self.leader_shortcut_label(&self.leader_timeline),
             QuickAction::Filters => self.leader_shortcut_label(&self.leader_filters),
         }
+    }
+
+    pub fn board_hint_text(&self) -> String {
+        format!(
+            "{} search | {} reload | {} columns | {} cards | {} page | {}/{} groups | {} help",
+            self.tree.focus_filter.label(),
+            self.reload_list.label(),
+            key_labels(&self.board.move_left, &self.board.move_right),
+            key_labels(&self.board.move_up, &self.board.move_down),
+            key_labels(&self.board.page_up, &self.board.page_down),
+            self.tree.collapse_all.label(),
+            self.tree.expand_all.label(),
+            self.open_help.label()
+        )
     }
 
     fn leader_shortcut_label(&self, binding: &KeySpec) -> String {
@@ -551,7 +656,7 @@ impl KeyBindings {
 
     pub fn list_hint_text(&self) -> String {
         format!(
-            "{} search | {} columns | {} assignee | {} leader | {} quick | {} help",
+            "{} search | {} columns | {} assignee | {} leader | {} actions | {} help",
             self.tree.focus_filter.label(),
             self.tree.open_columns.label(),
             self.tree.open_assignee.label(),
@@ -680,6 +785,48 @@ impl KeyBindings {
                         "Switch tabs",
                         "Move between the top-level Jira tabs.",
                     ));
+                    if active_tab == "Board" {
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.tree.focus_filter.label(),
+                            "Search board",
+                            "Focus the board search and narrow visible cards.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            key_labels(&self.board.move_left, &self.board.move_right),
+                            "Move columns",
+                            "Move to the nearest issue in the previous or next board column.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            key_labels(&self.board.move_up, &self.board.move_down),
+                            "Move cards",
+                            "Move to the previous or next issue in the current board column.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            key_list_label(&self.board.page_up)
+                                + " / "
+                                + &key_list_label(&self.board.page_down),
+                            "Page cards",
+                            "Move through board issues by half pages.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            key_list_label(&self.board.first)
+                                + " / "
+                                + &key_list_label(&self.board.last),
+                            "Start / End",
+                            "Jump to the first or last board issue.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.reload_list.label(),
+                            "Reload board",
+                            "Reload the active Jira board.",
+                        ));
+                    }
                     if active_tab == "List" {
                         items.push(self.help_item(
                             HelpScope::Local,
@@ -845,8 +992,8 @@ impl KeyBindings {
         items.push(self.help_item(
             HelpScope::Global,
             self.quick_switcher.label(),
-            "Quick switcher",
-            "Open the centered command palette.",
+            "Quick actions",
+            "Open the centered quick actions menu.",
         ));
         items.push(self.help_item(
             HelpScope::Global,
@@ -937,7 +1084,7 @@ impl KeyBindings {
             }
         }
 
-        if self.quit.matches(key) {
+        if is_ctrl_q(key) {
             FilterAction::Quit
         } else if is_escape_key(key)
             || (key.code == KeyCode::Enter && !key.modifiers.contains(KeyModifiers::CONTROL))
@@ -1057,6 +1204,24 @@ impl KeySpec {
             return true;
         }
 
+        if let KeySpec {
+            code: KeyCode::Char(expected),
+            modifiers,
+        } = self
+            && modifiers == KeyModifiers::CONTROL
+            && expected.is_ascii_lowercase()
+            && let KeyCode::Char(actual) = key.code
+        {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && actual.to_ascii_lowercase() == expected
+            {
+                return true;
+            }
+            if key.modifiers.is_empty() && actual == control_code_for(expected) {
+                return true;
+            }
+        }
+
         matches!(
             (self.code, self.modifiers, key.code, key.modifiers),
             (
@@ -1114,6 +1279,60 @@ impl From<KeyEvent> for KeySpec {
             },
         }
     }
+}
+
+fn set_keys(value: &toml::Table, section: &str, key: &str, destination: &mut Vec<KeySpec>) {
+    let Some(configured) = value.get(section).and_then(|section| section.get(key)) else {
+        return;
+    };
+    let keys = if let Some(text) = configured.as_str() {
+        parse_key(text).into_iter().collect::<Vec<_>>()
+    } else if let Some(values) = configured.as_array() {
+        values
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .filter_map(parse_key)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if !keys.is_empty() {
+        *destination = keys;
+    }
+}
+
+fn matches_any(bindings: &[KeySpec], key: KeyEvent) -> bool {
+    bindings.iter().any(|binding| binding.matches(key))
+}
+
+fn key_labels(primary: &[KeySpec], secondary: &[KeySpec]) -> String {
+    let mut labels = Vec::new();
+    for binding in primary.iter().chain(secondary) {
+        let label = binding.label();
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    labels.join("/")
+}
+
+fn is_ctrl_q(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('q' | 'Q') if key.modifiers.contains(KeyModifiers::CONTROL))
+        || matches!(key.code, KeyCode::Char('\u{11}') if key.modifiers.is_empty())
+}
+fn control_code_for(key: char) -> char {
+    ((key as u8) & 0x1f) as char
+}
+
+fn key_list_label(bindings: &[KeySpec]) -> String {
+    let mut labels = Vec::new();
+    for binding in bindings {
+        let label = binding.label();
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    labels.join(" / ")
 }
 
 fn set_key(value: &toml::Table, section: &str, key: &str, destination: &mut KeySpec) {

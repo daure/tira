@@ -17,7 +17,8 @@ use crate::{
     config::JiraCredentials,
     keymap::KeyBindings,
     services::jira::{
-        CommandLogEntry, FieldSummary, IssueSummary, JiraError, ProjectSummary, UserSummary,
+        BoardColumnSummary, BoardData, BoardSwimlaneSummary, CommandLogEntry, FieldSummary,
+        IssueSummary, JiraError, ProjectSummary, UserSummary,
     },
     ui::theme::{Theme, ThemeChoice, ThemeName},
 };
@@ -33,7 +34,11 @@ pub enum Action {
     Tabs(TabAction),
     JiraFilteredTree(JiraFilteredTreeAction),
     ReloadList,
+    ReloadBoard,
+    Board(BoardAction),
     Leader,
+    FocusBoardFilter,
+    ToggleBoardGrouping,
     ToggleCommandLog,
     CloseCommandLog,
     ToggleProjectDropdown,
@@ -44,6 +49,7 @@ pub enum Action {
     ThemeDropdown(crate::components::generic::dropdown::DropdownAction),
     ToggleAssigneeDropdown,
     AssigneeDropdown(crate::components::generic::dropdown::DropdownAction),
+    BoardGroupDropdown(crate::components::generic::dropdown::DropdownAction),
     AssignSelectedToMe,
     UnassignSelected,
     GoToBoard,
@@ -71,6 +77,22 @@ pub enum AppEffect {
         assignee: Option<UserSummary>,
         credentials: JiraCredentials,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardAction {
+    MoveLeft,
+    MoveRight,
+    MoveUp,
+    MoveDown,
+    HalfPageUp,
+    HalfPageDown,
+    GoToStart,
+    GoToEnd,
+    GoToStartPrefix,
+    ToggleCollapse,
+    CollapseAllGroups,
+    ExpandAllGroups,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,12 +127,14 @@ pub enum JiraLoadPurpose {
     Initial,
     Setup,
     Reload,
+    ReloadBoard,
     SwitchProject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JiraProjectLoadResult {
     pub issues: Result<Vec<IssueSummary>, JiraError>,
+    pub board: Result<BoardData, JiraError>,
     pub fields: Result<Vec<FieldSummary>, JiraError>,
     pub projects: Result<Vec<ProjectSummary>, JiraError>,
     pub users: Result<Vec<UserSummary>, JiraError>,
@@ -131,14 +155,32 @@ enum DropdownKind {
     ProjectSwitcher,
     ThemePicker,
     AssigneePicker,
+    BoardGroup,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardGrouping {
+    None,
+    Assignee,
+}
+
+impl BoardGrouping {
+    pub const ALL: [Self; 2] = [Self::None, Self::Assignee];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Assignee => "Assignee",
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickAction {
     CommandLog,
     ThemePicker,
     ProjectPicker,
     ReloadList,
+    ReloadBoard,
     Board,
     List,
     Timeline,
@@ -164,12 +206,584 @@ impl QuickAction {
             Self::ThemePicker => "Theme picker",
             Self::ProjectPicker => "Project picker",
             Self::ReloadList => "Reload list",
+            Self::ReloadBoard => "Reload board",
             Self::Board => "Go to Board",
             Self::List => "Go to List",
             Self::Timeline => "Go to Timeline",
             Self::Filters => "Go to Filters",
         }
         .to_owned()
+    }
+}
+
+#[derive(Debug)]
+pub struct BoardState {
+    data: Option<BoardData>,
+    error: Option<String>,
+    selected_issue_key: Option<String>,
+    collapsed_groups: std::collections::BTreeSet<String>,
+    pub scroll_offset: std::cell::Cell<usize>,
+    pub column_widths: std::cell::RefCell<Vec<usize>>,
+}
+
+impl Clone for BoardState {
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            error: self.error.clone(),
+            selected_issue_key: self.selected_issue_key.clone(),
+            collapsed_groups: self.collapsed_groups.clone(),
+            scroll_offset: std::cell::Cell::new(self.scroll_offset.get()),
+            column_widths: std::cell::RefCell::new(self.column_widths.borrow().clone()),
+        }
+    }
+}
+
+impl PartialEq for BoardState {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+            && self.error == other.error
+            && self.selected_issue_key == other.selected_issue_key
+            && self.collapsed_groups == other.collapsed_groups
+    }
+}
+
+impl Eq for BoardState {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoardCell {
+    lane: usize,
+    column: usize,
+    index: usize,
+    key: String,
+    group: String,
+    is_group: bool,
+}
+
+impl BoardState {
+    fn empty() -> Self {
+        Self {
+            data: None,
+            error: None,
+            selected_issue_key: None,
+            collapsed_groups: std::collections::BTreeSet::new(),
+            scroll_offset: std::cell::Cell::new(0),
+            column_widths: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn from_issues(issues: Vec<IssueSummary>) -> Self {
+        let mut board = Self::empty();
+        board.set_data(BoardData::from_issues(issues));
+        board
+    }
+
+    fn set_data(&mut self, data: BoardData) {
+        let previous = self.selected_issue_key.clone();
+        let cells = board_cells_for_lanes(
+            &data,
+            &data.swimlanes,
+            "",
+            &self.collapsed_groups,
+            BoardGrouping::None,
+        );
+        self.selected_issue_key = previous
+            .filter(|key| cells.iter().any(|cell| cell.key == *key))
+            .or_else(|| cells.first().map(|cell| cell.key.clone()));
+        self.data = Some(data);
+        self.error = None;
+    }
+
+    fn select_first(&mut self, search: &str, grouping: BoardGrouping) {
+        let Some(data) = &self.data else {
+            self.selected_issue_key = None;
+            return;
+        };
+        let lanes = board_grouped_lanes(data, grouping);
+        let cells = board_cells_for_lanes(data, &lanes, search, &self.collapsed_groups, grouping);
+        self.selected_issue_key = cells.first().map(|cell| cell.key.clone());
+    }
+
+    fn set_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
+
+    pub fn data(&self) -> Option<&BoardData> {
+        self.data.as_ref()
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub fn selected_issue_key(&self) -> Option<&str> {
+        self.selected_issue_key
+            .as_deref()
+            .filter(|key| !is_board_group_key(key))
+    }
+
+    pub fn selected_group(&self) -> Option<&str> {
+        self.selected_issue_key
+            .as_deref()
+            .and_then(board_group_key_name)
+    }
+
+    pub fn is_group_collapsed(&self, group: &str) -> bool {
+        self.collapsed_groups.contains(group)
+    }
+
+    pub fn selected_issue_index(&self, search: &str, grouping: BoardGrouping) -> usize {
+        let Some(data) = &self.data else {
+            return 0;
+        };
+        let Some(selected) = &self.selected_issue_key else {
+            return 0;
+        };
+        let lanes = board_grouped_lanes(data, grouping);
+        let cells = board_cells_for_lanes(data, &lanes, search, &self.collapsed_groups, grouping);
+        cells
+            .iter()
+            .position(|cell| &cell.key == selected)
+            .unwrap_or(0)
+    }
+
+    fn dispatch(&mut self, action: BoardAction, search: &str, grouping: BoardGrouping) {
+        let Some(data) = &self.data else {
+            return;
+        };
+        let lanes = board_grouped_lanes(data, grouping);
+        let cells = board_cells_for_lanes(data, &lanes, search, &self.collapsed_groups, grouping);
+        if cells.is_empty() {
+            self.selected_issue_key = None;
+            return;
+        }
+        let Some(selected_index) = self
+            .selected_issue_key
+            .as_ref()
+            .and_then(|key| cells.iter().position(|cell| &cell.key == key))
+        else {
+            self.selected_issue_key = cells.first().map(|cell| cell.key.clone());
+            return;
+        };
+
+        let selected = &cells[selected_index];
+        let next = match action {
+            BoardAction::MoveLeft if selected.is_group => {
+                self.collapsed_groups.insert(selected.group.clone());
+                None
+            }
+            BoardAction::MoveRight if selected.is_group => {
+                self.collapsed_groups.remove(&selected.group);
+                board_first_group_issue_key(data, &lanes, selected.lane, search)
+            }
+            BoardAction::ToggleCollapse if selected.is_group => {
+                if !self.collapsed_groups.remove(&selected.group) {
+                    self.collapsed_groups.insert(selected.group.clone());
+                }
+                None
+            }
+            BoardAction::MoveLeft => board_horizontal_target(data, &lanes, selected, -1, search)
+                .or_else(|| {
+                    if grouping == BoardGrouping::Assignee {
+                        Some(board_group_key(&selected.group))
+                    } else {
+                        None
+                    }
+                }),
+            BoardAction::MoveRight => board_horizontal_target(data, &lanes, selected, 1, search),
+            BoardAction::MoveUp => {
+                if selected.is_group {
+                    if selected.lane > 0 {
+                        let prev_lane_idx = selected.lane - 1;
+                        let prev_group = &lanes[prev_lane_idx].name;
+                        let show_header = grouping == BoardGrouping::Assignee;
+                        if show_header && self.collapsed_groups.contains(prev_group) {
+                            Some(board_group_key(prev_group))
+                        } else {
+                            let col = selected.column;
+                            let keys =
+                                board_lane_column_keys(data, &lanes[prev_lane_idx], col, search);
+                            if let Some(last_key) = keys.last() {
+                                Some(last_key.clone())
+                            } else {
+                                let mut found = None;
+                                for c in (0..data.columns.len()).rev() {
+                                    let keys = board_lane_column_keys(
+                                        data,
+                                        &lanes[prev_lane_idx],
+                                        c,
+                                        search,
+                                    );
+                                    if let Some(last_key) = keys.last() {
+                                        found = Some(last_key.clone());
+                                        break;
+                                    }
+                                }
+                                found.or_else(|| {
+                                    if show_header {
+                                        Some(board_group_key(prev_group))
+                                    } else {
+                                        None
+                                    }
+                                })
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    let keys = board_lane_column_keys(
+                        data,
+                        &lanes[selected.lane],
+                        selected.column,
+                        search,
+                    );
+                    let pos = keys.iter().position(|key| *key == selected.key);
+                    if let Some(pos) = pos.and_then(|p| p.checked_sub(1)) {
+                        Some(keys[pos].clone())
+                    } else {
+                        let show_header = grouping == BoardGrouping::Assignee;
+                        if show_header {
+                            Some(board_group_key(&selected.group))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            BoardAction::MoveDown => {
+                if selected.is_group {
+                    let current_group = &selected.group;
+                    let show_header = grouping == BoardGrouping::Assignee;
+                    if show_header && self.collapsed_groups.contains(current_group) {
+                        if selected.lane + 1 < lanes.len() {
+                            Some(board_group_key(&lanes[selected.lane + 1].name))
+                        } else {
+                            None
+                        }
+                    } else {
+                        let mut found = None;
+                        for c in 0..data.columns.len() {
+                            let keys =
+                                board_lane_column_keys(data, &lanes[selected.lane], c, search);
+                            if let Some(first_key) = keys.first() {
+                                found = Some(first_key.clone());
+                                break;
+                            }
+                        }
+                        found.or_else(|| {
+                            if selected.lane + 1 < lanes.len() {
+                                Some(board_group_key(&lanes[selected.lane + 1].name))
+                            } else {
+                                None
+                            }
+                        })
+                    }
+                } else {
+                    let keys = board_lane_column_keys(
+                        data,
+                        &lanes[selected.lane],
+                        selected.column,
+                        search,
+                    );
+                    let pos = keys.iter().position(|key| *key == selected.key);
+                    if let Some(pos) = pos.filter(|p| p + 1 < keys.len()) {
+                        Some(keys[pos + 1].clone())
+                    } else {
+                        if grouping == BoardGrouping::Assignee && selected.lane + 1 < lanes.len() {
+                            Some(board_group_key(&lanes[selected.lane + 1].name))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            BoardAction::HalfPageUp => board_page_target(data, &cells, selected, -4, search),
+            BoardAction::HalfPageDown => board_page_target(data, &cells, selected, 4, search),
+            BoardAction::GoToStart => cells.first().map(|cell| cell.key.clone()),
+            BoardAction::GoToEnd => cells.last().map(|cell| cell.key.clone()),
+            BoardAction::GoToStartPrefix => None,
+            BoardAction::CollapseAllGroups => {
+                let selected_group = selected.group.clone();
+                self.collapsed_groups.extend(
+                    lanes
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _lane)| {
+                            board_first_group_issue_key(data, &lanes, *index, search).is_some()
+                        })
+                        .map(|(_, lane)| lane.name.clone()),
+                );
+                Some(board_group_key(&selected_group))
+            }
+            BoardAction::ExpandAllGroups => {
+                self.collapsed_groups.clear();
+                None
+            }
+            BoardAction::ToggleCollapse => None,
+        };
+
+        if let Some(next) = next {
+            self.selected_issue_key = Some(next);
+        }
+    }
+}
+
+fn board_cells_for_lanes(
+    data: &BoardData,
+    lanes: &[BoardSwimlaneSummary],
+    search: &str,
+    collapsed_groups: &std::collections::BTreeSet<String>,
+    grouping: BoardGrouping,
+) -> Vec<BoardCell> {
+    let mut cells = Vec::new();
+    for (lane_index, lane) in lanes.iter().enumerate() {
+        let group = lane.name.clone();
+        let show_header = grouping == BoardGrouping::Assignee;
+        if show_header
+            && lane.issue_keys.iter().any(|key| {
+                data.issues
+                    .iter()
+                    .find(|issue| issue.key.as_str() == key.as_str())
+                    .is_some_and(|issue| board_issue_matches_search(issue, search))
+            })
+        {
+            cells.push(BoardCell {
+                lane: lane_index,
+                column: 0,
+                index: 0,
+                key: board_group_key(&group),
+                group: group.clone(),
+                is_group: true,
+            });
+        }
+        if show_header && collapsed_groups.contains(&group) {
+            continue;
+        }
+        for (column_index, _column) in data.columns.iter().enumerate() {
+            let keys = board_lane_column_keys(data, lane, column_index, search);
+            cells.extend(keys.into_iter().enumerate().map(|(index, key)| BoardCell {
+                lane: lane_index,
+                column: column_index,
+                index,
+                key,
+                group: group.clone(),
+                is_group: false,
+            }));
+        }
+    }
+    cells
+}
+
+pub(crate) fn board_group_key(group: &str) -> String {
+    format!("__board_group__:{group}")
+}
+
+pub(crate) fn is_board_group_key(key: &str) -> bool {
+    key.starts_with("__board_group__:")
+}
+
+pub(crate) fn board_group_key_name(key: &str) -> Option<&str> {
+    key.strip_prefix("__board_group__:")
+}
+
+pub(crate) fn board_grouped_lanes(
+    data: &BoardData,
+    grouping: BoardGrouping,
+) -> Vec<BoardSwimlaneSummary> {
+    if grouping != BoardGrouping::Assignee {
+        return data.swimlanes.clone();
+    }
+    let mut groups = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for issue in &data.issues {
+        let group = issue
+            .field_values
+            .get("assignee")
+            .cloned()
+            .unwrap_or_else(|| String::from("Unassigned"));
+        groups.entry(group).or_default().push(issue.key.clone());
+    }
+    groups
+        .into_iter()
+        .map(|(name, issue_keys)| BoardSwimlaneSummary {
+            id: None,
+            name,
+            issue_keys,
+        })
+        .collect()
+}
+
+fn board_horizontal_target(
+    data: &BoardData,
+    lanes: &[BoardSwimlaneSummary],
+    selected: &BoardCell,
+    direction: isize,
+    search: &str,
+) -> Option<String> {
+    let mut column = selected.column as isize + direction;
+    while column >= 0 && (column as usize) < data.columns.len() {
+        let keys = board_lane_column_keys(data, &lanes[selected.lane], column as usize, search);
+        if !keys.is_empty() {
+            return keys.get(selected.index.min(keys.len() - 1)).cloned();
+        }
+        column += direction;
+    }
+    None
+}
+
+fn board_first_group_issue_key(
+    data: &BoardData,
+    lanes: &[BoardSwimlaneSummary],
+    lane_index: usize,
+    search: &str,
+) -> Option<String> {
+    for column in 0..data.columns.len() {
+        if let Some(key) = board_lane_column_keys(data, &lanes[lane_index], column, search).first()
+        {
+            return Some(key.clone());
+        }
+    }
+    None
+}
+
+fn board_page_target(
+    data: &BoardData,
+    cells: &[BoardCell],
+    selected: &BoardCell,
+    delta: isize,
+    search: &str,
+) -> Option<String> {
+    if selected.is_group {
+        return Some(selected.key.clone());
+    }
+
+    let swimlane_index = board_issue_swimlane_index(data, &selected.key)?;
+    let lane_column_keys = cells
+        .iter()
+        .filter(|cell| {
+            !cell.is_group
+                && cell.column == selected.column
+                && board_issue_swimlane_index(data, &cell.key) == Some(swimlane_index)
+                && data
+                    .issues
+                    .iter()
+                    .find(|issue| issue.key == cell.key)
+                    .is_some_and(|issue| board_issue_matches_search(issue, search))
+        })
+        .map(|cell| cell.key.as_str())
+        .collect::<Vec<_>>();
+    let position = lane_column_keys
+        .iter()
+        .position(|key| *key == selected.key)?;
+    let target = if delta < 0 {
+        position.saturating_sub(delta.unsigned_abs())
+    } else {
+        position
+            .saturating_add(delta as usize)
+            .min(lane_column_keys.len().saturating_sub(1))
+    };
+    Some(lane_column_keys[target].to_owned())
+}
+
+fn board_issue_swimlane_index(data: &BoardData, key: &str) -> Option<usize> {
+    data.swimlanes
+        .iter()
+        .position(|lane| lane.issue_keys.iter().any(|issue_key| issue_key == key))
+}
+
+fn board_lane_column_keys(
+    data: &BoardData,
+    lane: &BoardSwimlaneSummary,
+    column_index: usize,
+    search: &str,
+) -> Vec<String> {
+    lane.issue_keys
+        .iter()
+        .filter(|key| {
+            data.issues
+                .iter()
+                .find(|issue| issue.key.as_str() == key.as_str())
+                .is_some_and(|issue| {
+                    board_issue_column(data, issue) == column_index
+                        && board_issue_matches_search(issue, search)
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+fn board_issue_matches_search(issue: &IssueSummary, search: &str) -> bool {
+    let search = search.trim();
+    if search.is_empty() {
+        return true;
+    }
+    let search = search.to_ascii_lowercase();
+    issue.key.to_ascii_lowercase().contains(&search)
+        || issue.summary.to_ascii_lowercase().contains(&search)
+        || issue.status.to_ascii_lowercase().contains(&search)
+        || issue.issue_type.to_ascii_lowercase().contains(&search)
+        || board_displayed_field_matches(issue, "epic_summary", &search)
+        || board_displayed_field_matches(issue, "labels", &search)
+        || board_displayed_field_matches(issue, "dueDate", &search)
+        || board_displayed_field_matches(issue, "priorityName", &search)
+        || board_assignee_matches(issue, &search)
+}
+
+fn board_assignee_matches(issue: &IssueSummary, search: &str) -> bool {
+    issue.field_values.get("assignee").is_some_and(|assignee| {
+        let assignee = assignee.to_ascii_lowercase();
+        let initials = crate::components::generic::avatar::initials(&assignee).to_ascii_lowercase();
+        assignee.contains(search) || initials.contains(search)
+    })
+}
+
+fn board_displayed_field_matches(issue: &IssueSummary, field: &str, search: &str) -> bool {
+    issue
+        .field_values
+        .get(field)
+        .is_some_and(|value| value.to_ascii_lowercase().contains(search))
+}
+
+pub fn board_issue_column(data: &BoardData, issue: &IssueSummary) -> usize {
+    let status_id = issue.field_values.get("status_id").map(String::as_str);
+    data.columns
+        .iter()
+        .position(|column| board_column_contains_issue(column, issue, status_id))
+        .unwrap_or(0)
+}
+
+fn board_column_contains_issue(
+    column: &BoardColumnSummary,
+    issue: &IssueSummary,
+    status_id: Option<&str>,
+) -> bool {
+    if column.statuses.is_empty() {
+        return column.name == issue.status;
+    }
+    column
+        .statuses
+        .iter()
+        .any(|status| Some(status.as_str()) == status_id || status == &issue.status)
+}
+
+fn merge_board_issue_fields(board: &mut BoardData, list_issues: &[IssueSummary]) {
+    for board_issue in &mut board.issues {
+        let Some(list_issue) = list_issues
+            .iter()
+            .find(|list_issue| list_issue.key == board_issue.key)
+        else {
+            continue;
+        };
+        for (key, value) in &list_issue.field_values {
+            if matches!(key.as_str(), "assignee" | "reporter") {
+                board_issue.field_values.insert(key.clone(), value.clone());
+            } else {
+                board_issue
+                    .field_values
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
     }
 }
 
@@ -342,9 +956,14 @@ pub struct App {
     screen: Screen,
     setup: CredentialForm,
     filtered_tree: JiraFilteredTreeState,
+    board: BoardState,
+    board_go_to_start_pending: bool,
+    board_grouping: BoardGrouping,
+    board_group_dropdown: Option<MultiSelectDropdownState<BoardGrouping>>,
     credentials: Option<JiraCredentials>,
     command_log: Vec<CommandLogEntry>,
     command_log_open: bool,
+    board_filter: crate::FilterState,
     status: String,
     notifications: Vec<Notification>,
     help_open: bool,
@@ -382,6 +1001,11 @@ impl App {
             screen: Screen::Setup,
             setup: CredentialForm::default(),
             filtered_tree,
+            board: BoardState::empty(),
+            board_go_to_start_pending: false,
+            board_grouping: BoardGrouping::None,
+            board_group_dropdown: None,
+            board_filter: crate::FilterState::default(),
             credentials: None,
             command_log: Vec::new(),
             command_log_open: false,
@@ -407,6 +1031,7 @@ impl App {
     }
 
     pub fn with_issues(issues: Vec<IssueSummary>) -> Self {
+        let board = BoardState::from_issues(issues.clone());
         let mut filtered_tree = JiraFilteredTreeState::new(tree_items_from_issues(issues));
         filtered_tree.set_view_mode(FilteredTreeViewMode::Table);
 
@@ -416,6 +1041,11 @@ impl App {
             screen: Screen::Main,
             setup: CredentialForm::default(),
             filtered_tree,
+            board,
+            board_go_to_start_pending: false,
+            board_grouping: BoardGrouping::None,
+            board_group_dropdown: None,
+            board_filter: crate::FilterState::default(),
             credentials: None,
             command_log: Vec::new(),
             command_log_open: false,
@@ -438,6 +1068,12 @@ impl App {
             next_request_id: 1,
             pending_assignment_requests: std::collections::BTreeMap::new(),
         }
+    }
+
+    pub fn with_board_data(board: BoardData) -> Self {
+        let mut app = Self::with_issues(board.issues.clone());
+        app.board.set_data(board);
+        app
     }
 
     pub fn with_issues_and_projects(
@@ -515,6 +1151,9 @@ impl App {
         if let Some(dropdown) = &mut self.assignee_dropdown {
             dropdown.tick(dt);
         }
+        if let Some(dropdown) = &mut self.board_group_dropdown {
+            dropdown.tick(dt);
+        }
         for notification in &mut self.notifications {
             notification.tick(dt);
         }
@@ -538,6 +1177,10 @@ impl App {
                 .is_some_and(MultiSelectDropdownState::is_animating)
             || self
                 .assignee_dropdown
+                .as_ref()
+                .is_some_and(MultiSelectDropdownState::is_animating)
+            || self
+                .board_group_dropdown
                 .as_ref()
                 .is_some_and(MultiSelectDropdownState::is_animating)
             || self.notifications.iter().any(Notification::is_animating)
@@ -569,7 +1212,9 @@ impl App {
                         JiraLoadPurpose::SwitchProject => {
                             format!("Could not save selected Jira project: {error}")
                         }
-                        JiraLoadPurpose::Initial | JiraLoadPurpose::Reload => {
+                        JiraLoadPurpose::Initial
+                        | JiraLoadPurpose::Reload
+                        | JiraLoadPurpose::ReloadBoard => {
                             format!("Could not save Jira config: {error}")
                         }
                     };
@@ -684,8 +1329,10 @@ impl App {
 
         let users = result.users;
         let current_user = result.current_user;
+        let board = result.board;
         match result.issues {
             Ok(issues) => {
+                let fallback_board_issues = issues.clone();
                 if let Ok(users) = users {
                     self.users = users;
                 } else {
@@ -711,11 +1358,28 @@ impl App {
                     self.filtered_tree.set_jira_site(credentials.site.clone());
                 }
                 self.filtered_tree.set_items(tree_items_from_issues(issues));
+                match board {
+                    Ok(mut board) => {
+                        merge_board_issue_fields(&mut board, &fallback_board_issues);
+                        self.board.set_data(board);
+                    }
+                    Err(error) => {
+                        let message = error.0;
+                        self.board
+                            .set_data(BoardData::from_issues(fallback_board_issues));
+                        self.board.set_error(message.clone());
+                        self.notifications.push(Notification::error(
+                            "Jira board not loaded",
+                            "Board tab is grouped by issue status until the board endpoint succeeds.",
+                        ));
+                    }
+                }
                 self.screen = Screen::Main;
                 self.status = match purpose {
                     JiraLoadPurpose::Initial | JiraLoadPurpose::Reload => {
                         String::from("Jira issues loaded.")
                     }
+                    JiraLoadPurpose::ReloadBoard => String::from("Jira board loaded."),
                     JiraLoadPurpose::Setup => {
                         String::from("Jira credentials saved and issues loaded.")
                     }
@@ -725,6 +1389,9 @@ impl App {
                 };
             }
             Err(error) => {
+                if let Ok(board) = board {
+                    self.board.set_data(board);
+                }
                 self.status = error.0;
             }
         }
@@ -780,8 +1447,37 @@ impl App {
         self.filtered_tree.selected_item_index()
     }
 
+    pub fn board_grouping(&self) -> BoardGrouping {
+        self.board_grouping
+    }
+
+    pub fn board_group_dropdown(&self) -> Option<&MultiSelectDropdownState<BoardGrouping>> {
+        self.board_group_dropdown.as_ref()
+    }
+
     pub fn selected_issue_key(&self) -> Option<&str> {
         self.filtered_tree.selected_item_id()
+    }
+
+    pub fn board(&self) -> &BoardState {
+        &self.board
+    }
+
+    pub fn selected_board_issue_key(&self) -> Option<&str> {
+        self.board.selected_issue_key()
+    }
+
+    pub fn selected_board_issue_index(&self) -> usize {
+        self.board
+            .selected_issue_index(self.board_filter(), self.board_grouping)
+    }
+
+    pub fn selected_board_group(&self) -> Option<&str> {
+        self.board.selected_group()
+    }
+
+    pub fn is_board_group_collapsed(&self, group: &str) -> bool {
+        self.board.is_group_collapsed(group)
     }
 
     pub fn issue_scroll_offset(&self) -> usize {
@@ -800,6 +1496,21 @@ impl App {
         self.filtered_tree.filter_state()
     }
 
+    pub fn board_filter(&self) -> &str {
+        self.board_filter.value()
+    }
+
+    pub fn board_filter_cursor(&self) -> usize {
+        self.board_filter.cursor()
+    }
+
+    pub fn board_filter_state(&self) -> &crate::FilterState {
+        &self.board_filter
+    }
+
+    pub fn is_board_filter_focused(&self) -> bool {
+        self.board_filter.is_focused()
+    }
     pub fn is_filter_focused(&self) -> bool {
         self.filtered_tree.is_filter_focused()
     }
@@ -874,12 +1585,23 @@ impl App {
         self.quick_switcher.is_some()
     }
 
+    pub fn is_board_group_dropdown_open(&self) -> bool {
+        self.board_group_dropdown.is_some()
+    }
+
+    pub fn is_board_group_dropdown_filter_focused(&self) -> bool {
+        self.board_group_dropdown
+            .as_ref()
+            .is_some_and(MultiSelectDropdownState::is_filter_focused)
+    }
+
     pub fn is_any_dropdown_open(&self) -> bool {
         self.is_column_dropdown_open()
             || self.is_assignee_dropdown_open()
             || self.is_project_dropdown_open()
             || self.is_theme_dropdown_open()
             || self.is_quick_switcher_open()
+            || self.is_board_group_dropdown_open()
     }
 
     pub fn is_quick_switcher_filter_focused(&self) -> bool {
@@ -912,6 +1634,7 @@ impl App {
             || self.is_project_dropdown_filter_focused()
             || self.is_theme_dropdown_filter_focused()
             || self.is_quick_switcher_filter_focused()
+            || self.is_board_group_dropdown_filter_focused()
     }
 
     pub fn command_log_entries(&self) -> &[CommandLogEntry] {
@@ -963,11 +1686,16 @@ impl App {
             Screen::Main if self.assignee_dropdown.is_some() => true,
             Screen::Main if self.filtered_tree.is_column_dropdown_open() => true,
             Screen::Main if self.filtered_tree.is_filter_focused() => true,
+            Screen::Main if self.board_filter.is_focused() => true,
             _ => false,
         };
 
         if self.leader_pending {
             self.leader_pending = false;
+            if let Some(Action::Quit) = keybindings.global_action_for(key) {
+                self.dispatch(Action::Quit);
+                return;
+            }
             let action = keybindings.leader_action_for(key);
             if action != Action::None {
                 self.dispatch(action);
@@ -983,26 +1711,27 @@ impl App {
         if let Some(action) = keybindings.global_action_for(key) {
             let focused_text_input = self.screen == Screen::Setup
                 || self.is_filter_focused()
+                || self.is_board_filter_focused()
                 || self.is_column_dropdown_filter_focused()
                 || self.is_project_dropdown_filter_focused()
                 || self.is_theme_dropdown_filter_focused()
                 || self.is_assignee_dropdown_filter_focused()
-                || self.is_quick_switcher_filter_focused();
+                || self.is_quick_switcher_filter_focused()
+                || self.is_board_group_dropdown_filter_focused();
             let is_navigation_shortcut = (key.code == KeyCode::Char('j')
                 || key.code == KeyCode::Char('k'))
                 && key.modifiers.contains(KeyModifiers::CONTROL);
             let printable_text = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT);
-            let is_ctrl_q =
-                key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL);
+            let is_ctrl_q = keybindings.is_forced_quit(key);
             let reserved_input_action = matches!(action, Action::OpenHelp);
             if !(focused_text_input
                 && (printable_text || is_navigation_shortcut)
                 && !reserved_input_action
                 || typing && matches!(action, Action::Quit) && !is_ctrl_q)
             {
-                self.dispatch(action);
+                self.dispatch(self.contextual_global_action(action));
                 return;
             }
         }
@@ -1024,6 +1753,20 @@ impl App {
                 self.is_assignee_dropdown_filter_focused(),
                 KeyBindings::project_dropdown_action_for,
             )));
+            return;
+        }
+
+        if self.board_group_dropdown.is_some() {
+            self.dispatch(Action::BoardGroupDropdown(
+                self.dropdown_key_action(
+                    key,
+                    keybindings,
+                    self.board_group_dropdown
+                        .as_ref()
+                        .is_some_and(MultiSelectDropdownState::is_filter_focused),
+                    KeyBindings::project_dropdown_action_for,
+                ),
+            ));
             return;
         }
 
@@ -1097,6 +1840,9 @@ impl App {
                 };
                 self.dispatch(Action::JiraFilteredTree(action));
             }
+            Screen::Main if self.active_tab() == "Board" && self.board_filter.is_focused() => {
+                self.dispatch_board_filter(keybindings.filter_action_for(key));
+            }
             Screen::Main if self.filtered_tree.is_filter_focused() => {
                 let action = keybindings.filter_action_for(key);
                 if action == FilterAction::MoveSelectionUp {
@@ -1120,8 +1866,21 @@ impl App {
                 }
             }
             Screen::Main => {
-                let action = keybindings.jira_filtered_tree_action_for(key);
-                if self.active_tab() != "List" && !matches!(action, Action::Tabs(_)) {
+                let action = if self.active_tab() == "Board" {
+                    keybindings.board_action_for(key)
+                } else {
+                    keybindings.jira_filtered_tree_action_for(key)
+                };
+                if self.active_tab() != "List"
+                    && !matches!(
+                        action,
+                        Action::Tabs(_)
+                            | Action::Board(_)
+                            | Action::JiraFilteredTree(_)
+                            | Action::FocusBoardFilter
+                            | Action::ToggleBoardGrouping
+                    )
+                {
                     return;
                 }
                 self.dispatch(action);
@@ -1205,7 +1964,44 @@ impl App {
             return;
         }
 
-        if self.screen != Screen::Main || self.active_tab() != "List" {
+        if self.screen != Screen::Main {
+            return;
+        }
+        if self.active_tab() == "Board" {
+            let [top_row, _content_area] = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
+                .constraints([
+                    ratatui::layout::Constraint::Length(1),
+                    ratatui::layout::Constraint::Min(1),
+                ])
+                .areas(inner);
+            let group_width = (self.board_grouping.label().len() as u16 + 9).max(16);
+            let [filter_area, group_area] = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Horizontal)
+                .constraints([
+                    ratatui::layout::Constraint::Min(1),
+                    ratatui::layout::Constraint::Length(group_width),
+                ])
+                .areas(top_row);
+            if contains_point(group_area, point) {
+                self.toggle_dropdown(DropdownKind::BoardGroup);
+                return;
+            }
+            if contains_point(filter_area, point) {
+                self.board_filter.focus();
+                return;
+            }
+            if let Some(delta) = scroll_delta {
+                let action = if delta > 0 {
+                    BoardAction::HalfPageDown
+                } else {
+                    BoardAction::HalfPageUp
+                };
+                self.dispatch(Action::Board(action));
+            }
+            return;
+        }
+        if self.active_tab() != "List" {
             return;
         }
 
@@ -1333,6 +2129,10 @@ impl App {
                 .assignee_dropdown
                 .as_ref()
                 .map(|dropdown| dropdown_dimensions(dropdown, area, 32, 10)),
+            DropdownKind::BoardGroup => self
+                .board_group_dropdown
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 28, 6)),
             DropdownKind::JiraColumns => None,
         }
         .unwrap_or((0, 0));
@@ -1439,6 +2239,10 @@ impl App {
                 .assignee_dropdown
                 .as_ref()
                 .map(|dropdown| dropdown_dimensions(dropdown, area, 32, 10)),
+            DropdownKind::BoardGroup => self
+                .board_group_dropdown
+                .as_ref()
+                .map(|dropdown| dropdown_dimensions(dropdown, area, 28, 6)),
             DropdownKind::JiraColumns => None,
         }
         .unwrap_or((0, 0));
@@ -1498,6 +2302,13 @@ impl App {
                         );
                     }
                 }
+                DropdownKind::BoardGroup => {
+                    if let Some(dropdown) = &mut self.board_group_dropdown {
+                        dropdown.dispatch(
+                            crate::components::generic::dropdown::DropdownAction::FocusFilter,
+                        );
+                    }
+                }
                 DropdownKind::JiraColumns => {}
             }
             return true;
@@ -1531,6 +2342,11 @@ impl App {
             }
             DropdownKind::AssigneePicker => {
                 if let Some(dropdown) = &mut self.assignee_dropdown {
+                    dropdown.scroll_viewport(delta);
+                }
+            }
+            DropdownKind::BoardGroup => {
+                if let Some(dropdown) = &mut self.board_group_dropdown {
                     dropdown.scroll_viewport(delta);
                 }
             }
@@ -1583,6 +2399,19 @@ impl App {
                     dropdown.set_selected_index(index);
                 }
                 self.dispatch_assignee_dropdown(
+                    crate::components::generic::dropdown::DropdownAction::ToggleSelected,
+                );
+            }
+            DropdownKind::BoardGroup => {
+                let Some(index) =
+                    dropdown_index_at(self.board_group_dropdown.as_ref(), row, height)
+                else {
+                    return;
+                };
+                if let Some(dropdown) = &mut self.board_group_dropdown {
+                    dropdown.set_selected_index(index);
+                }
+                self.dispatch_board_group_dropdown(
                     crate::components::generic::dropdown::DropdownAction::ToggleSelected,
                 );
             }
@@ -1738,13 +2567,32 @@ impl App {
         match action {
             Action::Tabs(action) => self.dispatch_tabs(action),
             Action::JiraFilteredTree(action) => self.dispatch_jira_filtered_tree(action),
+            Action::Board(BoardAction::GoToStartPrefix) => {
+                if self.board_go_to_start_pending {
+                    let search = self.board_filter.value().to_owned();
+                    self.board
+                        .dispatch(BoardAction::GoToStart, &search, self.board_grouping);
+                    self.board_go_to_start_pending = false;
+                } else {
+                    self.board_go_to_start_pending = true;
+                }
+            }
+            Action::Board(action) => {
+                self.board_go_to_start_pending = false;
+                let search = self.board_filter.value().to_owned();
+                self.board.dispatch(action, &search, self.board_grouping);
+            }
+            Action::FocusBoardFilter => self.board_filter.focus(),
             Action::ReloadList => self.reload_list(),
+            Action::ReloadBoard => self.reload_board(),
             Action::Leader => self.leader_pending = true,
             Action::ToggleCommandLog => self.toggle_dialog(DialogKind::CommandLog),
             Action::ToggleQuickSwitcher => self.toggle_dropdown(DropdownKind::QuickSwitcher),
             Action::ToggleProjectDropdown => self.toggle_dropdown(DropdownKind::ProjectSwitcher),
             Action::ToggleThemeDropdown => self.toggle_dropdown(DropdownKind::ThemePicker),
             Action::ToggleAssigneeDropdown => self.toggle_dropdown(DropdownKind::AssigneePicker),
+            Action::ToggleBoardGrouping => self.toggle_dropdown(DropdownKind::BoardGroup),
+            Action::BoardGroupDropdown(action) => self.dispatch_board_group_dropdown(action),
             Action::AssignSelectedToMe => self.assign_selected_to_me(),
             Action::UnassignSelected => self.queue_selected_assignment(None),
             Action::GoToBoard => self.select_tab("Board"),
@@ -1760,6 +2608,26 @@ impl App {
             Action::CloseCommandLog => self.close_dialog(DialogKind::CommandLog),
             Action::Quit => self.running = false,
             Action::None => self.filtered_tree.clear_transient_input(),
+        }
+    }
+
+    fn dispatch_board_filter(&mut self, action: FilterAction) {
+        match action {
+            FilterAction::Quit => self.running = false,
+            FilterAction::Exit if !self.board_filter.value().is_empty() => {
+                self.board_filter.clear();
+                self.board.select_first("", self.board_grouping);
+            }
+            _ => {
+                self.board_filter.dispatch(action);
+            }
+        }
+    }
+    fn contextual_global_action(&self, action: Action) -> Action {
+        if matches!(action, Action::ReloadList) && self.active_tab() == "Board" {
+            Action::ReloadBoard
+        } else {
+            action
         }
     }
 
@@ -1856,9 +2724,10 @@ impl App {
             self.toggle_dropdown(DropdownKind::JiraColumns);
             return;
         }
-        if self.tabs.is_active(APP_TABS, "List")
-            && let Some(event) = self.filtered_tree.dispatch(action)
-        {
+        let can_dispatch = self.tabs.is_active(APP_TABS, "List")
+            || self.tabs.is_active(APP_TABS, "Board")
+                && matches!(action, JiraFilteredTreeAction::FilteredTree(_));
+        if can_dispatch && let Some(event) = self.filtered_tree.dispatch(action) {
             self.handle_jira_filtered_tree_event(event);
         }
     }
@@ -1934,6 +2803,7 @@ impl App {
             DropdownKind::ProjectSwitcher => self.open_project_dropdown(),
             DropdownKind::ThemePicker => self.open_theme_dropdown(),
             DropdownKind::AssigneePicker => self.open_assignee_dropdown(),
+            DropdownKind::BoardGroup => self.open_board_group_dropdown(),
         }
     }
 
@@ -1944,6 +2814,7 @@ impl App {
             DropdownKind::ProjectSwitcher => self.project_dropdown = None,
             DropdownKind::ThemePicker => self.close_theme_dropdown_without_selection(),
             DropdownKind::AssigneePicker => self.assignee_dropdown = None,
+            DropdownKind::BoardGroup => self.board_group_dropdown = None,
         }
     }
 
@@ -1954,6 +2825,7 @@ impl App {
             DropdownKind::ProjectSwitcher => self.project_dropdown.is_some(),
             DropdownKind::ThemePicker => self.theme_dropdown.is_some(),
             DropdownKind::AssigneePicker => self.assignee_dropdown.is_some(),
+            DropdownKind::BoardGroup => self.board_group_dropdown.is_some(),
         }
     }
 
@@ -1963,6 +2835,7 @@ impl App {
         self.project_dropdown = None;
         self.assignee_dropdown = None;
         self.filtered_tree.close_column_dropdown();
+        self.board_group_dropdown = None;
     }
 
     fn close_dialogs(&mut self) {
@@ -1984,6 +2857,8 @@ impl App {
         ];
         if self.active_tab() == "List" {
             actions.insert(3, QuickAction::ReloadList);
+        } else if self.active_tab() == "Board" {
+            actions.insert(3, QuickAction::ReloadBoard);
         }
         let options = actions
             .into_iter()
@@ -2087,6 +2962,50 @@ impl App {
                 .with_filter_focused(),
         );
         self.theme_preview_origin = Some(self.theme.clone());
+    }
+
+    fn open_board_group_dropdown(&mut self) {
+        self.close_overlays();
+        let options = BoardGrouping::ALL
+            .into_iter()
+            .map(|grouping| DropdownOption {
+                selected: grouping == self.board_grouping,
+                label: grouping.label().to_owned(),
+                value: grouping,
+            })
+            .collect();
+        self.board_group_dropdown = Some(
+            MultiSelectDropdownState::new(options)
+                .single_select()
+                .focus_selected()
+                .with_filter_focused(),
+        );
+    }
+
+    fn dispatch_board_group_dropdown(
+        &mut self,
+        action: crate::components::generic::dropdown::DropdownAction,
+    ) {
+        let Some(dropdown) = &mut self.board_group_dropdown else {
+            return;
+        };
+        match dropdown.dispatch(action) {
+            Some(DropdownEvent::Closed) => self.board_group_dropdown = None,
+            Some(DropdownEvent::Toggled(index)) => {
+                let Some(grouping) = self
+                    .board_group_dropdown
+                    .as_ref()
+                    .and_then(|dropdown| dropdown.options().get(index))
+                    .map(|option| option.value)
+                else {
+                    return;
+                };
+                self.board_grouping = grouping;
+                self.board_group_dropdown = None;
+                self.board.select_first(self.board_filter.value(), grouping);
+            }
+            None => {}
+        }
     }
 
     fn close_theme_dropdown_without_selection(&mut self) {
@@ -2201,6 +3120,7 @@ impl App {
             QuickAction::ThemePicker => self.open_theme_dropdown(),
             QuickAction::ProjectPicker => self.open_project_dropdown(),
             QuickAction::ReloadList => self.reload_list(),
+            QuickAction::ReloadBoard => self.reload_board(),
             QuickAction::Board => self.select_tab("Board"),
             QuickAction::List => self.select_tab("List"),
             QuickAction::Timeline => self.select_tab("Timeline"),
@@ -2343,6 +3263,20 @@ impl App {
 
         self.status = String::from("Reloading Jira issues...");
         self.queue_jira_load(JiraLoadPurpose::Reload, credentials);
+    }
+
+    fn reload_board(&mut self) {
+        if !self.tabs.is_active(APP_TABS, "Board") {
+            return;
+        }
+
+        let Some(credentials) = self.credentials.clone() else {
+            self.status = String::from("No Jira credentials available for reload.");
+            return;
+        };
+
+        self.status = String::from("Reloading Jira board...");
+        self.queue_jira_load(JiraLoadPurpose::ReloadBoard, credentials);
     }
 }
 

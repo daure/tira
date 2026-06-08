@@ -1,4 +1,6 @@
 mod assignee_selector;
+mod board;
+mod board_group_picker;
 pub mod chrome;
 pub mod layout;
 mod overlays;
@@ -44,6 +46,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
     theme_picker::render(frame, inner, app, keybindings);
     project_switcher::render(frame, inner, app, keybindings);
     assignee_selector::render(frame, inner, app, keybindings);
+    board_group_picker::render(frame, inner, app, keybindings);
 
     if app.is_command_log_open() {
         overlays::render_command_log_dialog(frame, inner, app);
@@ -57,7 +60,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
 fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
     match app.active_tab() {
         "List" => issue_list::render(frame, area, app, keybindings),
-        "Board" => render_empty_tab(frame, area, "Board", app.theme()),
+        "Board" => board::render(frame, area, app, keybindings),
         tab => render_empty_tab(frame, area, tab, app.theme()),
     }
 }
