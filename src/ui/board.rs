@@ -10,7 +10,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    App, BoardGrouping, KeyBindings,
+    App, KeyBindings,
     app::{board_group_key, board_grouped_lanes, board_issue_column},
     components::{
         generic::{avatar, filter, priority},
@@ -234,8 +234,8 @@ fn generate_rendered_board(
         .filter(|lane| !filtered_lane_issue_keys(lane, issues_by_key, search).is_empty())
         .collect::<Vec<_>>();
 
-    if grouping == BoardGrouping::Assignee && original_visible_lanes.len() > 1 {
-        let grouped_lanes = board_grouped_lanes(data, BoardGrouping::Assignee);
+    if grouping.is_grouped() && original_visible_lanes.len() > 1 {
+        let grouped_lanes = board_grouped_lanes(data, grouping);
         for swimlane in original_visible_lanes {
             let swimlane_keys = filtered_lane_issue_keys(swimlane, issues_by_key, search);
             let swimlane_heading = board_heading_line(
@@ -307,7 +307,7 @@ fn generate_rendered_board(
     for lane in visible_lanes {
         let lane_issues = filtered_lane_issue_keys(lane, issues_by_key, search);
         let show_header =
-            grouping == BoardGrouping::Assignee || visible_lanes.len() > 1 || lane.name != "Issues";
+            grouping.is_grouped() || visible_lanes.len() > 1 || lane.name != "Issues";
         if show_header {
             let collapsed = app.is_board_group_collapsed(&lane.name);
             let selected = selected_group == Some(lane.name.as_str());

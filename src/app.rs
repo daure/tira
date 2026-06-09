@@ -247,16 +247,68 @@ enum DropdownKind {
 pub enum BoardGrouping {
     None,
     Assignee,
+    Epic,
+    Stories,
+    Spaces,
 }
 
 impl BoardGrouping {
-    pub const ALL: [Self; 2] = [Self::None, Self::Assignee];
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Assignee,
+        Self::Epic,
+        Self::Stories,
+        Self::Spaces,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::None => "None",
             Self::Assignee => "Assignee",
+            Self::Epic => "Epic",
+            Self::Stories => "Stories",
+            Self::Spaces => "Spaces",
         }
+    }
+
+    /// Whether this grouping splits the board into swimlanes (anything but None).
+    pub fn is_grouped(self) -> bool {
+        self != Self::None
+    }
+
+    /// Label for the catch-all swimlane that always sorts to the bottom.
+    fn catch_all_label(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Assignee => "Unassigned",
+            Self::Epic => "No Epic",
+            Self::Stories => "Other work items",
+            Self::Spaces => "Other",
+        }
+    }
+
+    /// Resolve the swimlane label for an issue under this grouping, or `None`
+    /// when the issue belongs to the catch-all lane.
+    fn group_label(self, issue: &crate::services::jira::IssueSummary) -> Option<String> {
+        let field = match self {
+            Self::None => return None,
+            Self::Assignee => "assignee",
+            Self::Epic => "epic_summary",
+            Self::Stories => "parent",
+            Self::Spaces => {
+                // "Spaces" == projects; derive the project key from the issue key
+                // prefix (e.g. "DPP-123" -> "DPP").
+                return issue
+                    .key
+                    .split_once('-')
+                    .map(|(prefix, _)| prefix.to_owned());
+            }
+        };
+        issue
+            .field_values
+            .get(field)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,7 +538,7 @@ impl BoardState {
             }
             BoardAction::MoveLeft => board_horizontal_target(data, &lanes, selected, -1, search)
                 .or_else(|| {
-                    if grouping == BoardGrouping::Assignee {
+                    if grouping.is_grouped() {
                         Some(board_group_key(&selected.group))
                     } else {
                         None
@@ -498,7 +550,7 @@ impl BoardState {
                     if selected.lane > 0 {
                         let prev_lane_idx = selected.lane - 1;
                         let prev_group = &lanes[prev_lane_idx].name;
-                        let show_header = grouping == BoardGrouping::Assignee;
+                        let show_header = grouping.is_grouped();
                         if show_header && self.collapsed_groups.contains(prev_group) {
                             Some(board_group_key(prev_group))
                         } else {
@@ -544,7 +596,7 @@ impl BoardState {
                     if let Some(pos) = pos.and_then(|p| p.checked_sub(1)) {
                         Some(keys[pos].clone())
                     } else {
-                        let show_header = grouping == BoardGrouping::Assignee;
+                        let show_header = grouping.is_grouped();
                         if show_header {
                             Some(board_group_key(&selected.group))
                         } else {
@@ -556,7 +608,7 @@ impl BoardState {
             BoardAction::MoveDown => {
                 if selected.is_group {
                     let current_group = &selected.group;
-                    let show_header = grouping == BoardGrouping::Assignee;
+                    let show_header = grouping.is_grouped();
                     if show_header && self.collapsed_groups.contains(current_group) {
                         if selected.lane + 1 < lanes.len() {
                             Some(board_group_key(&lanes[selected.lane + 1].name))
@@ -592,7 +644,7 @@ impl BoardState {
                     if let Some(pos) = pos.filter(|p| p + 1 < keys.len()) {
                         Some(keys[pos + 1].clone())
                     } else {
-                        if grouping == BoardGrouping::Assignee && selected.lane + 1 < lanes.len() {
+                        if grouping.is_grouped() && selected.lane + 1 < lanes.len() {
                             Some(board_group_key(&lanes[selected.lane + 1].name))
                         } else {
                             None
@@ -641,7 +693,7 @@ fn board_cells_for_lanes(
     let mut cells = Vec::new();
     for (lane_index, lane) in lanes.iter().enumerate() {
         let group = lane.name.clone();
-        let show_header = grouping == BoardGrouping::Assignee;
+        let show_header = grouping.is_grouped();
         if show_header
             && lane.issue_keys.iter().any(|key| {
                 data.issues
@@ -693,26 +745,32 @@ pub(crate) fn board_grouped_lanes(
     data: &BoardData,
     grouping: BoardGrouping,
 ) -> Vec<BoardSwimlaneSummary> {
-    if grouping != BoardGrouping::Assignee {
+    if !grouping.is_grouped() {
         return data.swimlanes.clone();
     }
+    let catch_all = grouping.catch_all_label();
     let mut groups = std::collections::BTreeMap::<String, Vec<String>>::new();
     for issue in &data.issues {
-        let group = issue
-            .field_values
-            .get("assignee")
-            .cloned()
-            .unwrap_or_else(|| String::from("Unassigned"));
+        let group = grouping
+            .group_label(issue)
+            .unwrap_or_else(|| catch_all.to_owned());
         groups.entry(group).or_default().push(issue.key.clone());
     }
-    groups
+    let mut lanes: Vec<BoardSwimlaneSummary> = groups
         .into_iter()
         .map(|(name, issue_keys)| BoardSwimlaneSummary {
             id: None,
             name,
             issue_keys,
         })
-        .collect()
+        .collect();
+    // Keep names alphabetical but always push the catch-all lane to the bottom.
+    lanes.sort_by(|a, b| {
+        let a_catch = a.name == catch_all;
+        let b_catch = b.name == catch_all;
+        a_catch.cmp(&b_catch).then_with(|| a.name.cmp(&b.name))
+    });
+    lanes
 }
 
 fn board_horizontal_target(

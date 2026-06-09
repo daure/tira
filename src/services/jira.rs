@@ -554,7 +554,13 @@ pub fn load_assignable_users(credentials: &JiraCredentials) -> JiraUsersResult {
         credentials,
         "GET",
         "/user/assignable/search",
-        Some([("project", credentials.default_project.trim())].as_slice()),
+        Some(
+            [
+                ("project", credentials.default_project.trim()),
+                ("maxResults", "1000"),
+            ]
+            .as_slice(),
+        ),
     );
     let current = load_users_endpoint(credentials, "GET", "/myself", None);
 
@@ -1376,6 +1382,16 @@ fn issue_summary_from_board_issue(key: &str, value: &serde_json::Value) -> Issue
     if let Some(parent_key) = &parent_key {
         field_values.insert(String::from("parent"), parent_key.clone());
     }
+    // Greenhopper supplies a resolved display name in `assigneeName` even when the
+    // raw `assignee` token is an opaque id (accountId, `ug:` group, or a legacy
+    // username). Prefer it so grouping/labels never show raw ids.
+    if let Some(assignee_name) = field_values
+        .get("assigneeName")
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+    {
+        field_values.insert(String::from("assignee"), assignee_name);
+    }
 
     IssueSummary {
         key: key.to_owned(),
@@ -1589,6 +1605,78 @@ mod tests {
                 .map(String::as_str),
             Some("100")
         );
+    }
+
+    #[test]
+    fn greenhopper_board_data_resolves_assignee_from_assignee_name() {
+        let board = board_data_from_greenhopper(
+            7,
+            String::from("Kanban"),
+            json!({
+                "columnsData": {
+                    "columns": [
+                        { "name": "To Do", "position": 0, "statusIds": ["100"] }
+                    ]
+                },
+                "issuesData": {
+                    "issues": [
+                        {
+                            "key": "KAN-1",
+                            "summary": "Opaque group token",
+                            "statusId": "100",
+                            "status": { "name": "To Do" },
+                            "typeName": "Bug",
+                            "assignee": "ug:65a754c5-890a-4b03-9d35-42318da7416d",
+                            "assigneeName": "Thang Nguyen The"
+                        },
+                        {
+                            "key": "KAN-2",
+                            "summary": "Legacy username token",
+                            "statusId": "100",
+                            "status": { "name": "To Do" },
+                            "typeName": "Task",
+                            "assignee": "astrid.leckebusch",
+                            "assigneeName": "Astrid Leckebusch"
+                        },
+                        {
+                            "key": "KAN-3",
+                            "summary": "No assignee",
+                            "statusId": "100",
+                            "status": { "name": "To Do" },
+                            "typeName": "Task"
+                        }
+                    ]
+                }
+            }),
+        )
+        .expect("board data");
+
+        let by_key = |key: &str| {
+            board
+                .issues
+                .iter()
+                .find(|issue| issue.key == key)
+                .unwrap_or_else(|| panic!("issue {key}"))
+        };
+
+        // Opaque assignee tokens are replaced with the display name greenhopper
+        // already supplies in `assigneeName`, never shown raw.
+        assert_eq!(
+            by_key("KAN-1")
+                .field_values
+                .get("assignee")
+                .map(String::as_str),
+            Some("Thang Nguyen The")
+        );
+        assert_eq!(
+            by_key("KAN-2")
+                .field_values
+                .get("assignee")
+                .map(String::as_str),
+            Some("Astrid Leckebusch")
+        );
+        // Unassigned issues keep no assignee value (fall through to "Unassigned").
+        assert_eq!(by_key("KAN-3").field_values.get("assignee"), None);
     }
 
     #[test]
