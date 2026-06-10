@@ -358,8 +358,23 @@ pub struct BoardState {
     data: Option<BoardData>,
     error: Option<String>,
     selected_issue_key: Option<String>,
+    /// Column the user is navigating in, preserved across group-header rows so
+    /// vertical movement stays in the same column (landing on empty cells too).
+    preferred_column: usize,
     collapsed_groups: std::collections::BTreeSet<String>,
     pub scroll_offset: std::cell::Cell<usize>,
+    pub col_scroll_offset: std::cell::Cell<usize>,
+    /// Smoothly glides the rendered vertical line offset toward `scroll_offset`.
+    pub v_scroll: crate::components::generic::scroll_animator::ScrollAnimator,
+    /// Smoothly glides the rendered horizontal cell offset toward its target.
+    pub h_scroll: crate::components::generic::scroll_animator::ScrollAnimator,
+    /// When true the viewport was scrolled by the user (wheel), so rendering
+    /// shows the manual offset instead of following the selection. Cleared on
+    /// the next keyboard navigation.
+    pub manual_v_scroll: std::cell::Cell<bool>,
+    pub manual_h_scroll: std::cell::Cell<bool>,
+    /// Manual horizontal offset in cells, used while `manual_h_scroll` is set.
+    pub manual_h_offset: std::cell::Cell<u16>,
     pub column_widths: std::cell::RefCell<Vec<usize>>,
 }
 
@@ -369,8 +384,15 @@ impl Clone for BoardState {
             data: self.data.clone(),
             error: self.error.clone(),
             selected_issue_key: self.selected_issue_key.clone(),
+            preferred_column: self.preferred_column,
             collapsed_groups: self.collapsed_groups.clone(),
             scroll_offset: std::cell::Cell::new(self.scroll_offset.get()),
+            col_scroll_offset: std::cell::Cell::new(self.col_scroll_offset.get()),
+            v_scroll: self.v_scroll.clone(),
+            h_scroll: self.h_scroll.clone(),
+            manual_v_scroll: std::cell::Cell::new(self.manual_v_scroll.get()),
+            manual_h_scroll: std::cell::Cell::new(self.manual_h_scroll.get()),
+            manual_h_offset: std::cell::Cell::new(self.manual_h_offset.get()),
             column_widths: std::cell::RefCell::new(self.column_widths.borrow().clone()),
         }
     }
@@ -403,8 +425,15 @@ impl BoardState {
             data: None,
             error: None,
             selected_issue_key: None,
+            preferred_column: 0,
             collapsed_groups: std::collections::BTreeSet::new(),
             scroll_offset: std::cell::Cell::new(0),
+            col_scroll_offset: std::cell::Cell::new(0),
+            v_scroll: crate::components::generic::scroll_animator::ScrollAnimator::new(),
+            h_scroll: crate::components::generic::scroll_animator::ScrollAnimator::new(),
+            manual_v_scroll: std::cell::Cell::new(false),
+            manual_h_scroll: std::cell::Cell::new(false),
+            manual_h_offset: std::cell::Cell::new(0),
             column_widths: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -456,13 +485,26 @@ impl BoardState {
     pub fn selected_issue_key(&self) -> Option<&str> {
         self.selected_issue_key
             .as_deref()
-            .filter(|key| !is_board_group_key(key))
+            .filter(|key| !is_board_group_key(key) && !is_board_empty_key(key))
     }
 
     pub fn selected_group(&self) -> Option<&str> {
         self.selected_issue_key
             .as_deref()
             .and_then(board_group_key_name)
+    }
+
+    /// The raw selected key (issue, group header, or empty cell), used to look up
+    /// the selection's position for scrolling.
+    pub fn selected_raw_key(&self) -> Option<&str> {
+        self.selected_issue_key.as_deref()
+    }
+
+    /// The `(group, column)` of a focused empty column, if one is selected.
+    pub fn selected_empty_cell(&self) -> Option<(&str, usize)> {
+        self.selected_issue_key
+            .as_deref()
+            .and_then(board_empty_cell_parts)
     }
 
     pub fn is_group_collapsed(&self, group: &str) -> bool {
@@ -501,7 +543,32 @@ impl BoardState {
             .unwrap_or(0)
     }
 
+    /// Scroll the board viewport vertically by `delta` lines without moving the
+    /// selection. Render clamps the upper bound (it knows the content height).
+    pub fn scroll_viewport(&self, delta: isize) {
+        let next = self.scroll_offset.get().saturating_add_signed(delta);
+        self.scroll_offset.set(next);
+        self.manual_v_scroll.set(true);
+    }
+
+    /// Scroll the board viewport horizontally by `delta` cells without moving
+    /// the selection. Seeds from the currently rendered offset on the first
+    /// tick so the view doesn't jump. Render clamps to the strip width.
+    pub fn scroll_viewport_horizontal(&self, delta: i32) {
+        let base = if self.manual_h_scroll.get() {
+            self.manual_h_offset.get()
+        } else {
+            self.h_scroll.current().round().max(0.0) as u16
+        };
+        let step = delta.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        self.manual_h_offset.set(base.saturating_add_signed(step));
+        self.manual_h_scroll.set(true);
+    }
+
     fn dispatch(&mut self, action: BoardAction, search: &str, grouping: BoardGrouping) {
+        // Keyboard navigation re-enables selection-following for both axes.
+        self.manual_v_scroll.set(false);
+        self.manual_h_scroll.set(false);
         let Some(data) = &self.data else {
             return;
         };
@@ -521,6 +588,14 @@ impl BoardState {
         };
 
         let selected = &cells[selected_index];
+        // Track the column the user is in so vertical moves preserve it across
+        // group headers (where the cell's own column is meaningless).
+        if !selected.is_group {
+            self.preferred_column = selected.column;
+        }
+        let pref = self
+            .preferred_column
+            .min(data.columns.len().saturating_sub(1));
         let next = match action {
             BoardAction::MoveLeft if selected.is_group => {
                 self.collapsed_groups.insert(selected.group.clone());
@@ -528,7 +603,13 @@ impl BoardState {
             }
             BoardAction::MoveRight if selected.is_group => {
                 self.collapsed_groups.remove(&selected.group);
-                board_first_group_issue_key(data, &lanes, selected.lane, search)
+                Some(board_lane_column_entry(
+                    data,
+                    &lanes[selected.lane],
+                    pref,
+                    search,
+                    false,
+                ))
             }
             BoardAction::ToggleCollapse if selected.is_group => {
                 if !self.collapsed_groups.remove(&selected.group) {
@@ -545,115 +626,48 @@ impl BoardState {
                     }
                 }),
             BoardAction::MoveRight => board_horizontal_target(data, &lanes, selected, 1, search),
-            BoardAction::MoveUp => {
-                if selected.is_group {
-                    if selected.lane > 0 {
-                        let prev_lane_idx = selected.lane - 1;
-                        let prev_group = &lanes[prev_lane_idx].name;
-                        let show_header = grouping.is_grouped();
-                        if show_header && self.collapsed_groups.contains(prev_group) {
-                            Some(board_group_key(prev_group))
-                        } else {
-                            let col = selected.column;
-                            let keys =
-                                board_lane_column_keys(data, &lanes[prev_lane_idx], col, search);
-                            if let Some(last_key) = keys.last() {
-                                Some(last_key.clone())
-                            } else {
-                                let mut found = None;
-                                for c in (0..data.columns.len()).rev() {
-                                    let keys = board_lane_column_keys(
-                                        data,
-                                        &lanes[prev_lane_idx],
-                                        c,
-                                        search,
-                                    );
-                                    if let Some(last_key) = keys.last() {
-                                        found = Some(last_key.clone());
-                                        break;
-                                    }
-                                }
-                                found.or_else(|| {
-                                    if show_header {
-                                        Some(board_group_key(prev_group))
-                                    } else {
-                                        None
-                                    }
-                                })
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    let keys = board_lane_column_keys(
-                        data,
-                        &lanes[selected.lane],
-                        selected.column,
-                        search,
-                    );
-                    let pos = keys.iter().position(|key| *key == selected.key);
-                    if let Some(pos) = pos.and_then(|p| p.checked_sub(1)) {
-                        Some(keys[pos].clone())
-                    } else {
-                        let show_header = grouping.is_grouped();
-                        if show_header {
-                            Some(board_group_key(&selected.group))
-                        } else {
-                            None
-                        }
-                    }
-                }
-            }
-            BoardAction::MoveDown => {
-                if selected.is_group {
-                    let current_group = &selected.group;
-                    let show_header = grouping.is_grouped();
-                    if show_header && self.collapsed_groups.contains(current_group) {
-                        if selected.lane + 1 < lanes.len() {
-                            Some(board_group_key(&lanes[selected.lane + 1].name))
-                        } else {
-                            None
-                        }
-                    } else {
-                        let mut found = None;
-                        for c in 0..data.columns.len() {
-                            let keys =
-                                board_lane_column_keys(data, &lanes[selected.lane], c, search);
-                            if let Some(first_key) = keys.first() {
-                                found = Some(first_key.clone());
-                                break;
-                            }
-                        }
-                        found.or_else(|| {
-                            if selected.lane + 1 < lanes.len() {
-                                Some(board_group_key(&lanes[selected.lane + 1].name))
-                            } else {
-                                None
-                            }
-                        })
-                    }
-                } else {
-                    let keys = board_lane_column_keys(
-                        data,
-                        &lanes[selected.lane],
-                        selected.column,
-                        search,
-                    );
-                    let pos = keys.iter().position(|key| *key == selected.key);
-                    if let Some(pos) = pos.filter(|p| p + 1 < keys.len()) {
-                        Some(keys[pos + 1].clone())
-                    } else {
-                        if grouping.is_grouped() && selected.lane + 1 < lanes.len() {
-                            Some(board_group_key(&lanes[selected.lane + 1].name))
-                        } else {
-                            None
-                        }
-                    }
-                }
-            }
-            BoardAction::HalfPageUp => board_page_target(data, &cells, selected, -4, search),
-            BoardAction::HalfPageDown => board_page_target(data, &cells, selected, 4, search),
+            BoardAction::MoveUp => board_vertical_target(
+                data,
+                &lanes,
+                &self.collapsed_groups,
+                grouping,
+                selected,
+                pref,
+                search,
+                -1,
+            ),
+            BoardAction::MoveDown => board_vertical_target(
+                data,
+                &lanes,
+                &self.collapsed_groups,
+                grouping,
+                selected,
+                pref,
+                search,
+                1,
+            ),
+            BoardAction::HalfPageUp => board_page_vertical(
+                data,
+                &lanes,
+                &cells,
+                &self.collapsed_groups,
+                grouping,
+                selected,
+                pref,
+                search,
+                -1,
+            ),
+            BoardAction::HalfPageDown => board_page_vertical(
+                data,
+                &lanes,
+                &cells,
+                &self.collapsed_groups,
+                grouping,
+                selected,
+                pref,
+                search,
+                1,
+            ),
             BoardAction::GoToStart => cells.first().map(|cell| cell.key.clone()),
             BoardAction::GoToEnd => cells.last().map(|cell| cell.key.clone()),
             BoardAction::GoToStartPrefix => None,
@@ -678,6 +692,13 @@ impl BoardState {
         };
 
         if let Some(next) = next {
+            // Keep the preferred column in sync with the landing cell (but not
+            // group headers, which would reset it to 0).
+            if let Some(cell) = cells.iter().find(|cell| cell.key == next)
+                && !cell.is_group
+            {
+                self.preferred_column = cell.column;
+            }
             self.selected_issue_key = Some(next);
         }
     }
@@ -716,6 +737,19 @@ fn board_cells_for_lanes(
         }
         for (column_index, _column) in data.columns.iter().enumerate() {
             let keys = board_lane_column_keys(data, lane, column_index, search);
+            if keys.is_empty() {
+                // Empty columns are still focusable so left/right navigation
+                // steps through them instead of jumping over the gaps.
+                cells.push(BoardCell {
+                    lane: lane_index,
+                    column: column_index,
+                    index: 0,
+                    key: board_empty_cell_key(&group, column_index),
+                    group: group.clone(),
+                    is_group: false,
+                });
+                continue;
+            }
             cells.extend(keys.into_iter().enumerate().map(|(index, key)| BoardCell {
                 lane: lane_index,
                 column: column_index,
@@ -739,6 +773,24 @@ pub(crate) fn is_board_group_key(key: &str) -> bool {
 
 pub(crate) fn board_group_key_name(key: &str) -> Option<&str> {
     key.strip_prefix("__board_group__:")
+}
+
+/// Synthetic selection key for a column that currently has no issues, so empty
+/// columns are focusable when navigating (carries the lane group and column).
+/// The unit separator keeps it unambiguous against arbitrary group names.
+pub(crate) fn board_empty_cell_key(group: &str, column: usize) -> String {
+    format!("__board_empty__:{column}\u{1f}{group}")
+}
+
+pub(crate) fn is_board_empty_key(key: &str) -> bool {
+    key.starts_with("__board_empty__:")
+}
+
+/// Parses an empty-cell key back into `(group, column)`.
+pub(crate) fn board_empty_cell_parts(key: &str) -> Option<(&str, usize)> {
+    let rest = key.strip_prefix("__board_empty__:")?;
+    let (column, group) = rest.split_once('\u{1f}')?;
+    Some((group, column.parse().ok()?))
 }
 
 pub(crate) fn board_grouped_lanes(
@@ -780,15 +832,19 @@ fn board_horizontal_target(
     direction: isize,
     search: &str,
 ) -> Option<String> {
-    let mut column = selected.column as isize + direction;
-    while column >= 0 && (column as usize) < data.columns.len() {
-        let keys = board_lane_column_keys(data, &lanes[selected.lane], column as usize, search);
-        if !keys.is_empty() {
-            return keys.get(selected.index.min(keys.len() - 1)).cloned();
-        }
-        column += direction;
+    let column = selected.column as isize + direction;
+    if column < 0 || column as usize >= data.columns.len() {
+        return None;
     }
-    None
+    let column = column as usize;
+    let keys = board_lane_column_keys(data, &lanes[selected.lane], column, search);
+    if keys.is_empty() {
+        // Land on the empty column rather than skipping to the next populated
+        // one, so horizontal movement is steady instead of jumpy.
+        Some(board_empty_cell_key(&lanes[selected.lane].name, column))
+    } else {
+        keys.get(selected.index.min(keys.len() - 1)).cloned()
+    }
 }
 
 fn board_first_group_issue_key(
@@ -806,49 +862,147 @@ fn board_first_group_issue_key(
     None
 }
 
-fn board_page_target(
+/// The selection key for entering `column` of `lane` — the first/last card, or
+/// the empty-cell placeholder when the column has no issues.
+fn board_lane_column_entry(
     data: &BoardData,
-    cells: &[BoardCell],
-    selected: &BoardCell,
-    delta: isize,
+    lane: &BoardSwimlaneSummary,
+    column: usize,
     search: &str,
-) -> Option<String> {
-    if selected.is_group {
-        return Some(selected.key.clone());
-    }
-
-    let swimlane_index = board_issue_swimlane_index(data, &selected.key)?;
-    let lane_column_keys = cells
-        .iter()
-        .filter(|cell| {
-            !cell.is_group
-                && cell.column == selected.column
-                && board_issue_swimlane_index(data, &cell.key) == Some(swimlane_index)
-                && data
-                    .issues
-                    .iter()
-                    .find(|issue| issue.key == cell.key)
-                    .is_some_and(|issue| board_issue_matches_search(issue, search))
-        })
-        .map(|cell| cell.key.as_str())
-        .collect::<Vec<_>>();
-    let position = lane_column_keys
-        .iter()
-        .position(|key| *key == selected.key)?;
-    let target = if delta < 0 {
-        position.saturating_sub(delta.unsigned_abs())
-    } else {
-        position
-            .saturating_add(delta as usize)
-            .min(lane_column_keys.len().saturating_sub(1))
-    };
-    Some(lane_column_keys[target].to_owned())
+    take_last: bool,
+) -> String {
+    let keys = board_lane_column_keys(data, lane, column, search);
+    let chosen = if take_last { keys.last() } else { keys.first() };
+    chosen
+        .cloned()
+        .unwrap_or_else(|| board_empty_cell_key(&lane.name, column))
 }
 
-fn board_issue_swimlane_index(data: &BoardData, key: &str) -> Option<usize> {
-    data.swimlanes
-        .iter()
-        .position(|lane| lane.issue_keys.iter().any(|issue_key| issue_key == key))
+/// Next selection one row up (`direction < 0`) or down (`direction > 0`),
+/// preserving `preferred_column` across group-header rows and landing on empty
+/// column cells rather than skipping to a populated column.
+#[allow(clippy::too_many_arguments)]
+fn board_vertical_target(
+    data: &BoardData,
+    lanes: &[BoardSwimlaneSummary],
+    collapsed: &std::collections::BTreeSet<String>,
+    grouping: BoardGrouping,
+    selected: &BoardCell,
+    preferred_column: usize,
+    search: &str,
+    direction: isize,
+) -> Option<String> {
+    let show_header = grouping.is_grouped();
+    if direction < 0 {
+        if selected.is_group {
+            if selected.lane == 0 {
+                return None;
+            }
+            let prev = selected.lane - 1;
+            let prev_group = &lanes[prev].name;
+            if show_header && collapsed.contains(prev_group) {
+                Some(board_group_key(prev_group))
+            } else {
+                // Land on the bottom of the preferred column in the lane above.
+                Some(board_lane_column_entry(
+                    data,
+                    &lanes[prev],
+                    preferred_column,
+                    search,
+                    true,
+                ))
+            }
+        } else {
+            let keys = board_lane_column_keys(data, &lanes[selected.lane], selected.column, search);
+            let pos = keys.iter().position(|key| *key == selected.key);
+            if let Some(prev) = pos.and_then(|p| p.checked_sub(1)) {
+                Some(keys[prev].clone())
+            } else if show_header {
+                Some(board_group_key(&selected.group))
+            } else {
+                None
+            }
+        }
+    } else if selected.is_group {
+        if show_header && collapsed.contains(&selected.group) {
+            (selected.lane + 1 < lanes.len())
+                .then(|| board_group_key(&lanes[selected.lane + 1].name))
+        } else {
+            // Enter the top of the preferred column in this lane.
+            Some(board_lane_column_entry(
+                data,
+                &lanes[selected.lane],
+                preferred_column,
+                search,
+                false,
+            ))
+        }
+    } else {
+        let keys = board_lane_column_keys(data, &lanes[selected.lane], selected.column, search);
+        let pos = keys.iter().position(|key| *key == selected.key);
+        if let Some(next) = pos.filter(|p| p + 1 < keys.len()) {
+            Some(keys[next + 1].clone())
+        } else if show_header && selected.lane + 1 < lanes.len() {
+            Some(board_group_key(&lanes[selected.lane + 1].name))
+        } else {
+            None
+        }
+    }
+}
+
+/// Half-page vertical jump: repeatedly steps up/down, passing *through* group
+/// headers (they aren't landing spots) and counting cards and empty cells, so
+/// the jump lands a few rows away without skipping empty columns.
+#[allow(clippy::too_many_arguments)]
+fn board_page_vertical(
+    data: &BoardData,
+    lanes: &[BoardSwimlaneSummary],
+    cells: &[BoardCell],
+    collapsed: &std::collections::BTreeSet<String>,
+    grouping: BoardGrouping,
+    selected: &BoardCell,
+    preferred_column: usize,
+    search: &str,
+    direction: isize,
+) -> Option<String> {
+    const PAGE: usize = 4;
+    let mut current = selected.key.clone();
+    let mut landed = 0usize;
+    let mut result = None;
+    // Bounded by the number of cells (every step advances to a distinct key).
+    for _ in 0..cells.len().saturating_add(PAGE) {
+        let Some(cell) = cells.iter().find(|cell| cell.key == current) else {
+            break;
+        };
+        let Some(next) = board_vertical_target(
+            data,
+            lanes,
+            collapsed,
+            grouping,
+            cell,
+            preferred_column,
+            search,
+            direction,
+        ) else {
+            break;
+        };
+        if next == current {
+            break;
+        }
+        current = next;
+        let landed_on_group = cells
+            .iter()
+            .find(|cell| cell.key == current)
+            .is_some_and(|cell| cell.is_group);
+        if !landed_on_group {
+            result = Some(current.clone());
+            landed += 1;
+            if landed >= PAGE {
+                break;
+            }
+        }
+    }
+    result
 }
 
 fn board_lane_column_keys(
@@ -1395,6 +1549,8 @@ impl App {
         if self.is_loading() {
             self.spinner.tick(dt);
         }
+        self.board.v_scroll.tick(dt);
+        self.board.h_scroll.tick(dt);
         for notification in &mut self.notifications {
             notification.tick(dt);
         }
@@ -1440,6 +1596,8 @@ impl App {
                 .as_ref()
                 .is_some_and(MultiSelectDropdownState::is_animating)
             || self.notifications.iter().any(Notification::is_animating)
+            || self.board.v_scroll.is_animating()
+            || self.board.h_scroll.is_animating()
             || self.is_loading()
     }
 
@@ -2074,6 +2232,16 @@ impl App {
         self.board.selected_group()
     }
 
+    /// The raw selected board key (issue, group, or empty cell) for scrolling.
+    pub fn selected_board_raw_key(&self) -> Option<&str> {
+        self.board.selected_raw_key()
+    }
+
+    /// The `(group, column)` of a focused empty column, if one is selected.
+    pub fn selected_board_empty_cell(&self) -> Option<(&str, usize)> {
+        self.board.selected_empty_cell()
+    }
+
     pub fn is_board_group_collapsed(&self, group: &str) -> bool {
         self.board.is_group_collapsed(group)
     }
@@ -2541,13 +2709,22 @@ impl App {
         if self.command_log_open {
             return;
         }
-        let scroll_delta = match mouse.kind {
-            MouseEventKind::ScrollUp => Some(-1),
-            MouseEventKind::ScrollDown => Some(1),
-            _ => None,
+        // Shift + vertical wheel and native horizontal wheel both scroll left/
+        // right; a plain wheel scrolls up/down. `scroll_delta` keeps driving the
+        // existing vertical consumers (help, dropdowns, list); `horizontal_delta`
+        // is board-only.
+        let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+        let (scroll_delta, horizontal_delta): (Option<isize>, Option<isize>) = match mouse.kind {
+            MouseEventKind::ScrollUp if shift => (None, Some(-1)),
+            MouseEventKind::ScrollDown if shift => (None, Some(1)),
+            MouseEventKind::ScrollUp => (Some(-1), None),
+            MouseEventKind::ScrollDown => (Some(1), None),
+            MouseEventKind::ScrollLeft => (None, Some(-1)),
+            MouseEventKind::ScrollRight => (None, Some(1)),
+            _ => (None, None),
         };
         let is_left_click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
-        if !is_left_click && scroll_delta.is_none() {
+        if !is_left_click && scroll_delta.is_none() && horizontal_delta.is_none() {
             return;
         }
 
@@ -2625,12 +2802,13 @@ impl App {
                 return;
             }
             if let Some(delta) = scroll_delta {
-                let action = if delta > 0 {
-                    BoardAction::HalfPageDown
-                } else {
-                    BoardAction::HalfPageUp
-                };
-                self.dispatch(Action::Board(action));
+                // Wheel scrolls the viewport one line per notch (matching the
+                // list) without moving the selection.
+                self.board.scroll_viewport(delta);
+            }
+            if let Some(delta) = horizontal_delta {
+                // Shift/horizontal wheel pans the columns one cell per notch.
+                self.board.scroll_viewport_horizontal(delta as i32);
             }
             return;
         }

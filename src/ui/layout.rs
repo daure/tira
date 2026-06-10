@@ -23,3 +23,49 @@ pub fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
         truncated
     }
 }
+
+/// Truncates a sequence of styled spans to fit within `max_width` display
+/// columns, appending a styled "..." when content is dropped. Per-span styles
+/// are preserved so callers keep their coloring (e.g. label brackets).
+pub fn truncate_spans_with_ellipsis(
+    spans: Vec<ratatui::text::Span<'static>>,
+    max_width: usize,
+) -> Vec<ratatui::text::Span<'static>> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    let total: usize = spans.iter().map(|span| span.content.width()).sum();
+    if total <= max_width {
+        return spans;
+    }
+
+    let budget = max_width.saturating_sub(3);
+    let mut out = Vec::with_capacity(spans.len() + 1);
+    let mut used = 0usize;
+    for span in spans {
+        let width = span.content.width();
+        if used + width <= budget {
+            used += width;
+            out.push(span);
+            continue;
+        }
+        let remaining = budget - used;
+        if remaining > 0 {
+            let mut partial = String::new();
+            let mut acc = 0usize;
+            for ch in span.content.chars() {
+                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if acc + ch_width > remaining {
+                    break;
+                }
+                acc += ch_width;
+                partial.push(ch);
+            }
+            if !partial.is_empty() {
+                out.push(ratatui::text::Span::styled(partial, span.style));
+            }
+        }
+        out.push(ratatui::text::Span::styled("...", span.style));
+        return out;
+    }
+    out
+}

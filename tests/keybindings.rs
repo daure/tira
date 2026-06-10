@@ -168,6 +168,7 @@ fn board_down_stops_at_end_of_swimlane_column() {
         columns: vec![BoardColumnSummary {
             name: String::from("To Do"),
             statuses: vec![String::from("To Do")],
+            max: None,
         }],
         swimlanes: vec![
             BoardSwimlaneSummary {
@@ -200,6 +201,124 @@ fn board_shift_g_jumps_to_end_and_g_opens_grouping() {
 
     app.handle_key(key('g'), &bindings);
     assert!(app.board_group_dropdown().is_some());
+}
+
+#[test]
+fn board_empty_columns_are_focusable_when_navigating() {
+    let mut todo = support::issue("KAN-1", "Todo card", "Task", None);
+    todo.status = String::from("To Do");
+    let mut review = support::issue("KAN-3", "Review card", "Task", None);
+    review.status = String::from("In Review");
+    let board = BoardData {
+        id: 2,
+        name: String::from("Kanban"),
+        columns: vec![
+            BoardColumnSummary {
+                name: String::from("To Do"),
+                statuses: vec![String::from("To Do")],
+                max: None,
+            },
+            BoardColumnSummary {
+                name: String::from("In Progress"),
+                statuses: vec![String::from("In Progress")],
+                max: None,
+            },
+            BoardColumnSummary {
+                name: String::from("In Review"),
+                statuses: vec![String::from("In Review")],
+                max: None,
+            },
+        ],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1"), String::from("KAN-3")],
+        }],
+        issues: vec![todo, review],
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    // Initial selection sits on the first populated column.
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+
+    // Moving right lands on the empty middle column instead of skipping it.
+    app.dispatch(Action::Board(BoardAction::MoveRight));
+    assert_eq!(app.selected_board_issue_key(), None);
+    assert_eq!(app.selected_board_empty_cell(), Some(("Issues", 1)));
+
+    // Moving right again continues to the populated third column.
+    app.dispatch(Action::Board(BoardAction::MoveRight));
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-3"));
+
+    // And back left returns through the empty column.
+    app.dispatch(Action::Board(BoardAction::MoveLeft));
+    assert_eq!(app.selected_board_empty_cell(), Some(("Issues", 1)));
+}
+
+#[test]
+fn board_vertical_navigation_preserves_column_across_group_headers() {
+    // Alice has a card only in column 0; Bob has a card only in column 2.
+    // Grouped by assignee, going up from Bob's column-2 card through Bob's
+    // header should land on Alice's empty column 2 (preserving the column),
+    // not jump to Alice's populated column 0.
+    let bindings = KeyBindings::default();
+    let mut alice = support::issue("KAN-A", "Alice todo", "Task", None);
+    alice.status = String::from("To Do");
+    alice
+        .field_values
+        .insert(String::from("assignee"), String::from("Alice"));
+    let mut bob = support::issue("KAN-B", "Bob review", "Task", None);
+    bob.status = String::from("In Review");
+    bob.field_values
+        .insert(String::from("assignee"), String::from("Bob"));
+    let columns = vec![
+        BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+            max: None,
+        },
+        BoardColumnSummary {
+            name: String::from("In Progress"),
+            statuses: vec![String::from("In Progress")],
+            max: None,
+        },
+        BoardColumnSummary {
+            name: String::from("In Review"),
+            statuses: vec![String::from("In Review")],
+            max: None,
+        },
+    ];
+    let board = BoardData {
+        id: 2,
+        name: String::from("Kanban"),
+        columns,
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-A"), String::from("KAN-B")],
+        }],
+        issues: vec![alice, bob],
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    // Group by assignee.
+    app.handle_key(key('g'), &bindings);
+    app.handle_key(ctrl('j'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
+
+    // Focus Bob's column-2 card.
+    app.dispatch(Action::Board(BoardAction::GoToEnd));
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-B"));
+
+    // Up → Bob's header; up again → Alice's empty column 2 (column preserved).
+    app.dispatch(Action::Board(BoardAction::MoveUp));
+    assert_eq!(app.selected_board_group(), Some("Bob"));
+    app.dispatch(Action::Board(BoardAction::MoveUp));
+    assert_eq!(app.selected_board_empty_cell(), Some(("Alice", 2)));
 }
 
 #[test]
@@ -250,6 +369,7 @@ fn board_horizontal_keys_move_between_group_rows_and_first_column() {
         columns: vec![BoardColumnSummary {
             name: String::from("To Do"),
             statuses: vec![String::from("To Do")],
+            max: None,
         }],
         swimlanes: vec![BoardSwimlaneSummary {
             id: None,
@@ -323,6 +443,7 @@ fn board_page_keys_transcend_groups_within_same_swimlane() {
         columns: vec![BoardColumnSummary {
             name: String::from("To Do"),
             statuses: vec![String::from("To Do")],
+            max: None,
         }],
         swimlanes: vec![BoardSwimlaneSummary {
             id: None,
@@ -414,6 +535,7 @@ fn board_page_keys_stop_at_swimlane_edges() {
         columns: vec![BoardColumnSummary {
             name: String::from("To Do"),
             statuses: vec![String::from("To Do")],
+            max: None,
         }],
         swimlanes: vec![
             BoardSwimlaneSummary {

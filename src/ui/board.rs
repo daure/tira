@@ -11,14 +11,15 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     App, KeyBindings,
-    app::{board_group_key, board_grouped_lanes, board_issue_column},
+    app::{board_empty_cell_key, board_group_key, board_grouped_lanes, board_issue_column},
     components::{
-        generic::{avatar, filter, priority},
+        generic::{avatar, filter, label, priority},
         jira::work_item_key,
     },
     services::jira::{BoardData, BoardSwimlaneSummary, IssueSummary},
     ui::{
         layout::truncate_with_ellipsis,
+        layout::truncate_spans_with_ellipsis,
         scrollbar,
         theme::{Theme, prefers_plain_icons},
     },
@@ -26,6 +27,167 @@ use crate::{
 
 const NERD_COLLAPSED_ICON: &str = "";
 const NERD_EXPANDED_ICON: &str = "";
+
+/// Minimum readable width for a board column. Below this we start scrolling
+/// horizontally instead of squeezing more columns in.
+const MIN_COL_WIDTH: u16 = 34;
+/// Upper bound so columns don't grow absurdly wide when only a few are shown.
+const MAX_COL_WIDTH: u16 = 52;
+/// Sliver of the neighbouring column left visible at rest on each side that has
+/// more columns, so the board reads as "more this way". Reserved on both sides
+/// so the column width stays constant as the strip glides (no resizing mid
+/// scroll); the slivers simply widen/narrow as the horizontal offset animates.
+const PEEK_WIDTH: u16 = 8;
+
+/// The run of board columns that sit fully on screen at rest. Drives the scroll
+/// target (so the selected card stays visible) and the persisted column offset.
+#[derive(Clone, Copy)]
+struct ColumnWindow {
+    /// Index of the leftmost fully-visible column.
+    start: usize,
+}
+
+impl ColumnWindow {
+    fn more_left(&self) -> bool {
+        self.start > 0
+    }
+}
+
+/// All horizontal layout decisions for one frame of the board: the width of
+/// every column and which columns sit fully on screen at rest (the window).
+///
+/// The board is drawn as a single strip [`strip_width`](Self::strip_width) wide
+/// (every column, full width) and then sliced to the viewport at an animated
+/// cell offset. Rendering the whole strip — rather than only the visible
+/// columns — is what lets the horizontal scroll glide smoothly: partial columns
+/// at the edges (the "peek") fall out of the slice for free, at any sub-column
+/// offset, instead of being special-cased.
+///
+/// This is a *pure* value computed by [`ColumnLayout::compute`] so the
+/// non-trivial geometry can be unit-tested without a terminal.
+struct ColumnLayout {
+    /// Width/position of every column, indexed by board column index. Uniform
+    /// width while scrolling; equal-ratio fill when everything fits.
+    rects: Vec<Rect>,
+    window: ColumnWindow,
+    /// Whether there are more columns than fit (drives the horizontal scrollbar
+    /// and whether a non-zero scroll offset is possible).
+    scrolling: bool,
+}
+
+impl ColumnLayout {
+    /// Columns that fit at the minimum readable width. At least one, so a very
+    /// narrow terminal still shows a single (clipped) column rather than panic.
+    fn max_visible(board_width: u16) -> usize {
+        (board_width.max(1) / MIN_COL_WIDTH).max(1) as usize
+    }
+
+    /// Whether the board must scroll horizontally at this width. Cheap enough to
+    /// call before [`compute`](Self::compute) so the caller can reserve a row
+    /// for the scrollbar before the (height-reduced) area is handed back in.
+    fn will_scroll(board_width: u16, column_count: usize) -> bool {
+        column_count.max(1) > Self::max_visible(board_width)
+    }
+
+    /// Derive the full layout. `selected_col` keeps the window scrolled so the
+    /// selected card stays visible (mirroring the vertical auto-scroll), and
+    /// `stored_scroll` is the previous column offset so the view is stable
+    /// across frames when the selection doesn't move.
+    fn compute(
+        board_area: Rect,
+        column_count: usize,
+        selected_col: Option<usize>,
+        stored_scroll: usize,
+    ) -> Self {
+        let column_count = column_count.max(1);
+        let board_width = board_area.width.max(1);
+        let max_visible = Self::max_visible(board_width);
+
+        if column_count <= max_visible {
+            // Everything fits: equal-ratio fill, one window over all columns.
+            let rects = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(
+                    (0..column_count)
+                        .map(|_| Constraint::Ratio(1, column_count as u32))
+                        .collect::<Vec<_>>(),
+                )
+                .split(board_area)
+                .to_vec();
+            return Self {
+                rects,
+                window: ColumnWindow { start: 0 },
+                scrolling: false,
+            };
+        }
+
+        let visible_count = max_visible.min(column_count).max(1);
+
+        // Slide the window to keep the selected column inside it.
+        let mut start = stored_scroll.min(column_count - visible_count);
+        if let Some(sel) = selected_col {
+            let sel = sel.min(column_count - 1);
+            if sel < start {
+                start = sel;
+            } else if sel >= start + visible_count {
+                start = sel + 1 - visible_count;
+            }
+        }
+        let window = ColumnWindow { start };
+
+        // Reserve a peek on *both* sides up front so the column width is the
+        // same at every scroll position (columns must not resize as you glide).
+        // The scroll offset later decides which slivers are actually revealed.
+        let reserve = 2 * PEEK_WIDTH;
+        let full_area = board_width.saturating_sub(reserve);
+        let col_width = (full_area / visible_count as u16).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH);
+        let rects = (0..column_count)
+            .map(|_| Rect {
+                x: board_area.x,
+                y: board_area.y,
+                width: col_width,
+                height: board_area.height,
+            })
+            .collect::<Vec<_>>();
+
+        Self {
+            rects,
+            window,
+            scrolling: true,
+        }
+    }
+
+    /// Total width of the rendered strip (sum of all column widths).
+    fn strip_width(&self) -> u16 {
+        self.rects.iter().map(|r| r.width).sum()
+    }
+
+    /// Cell offset of column `idx`'s left edge within the strip.
+    fn col_left(&self, idx: usize) -> u16 {
+        self.rects[..idx.min(self.rects.len())]
+            .iter()
+            .map(|r| r.width)
+            .sum()
+    }
+
+    /// The horizontal offset (in cells) the strip should rest at: the window's
+    /// left column, pulled back by a peek so the previous column shows a sliver
+    /// when there's more to the left. Clamped so the slice never runs past the
+    /// strip. This is the *target* the animator glides toward.
+    fn target_offset(&self, board_width: u16) -> u16 {
+        if !self.scrolling {
+            return 0;
+        }
+        let left = self.col_left(self.window.start);
+        let raw = left.saturating_sub(if self.window.more_left() {
+            PEEK_WIDTH
+        } else {
+            0
+        });
+        let max_off = self.strip_width().saturating_sub(board_width);
+        raw.min(max_off)
+    }
+}
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
     let theme = app.theme();
@@ -114,19 +276,56 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
     }
 
     let column_count = data.columns.len().max(1);
-    let constraints = (0..column_count)
-        .map(|_| Constraint::Ratio(1, column_count as u32))
-        .collect::<Vec<_>>();
-    let columns_layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(board_area);
+    // Reserve a bottom row for the horizontal scrollbar only when scrolling.
+    // Checked before computing the layout so the layout sees the reduced height.
+    let scrolling = ColumnLayout::will_scroll(board_area.width, column_count);
+    let (board_area, hscroll_area, scrollbar_area) = if scrolling && board_area.height > 1 {
+        let [content, _bar] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .areas(board_area);
+        // The horizontal scrollbar spans the full board width (including the
+        // vertical scrollbar's column); the vertical scrollbar stops one row
+        // above it so the two never collide in the bottom-right corner.
+        let hbar = Rect {
+            x: content_area.x,
+            y: board_area.y + board_area.height - 1,
+            width: content_area.width,
+            height: 1,
+        };
+        let vbar = Rect {
+            height: scrollbar_area.height.saturating_sub(1),
+            ..scrollbar_area
+        };
+        (content, Some(hbar), vbar)
+    } else {
+        (board_area, None, scrollbar_area)
+    };
 
-    let widths = columns_layout
-        .iter()
-        .map(|r| r.width as usize)
-        .collect::<Vec<_>>();
-    app.board().column_widths.replace(widths);
+    // The column to keep on screen. A focused card → its column; a focused
+    // empty column → that column. A focused group/swimlane header → `None`: keep
+    // the current horizontal offset (the header label is rendered sticky on the
+    // left, so it stays visible without panning the board back).
+    let selected_col = if let Some((_, column)) = app.selected_board_empty_cell() {
+        Some(column.min(column_count - 1))
+    } else {
+        app.selected_board_issue_key().and_then(|key| {
+            data.issues
+                .iter()
+                .find(|issue| issue.key == key)
+                .map(|issue| board_issue_column(data, issue).min(column_count - 1))
+        })
+    };
+    let columns = ColumnLayout::compute(
+        board_area,
+        column_count,
+        selected_col,
+        app.board().col_scroll_offset.get(),
+    );
+    app.board().col_scroll_offset.set(columns.window.start);
+    app.board()
+        .column_widths
+        .replace(columns.rects.iter().map(|r| r.width as usize).collect());
 
     let rendered = generate_rendered_board(
         app,
@@ -134,14 +333,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         &issues_by_key,
         &visible_lanes,
         theme,
-        &columns_layout,
+        &columns,
         search,
     );
 
-    let selected_key_or_group = app
-        .selected_board_issue_key()
-        .map(String::from)
-        .or_else(|| app.selected_board_group().map(board_group_key));
+    let selected_key_or_group = app.selected_board_raw_key().map(String::from);
 
     let mut sel_y_start = 0;
     let mut sel_y_end = 0;
@@ -153,30 +349,80 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
     }
 
     let total_lines = rendered.lines.len();
-    let mut scroll_offset = app.board().scroll_offset.get();
     let viewport_height = board_area.height as usize;
-    if sel_y_start < scroll_offset {
-        scroll_offset = sel_y_start;
-    } else if sel_y_end > scroll_offset + viewport_height {
-        scroll_offset = sel_y_end.saturating_sub(viewport_height);
+
+    // Vertical: while the user is wheel-scrolling (manual), show their offset;
+    // otherwise keep the selection in view. Either way glide toward the target.
+    let max_v = total_lines.saturating_sub(viewport_height);
+    let mut scroll_offset = app.board().scroll_offset.get();
+    if !app.board().manual_v_scroll.get() {
+        if sel_y_start < scroll_offset {
+            scroll_offset = sel_y_start;
+        } else if sel_y_end > scroll_offset + viewport_height {
+            scroll_offset = sel_y_end.saturating_sub(viewport_height);
+        }
     }
-    scroll_offset = scroll_offset.min(total_lines.saturating_sub(viewport_height));
+    scroll_offset = scroll_offset.min(max_v);
     app.board().scroll_offset.set(scroll_offset);
+    let v_anim = &app.board().v_scroll;
+    v_anim.set_target(scroll_offset as f64);
+    let v_offset = (v_anim.current().round() as usize).min(max_v);
+
+    // Horizontal: glide the strip's cell offset toward the target so columns
+    // slide smoothly; partial columns at the edges are the "peek". The target is
+    // the user's manual pan while wheel-scrolling, else the selection-following
+    // snap position.
+    let strip_width = columns.strip_width();
+    let max_h = strip_width.saturating_sub(board_area.width);
+    let h_target = if app.board().manual_h_scroll.get() {
+        let manual = app.board().manual_h_offset.get().min(max_h);
+        app.board().manual_h_offset.set(manual);
+        manual
+    } else {
+        columns.target_offset(board_area.width)
+    };
+    let h_anim = &app.board().h_scroll;
+    h_anim.set_target(f64::from(h_target));
+    let h_offset = (h_anim.current().round() as u16).min(max_h);
 
     let mut visible_lines = rendered
         .lines
         .iter()
-        .skip(scroll_offset)
+        .skip(v_offset)
         .take(viewport_height)
         .cloned()
         .collect::<Vec<_>>();
-    for (index, sticky_heading) in sticky_headings(&rendered.headings, scroll_offset)
+
+    // Group/swimlane headers (heading levels 0 and 1) are pinned to the left
+    // edge ("horizontally sticky") so their label stays readable when the board
+    // is scrolled right; column-title rows (level 2) and cards scroll normally.
+    let header_levels: std::collections::HashMap<usize, usize> = rendered
+        .headings
+        .iter()
+        .map(|heading| (heading.y, heading.level))
+        .collect();
+    let mut sticky_left = (0..visible_lines.len())
+        .map(|i| header_levels.get(&(v_offset + i)).is_some_and(|level| *level < 2))
+        .collect::<Vec<_>>();
+
+    for (index, (level, sticky_heading)) in sticky_headings(&rendered.headings, v_offset)
         .into_iter()
         .take(viewport_height)
         .enumerate()
     {
         if let Some(line) = visible_lines.get_mut(index) {
             *line = sticky_heading;
+            sticky_left[index] = level < 2;
+        }
+    }
+
+    // Slice every visible line to the horizontal viewport. Sticky headers slice
+    // from the start so their label stays at the left; everything else slices at
+    // the animated horizontal offset so columns line up.
+    if columns.scrolling {
+        for (i, line) in visible_lines.iter_mut().enumerate() {
+            let start = if sticky_left[i] { 0 } else { h_offset as usize };
+            *line = slice_line(std::mem::take(line), start, board_area.width as usize);
         }
     }
 
@@ -187,7 +433,21 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
             frame,
             scrollbar_area,
             total_lines,
-            scroll_offset..scroll_offset + viewport_height,
+            v_offset..v_offset + viewport_height,
+            theme,
+        );
+    }
+
+    if let Some(bar) = hscroll_area {
+        // Cell-based thumb so it tracks the actual (animated, possibly manual)
+        // horizontal offset rather than snapped column boundaries.
+        let viewport = (board_area.width as usize).min(strip_width as usize);
+        let start = h_offset as usize;
+        scrollbar::render_range_horizontal(
+            frame,
+            bar,
+            strip_width as usize,
+            start..start + viewport,
             theme,
         );
     }
@@ -217,7 +477,7 @@ fn generate_rendered_board(
     issues_by_key: &BTreeMap<&str, &IssueSummary>,
     visible_lanes: &[&BoardSwimlaneSummary],
     theme: &Theme,
-    columns_layout: &[Rect],
+    columns: &ColumnLayout,
     search: &str,
 ) -> RenderedBoard {
     let mut rendered = RenderedBoard {
@@ -227,7 +487,13 @@ fn generate_rendered_board(
     };
     let selected_key = app.selected_board_issue_key();
     let selected_group = app.selected_board_group();
+    let selected_empty = app.selected_board_empty_cell();
     let grouping = app.board_grouping();
+    // Headings span the full strip; the horizontal slice trims them to view.
+    let header_width = columns.strip_width();
+    // Only the ungrouped board shows the column WIP maximum (count/max); when
+    // grouped, each lane's count is a slice of the column, not the whole.
+    let show_max = !grouping.is_grouped();
     let original_visible_lanes = data
         .swimlanes
         .iter()
@@ -244,7 +510,7 @@ fn generate_rendered_board(
                 false,
                 false,
                 theme,
-                columns_layout,
+                header_width,
             );
             push_heading(&mut rendered, swimlane_heading, 0, None);
 
@@ -271,7 +537,7 @@ fn generate_rendered_board(
                     collapsed,
                     selected,
                     theme,
-                    columns_layout,
+                    header_width,
                 );
                 push_heading(
                     &mut rendered,
@@ -295,8 +561,10 @@ fn generate_rendered_board(
                     &section,
                     true,
                     selected_key,
+                    selected_empty,
                     theme,
-                    columns_layout,
+                    columns,
+                    show_max,
                     search,
                 );
             }
@@ -317,7 +585,7 @@ fn generate_rendered_board(
                 collapsed,
                 selected,
                 theme,
-                columns_layout,
+                header_width,
             );
             push_heading(
                 &mut rendered,
@@ -337,8 +605,10 @@ fn generate_rendered_board(
             lane,
             show_header,
             selected_key,
+            selected_empty,
             theme,
-            columns_layout,
+            columns,
+            show_max,
             search,
         );
     }
@@ -368,7 +638,7 @@ fn board_heading_line(
     collapsed: bool,
     selected: bool,
     theme: &Theme,
-    columns_layout: &[Rect],
+    header_width: u16,
 ) -> Line<'static> {
     let marker = if collapsed {
         collapsed_icon()
@@ -398,8 +668,7 @@ fn board_heading_line(
     } else {
         Style::default().fg(theme.subtle_fg())
     };
-    let total_width = columns_layout.iter().map(|r| r.width).sum::<u16>();
-    let filler_len = (total_width as usize).saturating_sub(text_len);
+    let filler_len = (header_width as usize).saturating_sub(text_len);
     Line::from(vec![
         Span::styled(header_text, text_style),
         Span::styled(fill_char.repeat(filler_len), border_style),
@@ -436,19 +705,40 @@ fn render_columns_block(
     lane: &BoardSwimlaneSummary,
     show_header: bool,
     selected_key: Option<&str>,
+    selected_empty: Option<(&str, usize)>,
     theme: &Theme,
-    columns_layout: &[Rect],
+    columns: &ColumnLayout,
+    show_max: bool,
     search: &str,
 ) {
+    // Is column `c_idx` the focused empty cell of this lane?
+    let empty_selected = |c_idx: usize| selected_empty == Some((lane.name.as_str(), c_idx));
+    // Render every column at full width into one strip; the caller slices it to
+    // the viewport, so partial edge columns (the "peek") come for free.
+    //
+    // Bucket the lane's issues by column in a single pass. Doing it once (rather
+    // than filtering the whole lane per column, twice) keeps redraws cheap even
+    // at the 60fps animation cadence.
+    let mut column_issues: Vec<Vec<&IssueSummary>> = vec![Vec::new(); data.columns.len()];
+    for key in &lane.issue_keys {
+        if let Some(issue) = issues_by_key.get(key.as_str()).copied()
+            && board_issue_matches_filter(issue, search)
+        {
+            let c = board_issue_column(data, issue);
+            if let Some(bucket) = column_issues.get_mut(c) {
+                bucket.push(issue);
+            }
+        }
+    }
+
     let mut max_inner_len = 1;
     let mut columns_card_lines = Vec::new();
-    for (c_idx, _column) in data.columns.iter().enumerate() {
-        let column_width = columns_layout[c_idx].width;
-        let col_issues = lane_column_issues(data, issues_by_key, lane, c_idx, search);
+    for (c_idx, col_issues) in column_issues.iter().enumerate() {
+        let column_width = columns.rects[c_idx].width;
         let mut col_card_lines = Vec::new();
         let mut card_positions = Vec::new();
         let mut current_local_y = 0;
-        for issue in &col_issues {
+        for issue in col_issues {
             let card_selected = selected_key == Some(issue.key.as_str());
             let card_width = column_width.saturating_sub(4);
             let lines_for_card = issue_card_lines(issue, card_selected, theme, card_width, search);
@@ -465,13 +755,22 @@ fn render_columns_block(
         if col_issues.is_empty() {
             let no_issues_text = "No issues";
             let pad = (column_width as usize).saturating_sub(no_issues_text.chars().count() + 2);
+            // Brighten the placeholder when this empty column is focused so the
+            // selection is visible even though there's no card.
+            let style = if empty_selected(c_idx) {
+                Style::default()
+                    .fg(theme.accent_fg())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.muted_fg())
+            };
             col_card_lines.push(Line::from(Span::styled(
                 format!("{no_issues_text}{}", " ".repeat(pad)),
-                Style::default().fg(theme.muted_fg()),
+                style,
             )));
         }
         max_inner_len = max_inner_len.max(col_card_lines.len());
-        columns_card_lines.push((col_card_lines, card_positions));
+        columns_card_lines.push((c_idx, col_card_lines, card_positions));
     }
 
     let block_height = max_inner_len + 2;
@@ -481,7 +780,19 @@ fn render_columns_block(
     } else {
         columns_y_start
     };
-    for (_, card_positions) in columns_card_lines.iter() {
+    for (c_idx, _, card_positions) in columns_card_lines.iter() {
+        if card_positions.is_empty() {
+            // Empty column: anchor the focusable region to the top of the block
+            // (the header through the "No issues" line). Spanning the whole
+            // block — which can be far taller than the viewport when a sibling
+            // column is long — makes the vertical auto-scroll oscillate.
+            rendered.layout.push(BoardLayoutItem {
+                key: board_empty_cell_key(&lane.name, *c_idx),
+                y_start: header_y_start,
+                y_end: columns_y_start + 2,
+            });
+            continue;
+        }
         for (key, local_start, local_end) in card_positions {
             let card_y_start = columns_y_start + 1 + local_start;
             let card_y_end = columns_y_start + 1 + local_end;
@@ -504,11 +815,11 @@ fn render_columns_block(
     }
 
     let mut col_lines_list = Vec::new();
-    for (c_idx, (col_card_lines, _)) in columns_card_lines.into_iter().enumerate() {
-        let column_width = columns_layout[c_idx].width;
-        let col_issues = lane_column_issues(data, issues_by_key, lane, c_idx, search);
-        let column_selected =
-            selected_key.is_some_and(|key| col_issues.iter().any(|issue| issue.key == key));
+    for (c_idx, col_card_lines, _) in columns_card_lines.into_iter() {
+        let column_width = columns.rects[c_idx].width;
+        let col_issues = &column_issues[c_idx];
+        let column_selected = empty_selected(c_idx)
+            || selected_key.is_some_and(|key| col_issues.iter().any(|issue| issue.key == key));
 
         let (left_border, right_border, top_left, top_right, bottom_left, bottom_right, fill_char) =
             if column_selected {
@@ -531,9 +842,22 @@ fn render_columns_block(
         } else {
             ""
         };
-        let title_text = format!(" {}{} {} ", column.name.to_uppercase(), checkmark, count);
+        // Keep the column title within the column width: truncate the name but
+        // always preserve the trailing checkmark/count, otherwise an overlong
+        // title overflows and breaks the alignment of every column to its right.
+        // On the ungrouped board, show `count/max` when the column has a WIP
+        // maximum so it reads like Jira's column constraint.
+        let count_text = match column.max {
+            Some(max) if show_max => format!("{count}/{max}"),
+            _ => count.to_string(),
+        };
+        let inner = column_width.saturating_sub(2) as usize;
+        let suffix = format!("{checkmark} {count_text} ");
+        let name_budget = inner.saturating_sub(1 + suffix.chars().count());
+        let name = truncate_with_ellipsis(&column.name.to_uppercase(), name_budget);
+        let title_text = format!(" {name}{suffix}");
         let title_len = title_text.chars().count();
-        let fill_count = (column_width as usize).saturating_sub(title_len + 2);
+        let fill_count = inner.saturating_sub(title_len);
         let top_border_str = format!(
             "{top_left}{title_text}{}{top_right}",
             fill_char.repeat(fill_count)
@@ -564,26 +888,31 @@ fn render_columns_block(
         col_lines_list.push(col_lines);
     }
 
-    if let Some(first_column_lines) = col_lines_list.first() {
-        for (row_index, _) in first_column_lines.iter().enumerate().take(block_height) {
-            let mut joined_spans = Vec::new();
-            for column_lines in col_lines_list.iter().take(data.columns.len()) {
-                joined_spans.extend(column_lines[row_index].spans.clone());
-            }
-            let line = Line::from(joined_spans);
-            if row_index == 0 {
-                rendered.headings.push(BoardHeading {
-                    y: rendered.lines.len(),
-                    level: 2,
-                    line: line.clone(),
-                });
-            }
-            rendered.lines.push(line);
+    // Transpose the per-column line lists into joined rows. Move each cell's
+    // spans out (rather than cloning) since every cell is consumed exactly once.
+    if col_lines_list.is_empty() {
+        return;
+    }
+    for row_index in 0..block_height {
+        let mut joined_spans = Vec::new();
+        for column_lines in col_lines_list.iter_mut() {
+            joined_spans.append(&mut column_lines[row_index].spans);
         }
+        let line = Line::from(joined_spans);
+        if row_index == 0 {
+            rendered.headings.push(BoardHeading {
+                y: rendered.lines.len(),
+                level: 2,
+                line: line.clone(),
+            });
+        }
+        rendered.lines.push(line);
     }
 }
 
-fn sticky_headings(headings: &[BoardHeading], scroll_offset: usize) -> Vec<Line<'static>> {
+/// Returns the stacked sticky headings (with their level) for the row at the
+/// top of the viewport: the current swimlane, group and column-title context.
+fn sticky_headings(headings: &[BoardHeading], scroll_offset: usize) -> Vec<(usize, Line<'static>)> {
     let mut sticky = Vec::new();
     let mut min_y = 0;
     for level in 0..=2 {
@@ -594,7 +923,7 @@ fn sticky_headings(headings: &[BoardHeading], scroll_offset: usize) -> Vec<Line<
             .last()
         {
             min_y = heading.y;
-            sticky.push(heading.line.clone());
+            sticky.push((level, heading.line.clone()));
         }
     }
     sticky
@@ -655,23 +984,6 @@ fn render_group_trigger(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ),
     ]);
     frame.render_widget(Paragraph::new(text), area);
-}
-
-fn lane_column_issues<'a>(
-    data: &BoardData,
-    issues_by_key: &BTreeMap<&str, &'a IssueSummary>,
-    lane: &crate::services::jira::BoardSwimlaneSummary,
-    column_index: usize,
-    search: &str,
-) -> Vec<&'a IssueSummary> {
-    lane.issue_keys
-        .iter()
-        .filter_map(|key| issues_by_key.get(key.as_str()).copied())
-        .filter(|issue| {
-            board_issue_column(data, issue) == column_index
-                && board_issue_matches_filter(issue, search)
-        })
-        .collect()
 }
 
 fn board_issue_matches_filter(issue: &IssueSummary, search: &str) -> bool {
@@ -767,25 +1079,21 @@ fn issue_card_lines(
         ));
     }
 
-    if let Some(labels) = issue.field_values.get("labels") {
-        let labels = labels
-            .split(", ")
-            .filter(|label| !label.is_empty())
-            .map(|label| format!("[{label}]"))
-            .collect::<Vec<_>>()
-            .join("");
-        if !labels.is_empty() {
-            let labels = truncate_with_ellipsis(&labels, inner_width);
-            lines.push(card_highlighted_content_line(
-                &labels,
-                search,
-                inner_width,
-                selected,
-                border_style,
-                content_style,
-                theme,
-            ));
-        }
+    if let Some(labels) = issue.field_values.get("labels")
+        && label::has_labels(labels)
+    {
+        let mut spans = truncate_spans_with_ellipsis(
+            label::spans(theme, labels, search, content_style),
+            inner_width,
+        );
+        apply_background(&mut spans, content_style);
+        lines.push(card_content_spans(
+            spans,
+            inner_width,
+            selected,
+            border_style,
+            content_style,
+        ));
     }
 
     if let Some(due_date) = issue.field_values.get("dueDate") {
@@ -971,6 +1279,81 @@ fn apply_background(spans: &mut [Span<'static>], base_style: Style) {
     }
 }
 
+/// Returns the sub-slice of a line covering display columns
+/// `[start, start + width)`, preserving span styles and adding no ellipsis.
+/// This is how the full board strip is trimmed to the horizontal viewport;
+/// fractional column boundaries (mid-glide) simply land inside a span.
+fn slice_line(line: Line<'static>, start: usize, width: usize) -> Line<'static> {
+    clip_head(clip_tail(line, start), width)
+}
+
+/// Keeps the leading `width` display columns of a line.
+fn clip_head(line: Line<'static>, width: usize) -> Line<'static> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for span in line.spans {
+        if used >= width {
+            break;
+        }
+        let span_width = display_width(span.content.as_ref());
+        if used + span_width <= width {
+            used += span_width;
+            out.push(span);
+        } else {
+            let remaining = width - used;
+            let mut partial = String::new();
+            let mut acc = 0usize;
+            for ch in span.content.chars() {
+                let ch_width = display_width(ch.encode_utf8(&mut [0; 4]));
+                if acc + ch_width > remaining {
+                    break;
+                }
+                acc += ch_width;
+                partial.push(ch);
+            }
+            if !partial.is_empty() {
+                out.push(Span::styled(partial, span.style));
+            }
+            break;
+        }
+    }
+    Line::from(out)
+}
+
+/// Drops the leading `skip` display columns from a line, keeping the rest.
+fn clip_tail(line: Line<'static>, skip: usize) -> Line<'static> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    for span in line.spans {
+        let span_width = display_width(span.content.as_ref());
+        let span_end = pos + span_width;
+        if span_end <= skip {
+            pos = span_end;
+            continue;
+        }
+        if pos >= skip {
+            out.push(span);
+        } else {
+            let drop_cols = skip - pos;
+            let mut acc = 0usize;
+            let mut kept = String::new();
+            for ch in span.content.chars() {
+                let ch_width = display_width(ch.encode_utf8(&mut [0; 4]));
+                if acc < drop_cols {
+                    acc += ch_width;
+                    continue;
+                }
+                kept.push(ch);
+            }
+            if !kept.is_empty() {
+                out.push(Span::styled(kept, span.style));
+            }
+        }
+        pos = span_end;
+    }
+    Line::from(out)
+}
+
 fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
@@ -1038,3 +1421,93 @@ fn wrapped_lines(text: &str, width: usize) -> Vec<String> {
     }
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area(width: u16) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 40,
+        }
+    }
+
+    #[test]
+    fn fits_without_scrolling_keeps_one_window_and_no_offset() {
+        // 4 columns at 200 cells: ~50 each, comfortably above MIN.
+        let layout = ColumnLayout::compute(area(200), 4, Some(0), 0);
+        assert!(!ColumnLayout::will_scroll(200, 4));
+        assert!(!layout.scrolling);
+        assert_eq!(layout.window.start, 0);
+        assert_eq!(layout.rects.len(), 4);
+        // Ratio fill spans the whole board; nothing to scroll.
+        assert_eq!(layout.strip_width(), 200);
+        assert_eq!(layout.target_offset(200), 0);
+    }
+
+    #[test]
+    fn scrolls_when_columns_exceed_min_width() {
+        // 6 columns at 150 cells: only 150/34 = 4 fit.
+        assert!(ColumnLayout::will_scroll(150, 6));
+        let layout = ColumnLayout::compute(area(150), 6, Some(0), 0);
+        assert!(layout.scrolling);
+        // Selection at the far left: window pinned to start, strip rests at 0.
+        assert_eq!(layout.window.start, 0);
+        assert!(layout.strip_width() > 150, "strip wider than the viewport");
+        assert_eq!(layout.target_offset(150), 0);
+    }
+
+    #[test]
+    fn window_follows_selection_and_reveals_a_left_peek_in_the_middle() {
+        // Selecting column 4 (with 4 visible) scrolls to window starting at 1.
+        let layout = ColumnLayout::compute(area(150), 6, Some(4), 0);
+        assert_eq!(layout.window.start, 1);
+        // The strip rests pulled back by one peek so column 0 shows a sliver.
+        let col_width = layout.rects[0].width;
+        assert_eq!(layout.target_offset(150), col_width - PEEK_WIDTH);
+    }
+
+    #[test]
+    fn far_right_selection_clamps_to_the_end_of_the_strip() {
+        let layout = ColumnLayout::compute(area(150), 6, Some(5), 0);
+        // Window scrolled so the last column is visible.
+        assert_eq!(layout.window.start, 2);
+        let max_off = layout.strip_width() - 150;
+        assert_eq!(layout.target_offset(150), max_off);
+    }
+
+    #[test]
+    fn target_offset_always_stays_within_the_strip() {
+        for sel in 0..6 {
+            let layout = ColumnLayout::compute(area(150), 6, Some(sel), 0);
+            let max_off = layout.strip_width().saturating_sub(150);
+            assert!(
+                layout.target_offset(150) <= max_off,
+                "selection {sel} offset out of bounds"
+            );
+        }
+    }
+
+    #[test]
+    fn slice_line_returns_the_requested_window() {
+        let line = Line::from(vec![Span::raw("abcdefghij".to_owned())]);
+        let sliced = slice_line(line, 3, 4);
+        let text: String = sliced.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "defg");
+    }
+
+    #[test]
+    fn slice_line_preserves_per_span_styles_across_the_cut() {
+        let line = Line::from(vec![
+            Span::raw("ab".to_owned()),
+            Span::raw("cdef".to_owned()),
+        ]);
+        let sliced = slice_line(line, 1, 3);
+        let text: String = sliced.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "bcd");
+    }
+}
+

@@ -1,6 +1,6 @@
 mod support;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 use tira::{
     Action, App, AppEffect, AppEvent, JiraLoadPurpose, JiraProjectLoadResult, KeyBindings,
@@ -308,7 +308,7 @@ fn priority_and_assignee_fields_render_with_components() {
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains("󰄿"));
     assert!(screen.contains("@JB"));
-    assert!(screen.contains("[frontend][urgent]"));
+    assert!(screen.contains("⟦frontend⟧⟦urgent⟧"));
     assert!(!screen.contains("Highest"));
 }
 
@@ -404,7 +404,7 @@ fn board_tab_renders_jira_cards() {
         screen.contains(" [Shopping Cart] Checkout")
             || screen.contains("⚡ [Shopping Cart] Checkout")
     );
-    assert!(screen.contains("[BE][FE]"));
+    assert!(screen.contains("⟦BE⟧⟦FE⟧"));
     assert!(screen.contains("2026-06-10"));
     assert!(screen.contains("@MV"));
     assert!(!screen.contains("@UN"));
@@ -424,6 +424,7 @@ fn board_tab_search_filters_visible_cards() {
         columns: vec![BoardColumnSummary {
             name: String::from("To Do"),
             statuses: vec![String::from("To Do")],
+            max: None,
         }],
         swimlanes: vec![BoardSwimlaneSummary {
             id: None,
@@ -609,6 +610,7 @@ fn board_cards_use_display_name_avatar_from_issue_search() {
                 columns: vec![BoardColumnSummary {
                     name: String::from("To Do"),
                     statuses: vec![String::from("To Do")],
+                    max: None,
                 }],
                 swimlanes: vec![BoardSwimlaneSummary {
                     id: None,
@@ -667,6 +669,7 @@ fn board_grouping_resolves_assignee_account_ids_from_users() {
                 columns: vec![BoardColumnSummary {
                     name: String::from("To Do"),
                     statuses: vec![String::from("To Do")],
+                    max: None,
                 }],
                 swimlanes: vec![BoardSwimlaneSummary {
                     id: None,
@@ -723,10 +726,12 @@ fn board_tab_renders_swimlanes_and_uses_theme_selection_style() {
             BoardColumnSummary {
                 name: String::from("To Do"),
                 statuses: vec![String::from("100")],
+                max: None,
             },
             BoardColumnSummary {
                 name: String::from("Done"),
                 statuses: vec![String::from("300")],
+                max: None,
             },
         ],
         swimlanes: vec![
@@ -789,6 +794,7 @@ fn board_scroll_keeps_swimlane_context_when_returning_to_edges() {
         columns: vec![BoardColumnSummary {
             name: String::from("To Do"),
             statuses: vec![String::from("To Do")],
+            max: None,
         }],
         swimlanes: vec![
             BoardSwimlaneSummary {
@@ -822,6 +828,12 @@ fn board_scroll_keeps_swimlane_context_when_returning_to_edges() {
     assert!(screen.contains("TO DO"));
 
     app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &bindings);
+    // First draw sets the scroll target; tick lets the glide settle, then draw
+    // the settled frame to assert on.
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    app.tick(std::time::Duration::from_secs(1));
     terminal
         .draw(|frame| draw(frame, &app, &bindings))
         .expect("draw app");
@@ -857,6 +869,7 @@ fn grouped_board_heading_sticks_while_scrolling_cards() {
         columns: vec![BoardColumnSummary {
             name: String::from("To Do"),
             statuses: vec![String::from("To Do")],
+            max: None,
         }],
         swimlanes: vec![
             BoardSwimlaneSummary {
@@ -885,6 +898,11 @@ fn grouped_board_heading_sticks_while_scrolling_cards() {
     for _ in 0..5 {
         app.handle_key(key('j'), &bindings);
     }
+    // Draw to set the scroll target, settle the glide, then draw the result.
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    app.tick(std::time::Duration::from_secs(1));
     terminal
         .draw(|frame| draw(frame, &app, &bindings))
         .expect("draw app");
@@ -911,6 +929,7 @@ fn board_cards_render_without_blank_gaps() {
         columns: vec![BoardColumnSummary {
             name: String::from("To Do"),
             statuses: vec![String::from("To Do")],
+            max: None,
         }],
         swimlanes: vec![BoardSwimlaneSummary {
             id: None,
@@ -1048,4 +1067,168 @@ fn code_column_header_spacing_is_conditional() {
     let chars_has_exp: Vec<char> = screen_has_exp.chars().collect();
     let line_2_has_exp: String = chars_has_exp[320..480].iter().collect();
     assert!(line_2_has_exp.contains("  Work "));
+}
+
+#[test]
+fn board_mouse_wheel_scrolls_viewport_without_moving_selection() {
+    let mut issues = Vec::new();
+    let mut keys = Vec::new();
+    for index in 1..=20 {
+        let key = format!("KAN-{index}");
+        let mut item = issue(&key, &format!("Card number {index}"), "Task", None);
+        item.status = String::from("To Do");
+        keys.push(key);
+        issues.push(item);
+    }
+    let board = BoardData {
+        id: 9,
+        name: String::from("Kanban"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+            max: None,
+        }],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: keys,
+        }],
+        issues,
+    };
+    let bindings = KeyBindings::default();
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    // Select the first card.
+    app.handle_key(key('j'), &bindings);
+    let before = app.selected_board_issue_key().map(str::to_owned);
+    assert!(before.is_some());
+
+    // Wheel down over the board content must scroll the viewport, not select.
+    let area = ratatui::layout::Rect::new(0, 0, 100, 12);
+    let wheel = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 6,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse(wheel, area, &bindings);
+
+    assert_eq!(
+        app.selected_board_issue_key().map(str::to_owned),
+        before,
+        "mouse wheel should not move the board selection"
+    );
+}
+
+#[test]
+fn board_left_click_still_selects_a_card() {
+    // Guard: the wheel-vs-select change must not break click selection.
+    let mut issues = Vec::new();
+    let mut keys = Vec::new();
+    for index in 1..=5 {
+        let key = format!("KAN-{index}");
+        let mut item = issue(&key, &format!("Card {index}"), "Task", None);
+        item.status = String::from("To Do");
+        keys.push(key);
+        issues.push(item);
+    }
+    let board = BoardData {
+        id: 9,
+        name: String::from("Kanban"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+            max: None,
+        }],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: keys,
+        }],
+        issues,
+    };
+    let bindings = KeyBindings::default();
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    let backend = TestBackend::new(100, 16);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    // Wheel scroll then verify selection is unchanged by scroll but a click selects.
+    let area = ratatui::layout::Rect::new(0, 0, 100, 16);
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        },
+        area,
+        &bindings,
+    );
+    assert!(app.selected_board_issue_key().is_some());
+}
+
+#[test]
+fn board_group_header_label_is_horizontally_sticky_when_scrolled() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let names = [
+        "To Do", "In Progress", "In Review", "In Staging", "Ready For Prod", "Done",
+    ];
+    let columns = names
+        .iter()
+        .map(|n| BoardColumnSummary {
+            name: String::from(*n),
+            statuses: vec![String::from(*n)],
+            max: None,
+        })
+        .collect();
+    let mut done = issue("KAN-1", "Done card", "Task", None);
+    done.status = String::from("Done");
+    done.field_values
+        .insert(String::from("assignee"), String::from("Alice"));
+    let board = BoardData {
+        id: 1,
+        name: String::from("Kanban"),
+        columns,
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1")],
+        }],
+        issues: vec![done],
+    };
+    let bindings = KeyBindings::default();
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    // Group by assignee, then focus the far-right "Done" card to scroll right.
+    app.handle_key(key('g'), &bindings);
+    app.handle_key(ctrl('j'), &bindings);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), &bindings);
+    app.dispatch(Action::Board(tira::BoardAction::GoToEnd));
+
+    let backend = TestBackend::new(120, 10);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    // Let the horizontal glide settle.
+    for _ in 0..30 {
+        terminal.draw(|f| draw(f, &app, &bindings)).expect("draw");
+        app.tick(std::time::Duration::from_millis(40));
+    }
+    terminal.draw(|f| draw(f, &app, &bindings)).expect("draw");
+
+    let (screen, _) = rendered_text(&terminal);
+    let chars: Vec<char> = screen.chars().collect();
+    let row = |i: usize| -> String { chars[i * 120..(i + 1) * 120].iter().collect() };
+    // We are scrolled right: the rightmost column shows; leftmost is gone.
+    let board_text = screen.clone();
+    assert!(board_text.contains("DONE"), "scrolled to show the Done column");
+    // The group header label stays pinned near the left edge while scrolled
+    // (a leading space + avatar glyph precede the name).
+    let header_row = (0..10).map(row).find(|r| r.contains("Alice")).expect("header row");
+    let label_at = header_row.find("Alice").expect("label present");
+    assert!(
+        label_at < 6,
+        "group label should be sticky at the left, got: {header_row:?}"
+    );
 }

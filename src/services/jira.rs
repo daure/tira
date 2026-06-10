@@ -95,10 +95,13 @@ pub struct BoardData {
     pub issues: Vec<IssueSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BoardColumnSummary {
     pub name: String,
     pub statuses: Vec<String>,
+    /// Configured WIP maximum for the column (Jira column constraint), if any.
+    /// Shown as `count/max` in the ungrouped board header.
+    pub max: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +120,7 @@ impl BoardData {
                 columns.push(BoardColumnSummary {
                     name: issue.status.clone(),
                     statuses: vec![issue.status.clone()],
+                    max: None,
                 });
             }
         }
@@ -124,6 +128,7 @@ impl BoardData {
             columns.push(BoardColumnSummary {
                 name: String::from("Issues"),
                 statuses: Vec::new(),
+                max: None,
             });
         }
 
@@ -1183,13 +1188,37 @@ fn board_column_from_value(value: &serde_json::Value) -> (i64, BoardColumnSummar
         })
         .unwrap_or_default();
 
+    // Jira exposes the per-column WIP maximum as `max` (0 / absent = no limit).
+    // Be liberal about the encoding: greenhopper has shipped it as a JSON
+    // number, a float, and a string across versions, and the key has also
+    // appeared as `maxIssueCount`.
+    let max = ["max", "maxIssueCount"]
+        .iter()
+        .find_map(|key| value.get(*key))
+        .and_then(column_constraint_value)
+        .filter(|max| *max > 0);
+
     (
         value
             .get("position")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0),
-        BoardColumnSummary { name, statuses },
+        BoardColumnSummary {
+            name,
+            statuses,
+            max,
+        },
     )
+}
+
+/// Parses a column constraint that Jira may encode as an integer, float or
+/// numeric string into a count.
+fn column_constraint_value(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        .or_else(|| value.as_f64().map(|n| n as u64))
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 fn board_swimlane_from_value(value: &serde_json::Value) -> (i64, BoardSwimlaneSummary) {
@@ -1291,6 +1320,10 @@ fn collect_issue_ids_from_array(
 }
 
 fn filter_board_card_issues(issues: &mut Vec<IssueSummary>) {
+    // Jira issue-type hierarchy levels: epics (and higher) are >= 1, standard
+    // issues are 0, and sub-tasks are -1. The board renders standard issues and
+    // sub-tasks as cards (Jira nests sub-tasks under their parent), but not
+    // epics, which act as a grouping rather than a card. So keep level <= 0.
     if issues
         .iter()
         .any(|issue| issue.field_values.contains_key("typeHierarchyLevel"))
@@ -1299,7 +1332,8 @@ fn filter_board_card_issues(issues: &mut Vec<IssueSummary>) {
             issue
                 .field_values
                 .get("typeHierarchyLevel")
-                .is_some_and(|level| level == "0")
+                .and_then(|level| level.parse::<i64>().ok())
+                .is_some_and(|level| level <= 0)
         });
     }
 }
@@ -1608,6 +1642,36 @@ mod tests {
     }
 
     #[test]
+    fn greenhopper_board_data_reads_column_wip_maximum() {
+        let board = board_data_from_greenhopper(
+            7,
+            String::from("Kanban"),
+            json!({
+                "columnsData": {
+                    "columns": [
+                        { "name": "To Do", "position": 0, "statusIds": ["100"], "max": 5 },
+                        { "name": "In Progress", "position": 1, "statusIds": ["200"], "max": 0 },
+                        { "name": "In Review", "position": 2, "statusIds": ["250"], "max": "8" },
+                        { "name": "Staging", "position": 3, "statusIds": ["275"], "maxIssueCount": 4 },
+                        { "name": "Done", "position": 4, "statusIds": ["300"] }
+                    ]
+                },
+                "issuesData": { "issues": [] },
+                "swimlanesData": { "swimlanes": [] }
+            }),
+        )
+        .expect("board data");
+
+        // A positive `max` is the WIP limit; 0 or absent means no limit. The
+        // value may be a number, a numeric string, or under `maxIssueCount`.
+        assert_eq!(board.columns[0].max, Some(5));
+        assert_eq!(board.columns[1].max, None);
+        assert_eq!(board.columns[2].max, Some(8));
+        assert_eq!(board.columns[3].max, Some(4));
+        assert_eq!(board.columns[4].max, None);
+    }
+
+    #[test]
     fn greenhopper_board_data_resolves_assignee_from_assignee_name() {
         let board = board_data_from_greenhopper(
             7,
@@ -1764,7 +1828,7 @@ mod tests {
     }
 
     #[test]
-    fn greenhopper_board_data_keeps_only_base_level_cards() {
+    fn greenhopper_board_data_keeps_cards_and_subtasks_but_drops_epics() {
         let board = board_data_from_greenhopper(
             7,
             String::from("Kanban"),
@@ -1797,7 +1861,7 @@ mod tests {
                         {
                             "id": 10003,
                             "key": "KAN-3",
-                            "summary": "Subtask hidden from board card list",
+                            "summary": "Subtask shown as a board card",
                             "statusId": "100",
                             "status": { "name": "To Do" },
                             "typeName": "Subtask",
@@ -1814,15 +1878,16 @@ mod tests {
         )
         .expect("board data");
 
+        // Story and sub-task are cards; the epic is excluded.
         assert_eq!(
             board
                 .issues
                 .iter()
                 .map(|issue| issue.key.as_str())
                 .collect::<Vec<_>>(),
-            vec!["KAN-1"]
+            vec!["KAN-1", "KAN-3"]
         );
-        assert_eq!(board.swimlanes[0].issue_keys, vec!["KAN-1"]);
+        assert_eq!(board.swimlanes[0].issue_keys, vec!["KAN-1", "KAN-3"]);
     }
     fn search_response_reads_pagination_cursor() {
         let payload: SearchResponse = serde_json::from_value(json!({

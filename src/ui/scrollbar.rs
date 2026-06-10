@@ -42,6 +42,31 @@ pub fn render_range(
     frame.render_widget(Paragraph::new(lines.collect::<Vec<_>>()), area);
 }
 
+pub fn render_range_horizontal(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    item_count: usize,
+    visible_range: std::ops::Range<usize>,
+    theme: &crate::ui::theme::Theme,
+) {
+    let thumb_range = thumb_range(item_count, visible_range, area.width as usize);
+    if thumb_range.is_empty() {
+        return;
+    }
+
+    let spans = (0..area.width as usize)
+        .map(|index| {
+            if thumb_range.contains(&index) {
+                Span::styled("━", Style::default().fg(theme.accent_fg()))
+            } else {
+                Span::styled("─", Style::default().fg(theme.border_fg()))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 pub fn thumb_range(
     row_count: usize,
     visible_range: std::ops::Range<usize>,

@@ -18,20 +18,29 @@ pub fn display_width(labels: &str) -> usize {
         .sum()
 }
 
+/// Returns true when `labels` contains at least one renderable label.
+pub fn has_labels(labels: &str) -> bool {
+    !parse(labels).is_empty()
+}
+
+const BRACKET_LEFT: &str = "⟦";
+const BRACKET_RIGHT: &str = "⟧";
+
 fn single_label_spans(
     theme: &Theme,
     label: &str,
     filter: &str,
     base_style: Style,
 ) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled("[", Style::default().fg(theme.muted_fg()))];
+    let bracket_style = base_style.fg(theme.muted_fg());
+    let mut spans = vec![Span::styled(BRACKET_LEFT, bracket_style)];
     spans.extend(crate::ui::style::highlighted_spans_owned(
         theme,
         label,
         filter,
         base_style.fg(theme.status_text()),
     ));
-    spans.push(Span::styled("]", Style::default().fg(theme.muted_fg())));
+    spans.push(Span::styled(BRACKET_RIGHT, bracket_style));
     spans
 }
 
