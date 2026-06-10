@@ -49,6 +49,15 @@ impl FilteredTreeState {
         self.tree.items()
     }
 
+    /// Number of currently-loaded root items (those without a parent).
+    pub fn root_count(&self) -> usize {
+        self.tree
+            .items()
+            .iter()
+            .filter(|item| item.parent_id.is_none())
+            .count()
+    }
+
     pub fn update_item_field(&mut self, item_id: &str, field_id: &str, value: Option<String>) {
         self.tree.update_item_field(item_id, field_id, value);
         self.tree.clamp_selection();

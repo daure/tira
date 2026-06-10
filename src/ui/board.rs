@@ -18,8 +18,8 @@ use crate::{
     },
     services::jira::{BoardData, BoardSwimlaneSummary, IssueSummary},
     ui::{
-        layout::truncate_with_ellipsis,
         layout::truncate_spans_with_ellipsis,
+        layout::truncate_with_ellipsis,
         scrollbar,
         theme::{Theme, prefers_plain_icons},
     },
@@ -409,7 +409,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         .map(|heading| (heading.y, heading.level))
         .collect();
     let mut sticky_left = (0..visible_lines.len())
-        .map(|i| header_levels.get(&(v_offset + i)).is_some_and(|level| *level < 2))
+        .map(|i| {
+            header_levels
+                .get(&(v_offset + i))
+                .is_some_and(|level| *level < 2)
+        })
         .collect::<Vec<_>>();
 
     for (index, (level, sticky_heading)) in sticky_headings(&rendered.headings, v_offset)
@@ -581,8 +585,7 @@ fn generate_rendered_board(
 
     for lane in visible_lanes {
         let lane_issues = filtered_lane_issue_keys(lane, issues_by_key, search);
-        let show_header =
-            grouping.is_grouped() || visible_lanes.len() > 1 || lane.name != "Issues";
+        let show_header = grouping.is_grouped() || visible_lanes.len() > 1 || lane.name != "Issues";
         if show_header {
             let collapsed = app.is_board_group_collapsed(&lane.name);
             let selected = selected_group == Some(lane.name.as_str());
@@ -1584,4 +1587,3 @@ mod tests {
         assert_eq!(text, "bcd");
     }
 }
-

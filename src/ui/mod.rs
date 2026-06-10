@@ -3,6 +3,7 @@ mod board;
 mod board_group_picker;
 pub mod chrome;
 pub mod layout;
+mod logo;
 mod overlays;
 mod project_switcher;
 mod quick_switcher;
@@ -24,6 +25,13 @@ use ratatui::{
 use crate::{App, KeyBindings, Screen, components::jira::issue_list};
 
 pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
+    // At launch with stored credentials, show only the animated splash logo
+    // (no tabs, no footer) until the initial Jira load resolves.
+    if app.is_loading_splash() {
+        logo::render(frame, frame.area(), app.anim_elapsed(), app.theme());
+        return;
+    }
+
     let [frame_area, status_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -64,6 +72,7 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBi
     match app.active_tab() {
         "List" => issue_list::render(frame, area, app, keybindings),
         "Board" => board::render(frame, area, app, keybindings),
+        "Timeline" | "Filters" => logo::render(frame, area, app.anim_elapsed(), app.theme()),
         tab => render_empty_tab(frame, area, tab, app.theme()),
     }
 }

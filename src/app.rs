@@ -17,10 +17,10 @@ use crate::{
     config::JiraCredentials,
     keymap::KeyBindings,
     services::jira::{
-        BoardColumnSummary, BoardData, BoardSwimlaneSummary, CommandLogEntry, FieldSummary,
-        IssueSummary, JiraError, JiraLoadResult, ProjectSummary, UserSummary,
+        BoardData, CommandLogEntry, FieldSummary, IssueSummary, JiraError, ProjectSummary,
+        UserSummary,
     },
-    ui::theme::{Theme, ThemeChoice, ThemeName},
+    ui::theme::{Theme, ThemeChoice},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -29,144 +29,19 @@ use std::fmt;
 pub const APP_TABS: &[&str] = &["Board", "List", "Timeline", "Filters"];
 const DEFAULT_TAB_INDEX: usize = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    Tabs(TabAction),
-    JiraFilteredTree(JiraFilteredTreeAction),
-    ReloadList,
-    ReloadBoard,
-    ReloadNode,
-    Board(BoardAction),
-    Leader,
-    FocusBoardFilter,
-    ClearBoardFilter,
-    ToggleBoardGrouping,
-    ToggleCommandLog,
-    CloseCommandLog,
-    ToggleSprintDetails,
-    CloseSprintDetails,
-    ToggleProjectDropdown,
-    ProjectDropdown(crate::components::generic::dropdown::DropdownAction),
-    ToggleQuickSwitcher,
-    QuickSwitcher(crate::components::generic::dropdown::DropdownAction),
-    ToggleThemeDropdown,
-    ThemeDropdown(crate::components::generic::dropdown::DropdownAction),
-    ToggleAssigneeDropdown,
-    AssigneeDropdown(crate::components::generic::dropdown::DropdownAction),
-    BoardGroupDropdown(crate::components::generic::dropdown::DropdownAction),
-    AssignSelectedToMe,
-    UnassignSelected,
-    GoToBoard,
-    GoToList,
-    GoToTimeline,
-    GoToFilters,
-    OpenHelp,
-    CloseHelp,
-    Quit,
-    None,
-}
+mod action;
+mod board;
+mod effect;
+mod list;
+mod modal;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppEffect {
-    LoadJiraProject {
-        request_id: u64,
-        purpose: JiraLoadPurpose,
-        credentials: JiraCredentials,
-        fields: String,
-    },
-    LoadMoreRoots {
-        request_id: u64,
-        credentials: JiraCredentials,
-        fields: String,
-        page_token: String,
-    },
-    LoadChildren {
-        request_id: u64,
-        credentials: JiraCredentials,
-        parent_key: String,
-        fields: String,
-    },
-    SearchIssues {
-        request_id: u64,
-        credentials: JiraCredentials,
-        term: String,
-        fields: String,
-    },
-    CopyToClipboard(String),
-    SaveTheme(ThemeName),
-    AssignIssue {
-        request_id: u64,
-        issue_key: String,
-        assignee: Option<UserSummary>,
-        credentials: JiraCredentials,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BoardAction {
-    MoveLeft,
-    MoveRight,
-    MoveUp,
-    MoveDown,
-    HalfPageUp,
-    HalfPageDown,
-    GoToStart,
-    GoToEnd,
-    GoToStartPrefix,
-    ToggleCollapse,
-    CollapseAllGroups,
-    ExpandAllGroups,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppEvent {
-    JiraProjectLoaded {
-        request_id: u64,
-        purpose: JiraLoadPurpose,
-        credentials: JiraCredentials,
-        result: JiraProjectLoadResult,
-    },
-    RootsPageLoaded {
-        request_id: u64,
-        result: JiraLoadResult,
-    },
-    ChildrenLoaded {
-        request_id: u64,
-        parent_key: String,
-        result: JiraLoadResult,
-    },
-    SearchLoaded {
-        request_id: u64,
-        term: String,
-        result: JiraLoadResult,
-    },
-    CredentialsSaveFailed {
-        request_id: u64,
-        purpose: JiraLoadPurpose,
-        error: String,
-    },
-    ThemeSaveFailed(String),
-    IssueUrlCopied(String),
-    IssueUrlCopyFailed {
-        url: String,
-        error: String,
-    },
-    IssueAssigned {
-        request_id: u64,
-        issue_key: String,
-        assignee: Option<UserSummary>,
-        result: Result<CommandLogEntry, (JiraError, CommandLogEntry)>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JiraLoadPurpose {
-    Initial,
-    Setup,
-    Reload,
-    ReloadBoard,
-    SwitchProject,
-}
+pub use action::{Action, BoardAction};
+pub use board::{BoardGrouping, BoardState, board_issue_column};
+pub(crate) use board::{
+    board_empty_cell_key, board_group_key, board_grouped_lanes, normalize_board_user_fields,
+};
+pub use effect::{AppEffect, AppEvent, JiraLoadPurpose, JiraProjectLoadResult};
+use modal::{DialogKind, ModalState};
 
 /// Which content the List screen is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,25 +93,6 @@ impl Spinner {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JiraProjectLoadResult {
-    pub issues: Result<Vec<IssueSummary>, JiraError>,
-    pub board: Result<BoardData, JiraError>,
-    pub next_page_token: Option<String>,
-    pub fields: Result<Vec<FieldSummary>, JiraError>,
-    pub projects: Result<Vec<ProjectSummary>, JiraError>,
-    pub users: Result<Vec<UserSummary>, JiraError>,
-    pub current_user: Result<UserSummary, JiraError>,
-    pub logs: Vec<CommandLogEntry>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DialogKind {
-    CommandLog,
-    Help,
-    SprintDetails,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DropdownKind {
     JiraColumns,
@@ -247,74 +103,6 @@ enum DropdownKind {
     BoardGroup,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BoardGrouping {
-    None,
-    Assignee,
-    Epic,
-    Stories,
-    Spaces,
-}
-
-impl BoardGrouping {
-    pub const ALL: [Self; 5] = [
-        Self::None,
-        Self::Assignee,
-        Self::Epic,
-        Self::Stories,
-        Self::Spaces,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Assignee => "Assignee",
-            Self::Epic => "Epic",
-            Self::Stories => "Stories",
-            Self::Spaces => "Spaces",
-        }
-    }
-
-    /// Whether this grouping splits the board into swimlanes (anything but None).
-    pub fn is_grouped(self) -> bool {
-        self != Self::None
-    }
-
-    /// Label for the catch-all swimlane that always sorts to the bottom.
-    fn catch_all_label(self) -> &'static str {
-        match self {
-            Self::None => "",
-            Self::Assignee => "Unassigned",
-            Self::Epic => "No Epic",
-            Self::Stories => "Other work items",
-            Self::Spaces => "Other",
-        }
-    }
-
-    /// Resolve the swimlane label for an issue under this grouping, or `None`
-    /// when the issue belongs to the catch-all lane.
-    fn group_label(self, issue: &crate::services::jira::IssueSummary) -> Option<String> {
-        let field = match self {
-            Self::None => return None,
-            Self::Assignee => "assignee",
-            Self::Epic => "epic_summary",
-            Self::Stories => "parent",
-            Self::Spaces => {
-                // "Spaces" == projects; derive the project key from the issue key
-                // prefix (e.g. "DPP-123" -> "DPP").
-                return issue
-                    .key
-                    .split_once('-')
-                    .map(|(prefix, _)| prefix.to_owned());
-            }
-        };
-        issue
-            .field_values
-            .get(field)
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-    }
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickAction {
     CommandLog,
@@ -357,740 +145,6 @@ impl QuickAction {
     }
 }
 
-#[derive(Debug)]
-pub struct BoardState {
-    data: Option<BoardData>,
-    error: Option<String>,
-    selected_issue_key: Option<String>,
-    /// Column the user is navigating in, preserved across group-header rows so
-    /// vertical movement stays in the same column (landing on empty cells too).
-    preferred_column: usize,
-    collapsed_groups: std::collections::BTreeSet<String>,
-    pub scroll_offset: std::cell::Cell<usize>,
-    pub col_scroll_offset: std::cell::Cell<usize>,
-    /// Smoothly glides the rendered vertical line offset toward `scroll_offset`.
-    pub v_scroll: crate::components::generic::scroll_animator::ScrollAnimator,
-    /// Smoothly glides the rendered horizontal cell offset toward its target.
-    pub h_scroll: crate::components::generic::scroll_animator::ScrollAnimator,
-    /// When true the viewport was scrolled by the user (wheel), so rendering
-    /// shows the manual offset instead of following the selection. Cleared on
-    /// the next keyboard navigation.
-    pub manual_v_scroll: std::cell::Cell<bool>,
-    pub manual_h_scroll: std::cell::Cell<bool>,
-    /// Manual horizontal offset in cells, used while `manual_h_scroll` is set.
-    pub manual_h_offset: std::cell::Cell<u16>,
-    pub column_widths: std::cell::RefCell<Vec<usize>>,
-}
-
-impl Clone for BoardState {
-    fn clone(&self) -> Self {
-        Self {
-            data: self.data.clone(),
-            error: self.error.clone(),
-            selected_issue_key: self.selected_issue_key.clone(),
-            preferred_column: self.preferred_column,
-            collapsed_groups: self.collapsed_groups.clone(),
-            scroll_offset: std::cell::Cell::new(self.scroll_offset.get()),
-            col_scroll_offset: std::cell::Cell::new(self.col_scroll_offset.get()),
-            v_scroll: self.v_scroll.clone(),
-            h_scroll: self.h_scroll.clone(),
-            manual_v_scroll: std::cell::Cell::new(self.manual_v_scroll.get()),
-            manual_h_scroll: std::cell::Cell::new(self.manual_h_scroll.get()),
-            manual_h_offset: std::cell::Cell::new(self.manual_h_offset.get()),
-            column_widths: std::cell::RefCell::new(self.column_widths.borrow().clone()),
-        }
-    }
-}
-
-impl PartialEq for BoardState {
-    fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
-            && self.error == other.error
-            && self.selected_issue_key == other.selected_issue_key
-            && self.collapsed_groups == other.collapsed_groups
-    }
-}
-
-impl Eq for BoardState {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BoardCell {
-    lane: usize,
-    column: usize,
-    index: usize,
-    key: String,
-    group: String,
-    is_group: bool,
-}
-
-impl BoardState {
-    fn empty() -> Self {
-        Self {
-            data: None,
-            error: None,
-            selected_issue_key: None,
-            preferred_column: 0,
-            collapsed_groups: std::collections::BTreeSet::new(),
-            scroll_offset: std::cell::Cell::new(0),
-            col_scroll_offset: std::cell::Cell::new(0),
-            v_scroll: crate::components::generic::scroll_animator::ScrollAnimator::new(),
-            h_scroll: crate::components::generic::scroll_animator::ScrollAnimator::new(),
-            manual_v_scroll: std::cell::Cell::new(false),
-            manual_h_scroll: std::cell::Cell::new(false),
-            manual_h_offset: std::cell::Cell::new(0),
-            column_widths: std::cell::RefCell::new(Vec::new()),
-        }
-    }
-
-    fn from_issues(issues: Vec<IssueSummary>) -> Self {
-        let mut board = Self::empty();
-        board.set_data(BoardData::from_issues(issues));
-        board
-    }
-
-    fn set_data(&mut self, data: BoardData) {
-        let previous = self.selected_issue_key.clone();
-        let cells = board_cells_for_lanes(
-            &data,
-            &data.swimlanes,
-            "",
-            &self.collapsed_groups,
-            BoardGrouping::None,
-        );
-        self.selected_issue_key = previous
-            .filter(|key| cells.iter().any(|cell| cell.key == *key))
-            .or_else(|| cells.first().map(|cell| cell.key.clone()));
-        self.data = Some(data);
-        self.error = None;
-    }
-
-    fn select_first(&mut self, search: &str, grouping: BoardGrouping) {
-        let Some(data) = &self.data else {
-            self.selected_issue_key = None;
-            return;
-        };
-        let lanes = board_grouped_lanes(data, grouping);
-        let cells = board_cells_for_lanes(data, &lanes, search, &self.collapsed_groups, grouping);
-        self.selected_issue_key = cells.first().map(|cell| cell.key.clone());
-    }
-
-    fn set_error(&mut self, error: String) {
-        self.error = Some(error);
-    }
-
-    pub fn data(&self) -> Option<&BoardData> {
-        self.data.as_ref()
-    }
-
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
-    pub fn selected_issue_key(&self) -> Option<&str> {
-        self.selected_issue_key
-            .as_deref()
-            .filter(|key| !is_board_group_key(key) && !is_board_empty_key(key))
-    }
-
-    pub fn selected_group(&self) -> Option<&str> {
-        self.selected_issue_key
-            .as_deref()
-            .and_then(board_group_key_name)
-    }
-
-    /// The raw selected key (issue, group header, or empty cell), used to look up
-    /// the selection's position for scrolling.
-    pub fn selected_raw_key(&self) -> Option<&str> {
-        self.selected_issue_key.as_deref()
-    }
-
-    /// The `(group, column)` of a focused empty column, if one is selected.
-    pub fn selected_empty_cell(&self) -> Option<(&str, usize)> {
-        self.selected_issue_key
-            .as_deref()
-            .and_then(board_empty_cell_parts)
-    }
-
-    pub fn is_group_collapsed(&self, group: &str) -> bool {
-        self.collapsed_groups.contains(group)
-    }
-
-    fn update_assignee(&mut self, issue_key: &str, assignee_name: Option<String>) {
-        let Some(data) = &mut self.data else {
-            return;
-        };
-        let Some(issue) = data.issues.iter_mut().find(|issue| issue.key == issue_key) else {
-            return;
-        };
-        match assignee_name {
-            Some(name) => {
-                issue.field_values.insert(String::from("assignee"), name);
-            }
-            None => {
-                issue.field_values.remove("assignee");
-            }
-        }
-    }
-
-    pub fn selected_issue_index(&self, search: &str, grouping: BoardGrouping) -> usize {
-        let Some(data) = &self.data else {
-            return 0;
-        };
-        let Some(selected) = &self.selected_issue_key else {
-            return 0;
-        };
-        let lanes = board_grouped_lanes(data, grouping);
-        let cells = board_cells_for_lanes(data, &lanes, search, &self.collapsed_groups, grouping);
-        cells
-            .iter()
-            .position(|cell| &cell.key == selected)
-            .unwrap_or(0)
-    }
-
-    /// Scroll the board viewport vertically by `delta` lines without moving the
-    /// selection. Render clamps the upper bound (it knows the content height).
-    pub fn scroll_viewport(&self, delta: isize) {
-        let next = self.scroll_offset.get().saturating_add_signed(delta);
-        self.scroll_offset.set(next);
-        self.manual_v_scroll.set(true);
-    }
-
-    /// Scroll the board viewport horizontally by `delta` cells without moving
-    /// the selection. Seeds from the currently rendered offset on the first
-    /// tick so the view doesn't jump. Render clamps to the strip width.
-    pub fn scroll_viewport_horizontal(&self, delta: i32) {
-        let base = if self.manual_h_scroll.get() {
-            self.manual_h_offset.get()
-        } else {
-            self.h_scroll.current().round().max(0.0) as u16
-        };
-        let step = delta.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-        self.manual_h_offset.set(base.saturating_add_signed(step));
-        self.manual_h_scroll.set(true);
-    }
-
-    fn dispatch(&mut self, action: BoardAction, search: &str, grouping: BoardGrouping) {
-        // Keyboard navigation re-enables selection-following for both axes.
-        self.manual_v_scroll.set(false);
-        self.manual_h_scroll.set(false);
-        let Some(data) = &self.data else {
-            return;
-        };
-        let lanes = board_grouped_lanes(data, grouping);
-        let cells = board_cells_for_lanes(data, &lanes, search, &self.collapsed_groups, grouping);
-        if cells.is_empty() {
-            self.selected_issue_key = None;
-            return;
-        }
-        let Some(selected_index) = self
-            .selected_issue_key
-            .as_ref()
-            .and_then(|key| cells.iter().position(|cell| &cell.key == key))
-        else {
-            self.selected_issue_key = cells.first().map(|cell| cell.key.clone());
-            return;
-        };
-
-        let selected = &cells[selected_index];
-        // Track the column the user is in so vertical moves preserve it across
-        // group headers (where the cell's own column is meaningless).
-        if !selected.is_group {
-            self.preferred_column = selected.column;
-        }
-        let pref = self
-            .preferred_column
-            .min(data.columns.len().saturating_sub(1));
-        let next = match action {
-            BoardAction::MoveLeft if selected.is_group => {
-                self.collapsed_groups.insert(selected.group.clone());
-                None
-            }
-            BoardAction::MoveRight if selected.is_group => {
-                self.collapsed_groups.remove(&selected.group);
-                Some(board_lane_column_entry(
-                    data,
-                    &lanes[selected.lane],
-                    pref,
-                    search,
-                    false,
-                ))
-            }
-            BoardAction::ToggleCollapse if selected.is_group => {
-                if !self.collapsed_groups.remove(&selected.group) {
-                    self.collapsed_groups.insert(selected.group.clone());
-                }
-                None
-            }
-            BoardAction::MoveLeft => board_horizontal_target(data, &lanes, selected, -1, search)
-                .or_else(|| {
-                    if grouping.is_grouped() {
-                        Some(board_group_key(&selected.group))
-                    } else {
-                        None
-                    }
-                }),
-            BoardAction::MoveRight => board_horizontal_target(data, &lanes, selected, 1, search),
-            BoardAction::MoveUp => board_vertical_target(
-                data,
-                &lanes,
-                &self.collapsed_groups,
-                grouping,
-                selected,
-                pref,
-                search,
-                -1,
-            ),
-            BoardAction::MoveDown => board_vertical_target(
-                data,
-                &lanes,
-                &self.collapsed_groups,
-                grouping,
-                selected,
-                pref,
-                search,
-                1,
-            ),
-            BoardAction::HalfPageUp => board_page_vertical(
-                data,
-                &lanes,
-                &cells,
-                &self.collapsed_groups,
-                grouping,
-                selected,
-                pref,
-                search,
-                -1,
-            ),
-            BoardAction::HalfPageDown => board_page_vertical(
-                data,
-                &lanes,
-                &cells,
-                &self.collapsed_groups,
-                grouping,
-                selected,
-                pref,
-                search,
-                1,
-            ),
-            BoardAction::GoToStart => cells
-                .iter()
-                .find(|cell| !cell.is_group && cell.column == pref)
-                .map(|cell| cell.key.clone()),
-            BoardAction::GoToEnd => cells
-                .iter()
-                .rev()
-                .find(|cell| !cell.is_group && cell.column == pref)
-                .map(|cell| cell.key.clone()),
-            BoardAction::GoToStartPrefix => None,
-            BoardAction::CollapseAllGroups => {
-                let selected_group = selected.group.clone();
-                self.collapsed_groups.extend(
-                    lanes
-                        .iter()
-                        .enumerate()
-                        .filter(|(index, _lane)| {
-                            board_first_group_issue_key(data, &lanes, *index, search).is_some()
-                        })
-                        .map(|(_, lane)| lane.name.clone()),
-                );
-                Some(board_group_key(&selected_group))
-            }
-            BoardAction::ExpandAllGroups => {
-                self.collapsed_groups.clear();
-                None
-            }
-            BoardAction::ToggleCollapse => None,
-        };
-
-        if let Some(next) = next {
-            // Keep the preferred column in sync with the landing cell (but not
-            // group headers, which would reset it to 0).
-            if let Some(cell) = cells.iter().find(|cell| cell.key == next)
-                && !cell.is_group
-            {
-                self.preferred_column = cell.column;
-            }
-            self.selected_issue_key = Some(next);
-        }
-    }
-}
-
-fn board_cells_for_lanes(
-    data: &BoardData,
-    lanes: &[BoardSwimlaneSummary],
-    search: &str,
-    collapsed_groups: &std::collections::BTreeSet<String>,
-    grouping: BoardGrouping,
-) -> Vec<BoardCell> {
-    let mut cells = Vec::new();
-    for (lane_index, lane) in lanes.iter().enumerate() {
-        let group = lane.name.clone();
-        let show_header = grouping.is_grouped();
-        if show_header
-            && lane.issue_keys.iter().any(|key| {
-                data.issues
-                    .iter()
-                    .find(|issue| issue.key.as_str() == key.as_str())
-                    .is_some_and(|issue| board_issue_matches_search(issue, search))
-            })
-        {
-            cells.push(BoardCell {
-                lane: lane_index,
-                column: 0,
-                index: 0,
-                key: board_group_key(&group),
-                group: group.clone(),
-                is_group: true,
-            });
-        }
-        if show_header && collapsed_groups.contains(&group) {
-            continue;
-        }
-        for (column_index, _column) in data.columns.iter().enumerate() {
-            let keys = board_lane_column_keys(data, lane, column_index, search);
-            if keys.is_empty() {
-                // Empty columns are still focusable so left/right navigation
-                // steps through them instead of jumping over the gaps.
-                cells.push(BoardCell {
-                    lane: lane_index,
-                    column: column_index,
-                    index: 0,
-                    key: board_empty_cell_key(&group, column_index),
-                    group: group.clone(),
-                    is_group: false,
-                });
-                continue;
-            }
-            cells.extend(keys.into_iter().enumerate().map(|(index, key)| BoardCell {
-                lane: lane_index,
-                column: column_index,
-                index,
-                key,
-                group: group.clone(),
-                is_group: false,
-            }));
-        }
-    }
-    cells
-}
-
-pub(crate) fn board_group_key(group: &str) -> String {
-    format!("__board_group__:{group}")
-}
-
-pub(crate) fn is_board_group_key(key: &str) -> bool {
-    key.starts_with("__board_group__:")
-}
-
-pub(crate) fn board_group_key_name(key: &str) -> Option<&str> {
-    key.strip_prefix("__board_group__:")
-}
-
-/// Synthetic selection key for a column that currently has no issues, so empty
-/// columns are focusable when navigating (carries the lane group and column).
-/// The unit separator keeps it unambiguous against arbitrary group names.
-pub(crate) fn board_empty_cell_key(group: &str, column: usize) -> String {
-    format!("__board_empty__:{column}\u{1f}{group}")
-}
-
-pub(crate) fn is_board_empty_key(key: &str) -> bool {
-    key.starts_with("__board_empty__:")
-}
-
-/// Parses an empty-cell key back into `(group, column)`.
-pub(crate) fn board_empty_cell_parts(key: &str) -> Option<(&str, usize)> {
-    let rest = key.strip_prefix("__board_empty__:")?;
-    let (column, group) = rest.split_once('\u{1f}')?;
-    Some((group, column.parse().ok()?))
-}
-
-pub(crate) fn board_grouped_lanes(
-    data: &BoardData,
-    grouping: BoardGrouping,
-) -> Vec<BoardSwimlaneSummary> {
-    if !grouping.is_grouped() {
-        return data.swimlanes.clone();
-    }
-    let catch_all = grouping.catch_all_label();
-    let mut groups = std::collections::BTreeMap::<String, Vec<String>>::new();
-    for issue in &data.issues {
-        let group = grouping
-            .group_label(issue)
-            .unwrap_or_else(|| catch_all.to_owned());
-        groups.entry(group).or_default().push(issue.key.clone());
-    }
-    let mut lanes: Vec<BoardSwimlaneSummary> = groups
-        .into_iter()
-        .map(|(name, issue_keys)| BoardSwimlaneSummary {
-            id: None,
-            name,
-            issue_keys,
-        })
-        .collect();
-    // Keep names alphabetical but always push the catch-all lane to the bottom.
-    lanes.sort_by(|a, b| {
-        let a_catch = a.name == catch_all;
-        let b_catch = b.name == catch_all;
-        a_catch.cmp(&b_catch).then_with(|| a.name.cmp(&b.name))
-    });
-    lanes
-}
-
-fn board_horizontal_target(
-    data: &BoardData,
-    lanes: &[BoardSwimlaneSummary],
-    selected: &BoardCell,
-    direction: isize,
-    search: &str,
-) -> Option<String> {
-    let column = selected.column as isize + direction;
-    if column < 0 || column as usize >= data.columns.len() {
-        return None;
-    }
-    let column = column as usize;
-    let keys = board_lane_column_keys(data, &lanes[selected.lane], column, search);
-    if keys.is_empty() {
-        // Land on the empty column rather than skipping to the next populated
-        // one, so horizontal movement is steady instead of jumpy.
-        Some(board_empty_cell_key(&lanes[selected.lane].name, column))
-    } else {
-        keys.get(selected.index.min(keys.len() - 1)).cloned()
-    }
-}
-
-fn board_first_group_issue_key(
-    data: &BoardData,
-    lanes: &[BoardSwimlaneSummary],
-    lane_index: usize,
-    search: &str,
-) -> Option<String> {
-    for column in 0..data.columns.len() {
-        if let Some(key) = board_lane_column_keys(data, &lanes[lane_index], column, search).first()
-        {
-            return Some(key.clone());
-        }
-    }
-    None
-}
-
-/// The selection key for entering `column` of `lane` — the first/last card, or
-/// the empty-cell placeholder when the column has no issues.
-fn board_lane_column_entry(
-    data: &BoardData,
-    lane: &BoardSwimlaneSummary,
-    column: usize,
-    search: &str,
-    take_last: bool,
-) -> String {
-    let keys = board_lane_column_keys(data, lane, column, search);
-    let chosen = if take_last { keys.last() } else { keys.first() };
-    chosen
-        .cloned()
-        .unwrap_or_else(|| board_empty_cell_key(&lane.name, column))
-}
-
-/// Next selection one row up (`direction < 0`) or down (`direction > 0`),
-/// preserving `preferred_column` across group-header rows and landing on empty
-/// column cells rather than skipping to a populated column.
-#[allow(clippy::too_many_arguments)]
-fn board_vertical_target(
-    data: &BoardData,
-    lanes: &[BoardSwimlaneSummary],
-    collapsed: &std::collections::BTreeSet<String>,
-    grouping: BoardGrouping,
-    selected: &BoardCell,
-    preferred_column: usize,
-    search: &str,
-    direction: isize,
-) -> Option<String> {
-    let show_header = grouping.is_grouped();
-    if direction < 0 {
-        if selected.is_group {
-            if selected.lane == 0 {
-                return None;
-            }
-            let prev = selected.lane - 1;
-            let prev_group = &lanes[prev].name;
-            if show_header && collapsed.contains(prev_group) {
-                Some(board_group_key(prev_group))
-            } else {
-                // Land on the bottom of the preferred column in the lane above.
-                Some(board_lane_column_entry(
-                    data,
-                    &lanes[prev],
-                    preferred_column,
-                    search,
-                    true,
-                ))
-            }
-        } else {
-            let keys = board_lane_column_keys(data, &lanes[selected.lane], selected.column, search);
-            let pos = keys.iter().position(|key| *key == selected.key);
-            if let Some(prev) = pos.and_then(|p| p.checked_sub(1)) {
-                Some(keys[prev].clone())
-            } else if show_header {
-                Some(board_group_key(&selected.group))
-            } else {
-                None
-            }
-        }
-    } else if selected.is_group {
-        if show_header && collapsed.contains(&selected.group) {
-            (selected.lane + 1 < lanes.len())
-                .then(|| board_group_key(&lanes[selected.lane + 1].name))
-        } else {
-            // Enter the top of the preferred column in this lane.
-            Some(board_lane_column_entry(
-                data,
-                &lanes[selected.lane],
-                preferred_column,
-                search,
-                false,
-            ))
-        }
-    } else {
-        let keys = board_lane_column_keys(data, &lanes[selected.lane], selected.column, search);
-        let pos = keys.iter().position(|key| *key == selected.key);
-        if let Some(next) = pos.filter(|p| p + 1 < keys.len()) {
-            Some(keys[next + 1].clone())
-        } else if show_header && selected.lane + 1 < lanes.len() {
-            Some(board_group_key(&lanes[selected.lane + 1].name))
-        } else {
-            None
-        }
-    }
-}
-
-/// Half-page vertical jump: repeatedly steps up/down, passing *through* group
-/// headers (they aren't landing spots) and counting cards and empty cells, so
-/// the jump lands a few rows away without skipping empty columns.
-#[allow(clippy::too_many_arguments)]
-fn board_page_vertical(
-    data: &BoardData,
-    lanes: &[BoardSwimlaneSummary],
-    cells: &[BoardCell],
-    collapsed: &std::collections::BTreeSet<String>,
-    grouping: BoardGrouping,
-    selected: &BoardCell,
-    preferred_column: usize,
-    search: &str,
-    direction: isize,
-) -> Option<String> {
-    const PAGE: usize = 4;
-    let mut current = selected.key.clone();
-    let mut landed = 0usize;
-    let mut result = None;
-    // Bounded by the number of cells (every step advances to a distinct key).
-    for _ in 0..cells.len().saturating_add(PAGE) {
-        let Some(cell) = cells.iter().find(|cell| cell.key == current) else {
-            break;
-        };
-        let Some(next) = board_vertical_target(
-            data,
-            lanes,
-            collapsed,
-            grouping,
-            cell,
-            preferred_column,
-            search,
-            direction,
-        ) else {
-            break;
-        };
-        if next == current {
-            break;
-        }
-        current = next;
-        let landed_on_group = cells
-            .iter()
-            .find(|cell| cell.key == current)
-            .is_some_and(|cell| cell.is_group);
-        if !landed_on_group {
-            result = Some(current.clone());
-            landed += 1;
-            if landed >= PAGE {
-                break;
-            }
-        }
-    }
-    result
-}
-
-fn board_lane_column_keys(
-    data: &BoardData,
-    lane: &BoardSwimlaneSummary,
-    column_index: usize,
-    search: &str,
-) -> Vec<String> {
-    lane.issue_keys
-        .iter()
-        .filter(|key| {
-            data.issues
-                .iter()
-                .find(|issue| issue.key.as_str() == key.as_str())
-                .is_some_and(|issue| {
-                    board_issue_column(data, issue) == column_index
-                        && board_issue_matches_search(issue, search)
-                })
-        })
-        .cloned()
-        .collect()
-}
-
-fn board_issue_matches_search(issue: &IssueSummary, search: &str) -> bool {
-    let search = search.trim();
-    if search.is_empty() {
-        return true;
-    }
-    let search = search.to_ascii_lowercase();
-    issue.key.to_ascii_lowercase().contains(&search)
-        || issue.summary.to_ascii_lowercase().contains(&search)
-        || issue.status.to_ascii_lowercase().contains(&search)
-        || issue.issue_type.to_ascii_lowercase().contains(&search)
-        || board_displayed_field_matches(issue, "epic_summary", &search)
-        || board_displayed_field_matches(issue, "labels", &search)
-        || board_displayed_field_matches(issue, "dueDate", &search)
-        || board_displayed_field_matches(issue, "priorityName", &search)
-        || board_assignee_matches(issue, &search)
-}
-
-fn board_assignee_matches(issue: &IssueSummary, search: &str) -> bool {
-    issue.field_values.get("assignee").is_some_and(|assignee| {
-        let assignee = assignee.to_ascii_lowercase();
-        let initials = crate::components::generic::avatar::initials(&assignee).to_ascii_lowercase();
-        assignee.contains(search) || initials.contains(search)
-    })
-}
-
-fn board_displayed_field_matches(issue: &IssueSummary, field: &str, search: &str) -> bool {
-    issue
-        .field_values
-        .get(field)
-        .is_some_and(|value| value.to_ascii_lowercase().contains(search))
-}
-
-pub fn board_issue_column(data: &BoardData, issue: &IssueSummary) -> usize {
-    let status_id = issue.field_values.get("status_id").map(String::as_str);
-    data.columns
-        .iter()
-        .position(|column| board_column_contains_issue(column, issue, status_id))
-        .unwrap_or(0)
-}
-
-fn board_column_contains_issue(
-    column: &BoardColumnSummary,
-    issue: &IssueSummary,
-    status_id: Option<&str>,
-) -> bool {
-    if column.statuses.is_empty() {
-        return column.name == issue.status;
-    }
-    column
-        .statuses
-        .iter()
-        .any(|status| Some(status.as_str()) == status_id || status == &issue.status)
-}
-
 fn merge_board_issue_fields(board: &mut BoardData, list_issues: &[IssueSummary]) {
     for board_issue in &mut board.issues {
         let Some(list_issue) = list_issues
@@ -1107,27 +161,6 @@ fn merge_board_issue_fields(board: &mut BoardData, list_issues: &[IssueSummary])
                     .field_values
                     .entry(key.clone())
                     .or_insert_with(|| value.clone());
-            }
-        }
-    }
-}
-
-fn normalize_board_user_fields(
-    board: &mut BoardData,
-    users: &[UserSummary],
-    current_user: Option<&UserSummary>,
-) {
-    for issue in &mut board.issues {
-        for field in ["assignee", "reporter"] {
-            let Some(value) = issue.field_values.get_mut(field) else {
-                continue;
-            };
-            if let Some(user) = users
-                .iter()
-                .chain(current_user)
-                .find(|user| user.account_id == *value)
-            {
-                *value = user.display_name.clone();
             }
         }
     }
@@ -1295,6 +328,20 @@ impl CredentialForm {
     }
 }
 
+/// View state for the scrollable command-log dialog. Scroll position is kept
+/// as a wrapped-line offset from the top; `follow` pins the viewport to the
+/// latest entry (the bottom). The `last_*` metrics are written by the renderer
+/// so keyboard/mouse scrolling can clamp without re-deriving the dialog width.
+#[derive(Clone, PartialEq, Eq, Default)]
+struct CommandLogView {
+    offset: std::cell::Cell<usize>,
+    follow: std::cell::Cell<bool>,
+    last_total: std::cell::Cell<usize>,
+    last_viewport: std::cell::Cell<usize>,
+    /// Set after a single `g`, so the next `g` jumps to the top (`gg`).
+    go_to_start_pending: std::cell::Cell<bool>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct App {
     tabs: TabsState,
@@ -1308,13 +355,10 @@ pub struct App {
     board_group_dropdown: Option<MultiSelectDropdownState<BoardGrouping>>,
     credentials: Option<JiraCredentials>,
     command_log: Vec<CommandLogEntry>,
-    command_log_open: bool,
-    sprint_details_open: bool,
+    modal: Option<ModalState>,
     board_filter: crate::FilterState,
     status: String,
     notifications: Vec<Notification>,
-    help_open: bool,
-    help_selected: usize,
     projects: Vec<ProjectSummary>,
     users: Vec<UserSummary>,
     current_user: Option<UserSummary>,
@@ -1362,8 +406,21 @@ pub struct App {
     /// rebuilding it. Other project loads (initial, project switch, returning
     /// from search) rebuild from scratch and leave this `false`.
     pending_reload_seamless: bool,
+    /// Children results that arrive before the root query during a seamless
+    /// reload. Held here so the whole reload settles as one unit when the roots
+    /// land, instead of un-dimming nodes mid-reload (which looks like a flicker).
+    reload_children_buffer: Vec<(String, Result<Vec<IssueSummary>, JiraError>)>,
     /// Animated spinner for in-flight node loads.
     spinner: Spinner,
+    /// Scroll/follow state for the command-log dialog.
+    command_log_view: CommandLogView,
+    /// Monotonic wall-clock accumulator driving idle UI animations (e.g. the
+    /// splash logo).
+    anim_clock: std::time::Duration,
+    /// True from launch (when credentials already exist) until the first
+    /// `Initial` project load resolves. While set, the UI shows only the
+    /// animated splash logo instead of the main view.
+    awaiting_initial_load: bool,
 }
 
 impl Default for App {
@@ -1390,8 +447,7 @@ impl App {
             board_filter: crate::FilterState::default(),
             credentials: None,
             command_log: Vec::new(),
-            command_log_open: false,
-            sprint_details_open: false,
+            modal: None,
             status: status.into(),
             notifications: Vec::new(),
             projects: Vec::new(),
@@ -1403,8 +459,6 @@ impl App {
             quick_switcher: None,
             theme_preview_origin: None,
             leader_pending: false,
-            help_open: false,
-            help_selected: 0,
             pending_effects: Vec::new(),
             theme: Theme::default(),
             active_load_request_id: None,
@@ -1420,7 +474,11 @@ impl App {
             soft_reload_parents: std::collections::HashSet::new(),
             reload_root_ids: None,
             pending_reload_seamless: false,
+            reload_children_buffer: Vec::new(),
             spinner: Spinner::default(),
+            command_log_view: CommandLogView::default(),
+            anim_clock: std::time::Duration::ZERO,
+            awaiting_initial_load: false,
         }
     }
 
@@ -1442,8 +500,7 @@ impl App {
             board_filter: crate::FilterState::default(),
             credentials: None,
             command_log: Vec::new(),
-            command_log_open: false,
-            sprint_details_open: false,
+            modal: None,
             status: String::from("Jira issues loaded"),
             notifications: Vec::new(),
             projects: Vec::new(),
@@ -1451,12 +508,10 @@ impl App {
             current_user: None,
             assignee_dropdown: None,
             project_dropdown: None,
-            help_open: false,
             theme_dropdown: None,
             quick_switcher: None,
             theme_preview_origin: None,
             leader_pending: false,
-            help_selected: 0,
             pending_effects: Vec::new(),
             theme: Theme::default(),
             active_load_request_id: None,
@@ -1472,7 +527,11 @@ impl App {
             soft_reload_parents: std::collections::HashSet::new(),
             reload_root_ids: None,
             pending_reload_seamless: false,
+            reload_children_buffer: Vec::new(),
             spinner: Spinner::default(),
+            command_log_view: CommandLogView::default(),
+            anim_clock: std::time::Duration::ZERO,
+            awaiting_initial_load: false,
         }
     }
 
@@ -1514,9 +573,14 @@ impl App {
     pub fn from_credentials(credentials: JiraCredentials) -> Self {
         let mut app = Self::setup("Loading Jira issues");
         app.screen = Screen::Main;
+        app.awaiting_initial_load = true;
         app.credentials = Some(credentials.clone());
         app.filtered_tree.set_jira_site(credentials.site.clone());
-        app.queue_jira_load(JiraLoadPurpose::Initial, credentials);
+        app.queue_jira_load(
+            JiraLoadPurpose::Initial,
+            credentials,
+            crate::services::jira::ROOT_PAGE_SIZE,
+        );
         app
     }
 
@@ -1525,11 +589,10 @@ impl App {
     }
 
     pub fn help_selected(&self) -> usize {
-        self.help_selected
-    }
-
-    fn reset_help_selection(&mut self) {
-        self.help_selected = 0;
+        match &self.modal {
+            Some(ModalState::Help { selected }) => *selected,
+            _ => 0,
+        }
     }
 
     pub fn setup_form(&self) -> &CredentialForm {
@@ -1544,6 +607,7 @@ impl App {
     }
 
     pub fn tick(&mut self, dt: std::time::Duration) {
+        self.anim_clock += dt;
         self.filtered_tree.tick(dt);
         if let Some(dropdown) = &mut self.project_dropdown {
             dropdown.tick(dt);
@@ -1577,13 +641,25 @@ impl App {
         self.spinner.glyph()
     }
 
-    /// Whether a *foreground* Jira request is in flight: the initial/reload/
-    /// project load, a server search, or a node child fetch. Background root
-    /// pagination is intentionally excluded — it fills the list incrementally
-    /// and must not keep the footer spinner running after the first page shows.
+    /// Monotonic wall-clock elapsed since launch, driving idle UI animations.
+    pub fn anim_elapsed(&self) -> std::time::Duration {
+        self.anim_clock
+    }
+
+    /// Whether the initial project load is still in flight at launch, so the UI
+    /// should show only the animated splash logo instead of the main view.
+    pub fn is_loading_splash(&self) -> bool {
+        self.awaiting_initial_load
+    }
+
+    /// Whether a Jira request is in flight that the user is waiting on: the
+    /// initial/reload/project load, a server search, a node child fetch, or a
+    /// lazy root-pagination page. The lazy page is included so the footer
+    /// spinner runs while "load more on scroll" fetches the next page.
     pub fn is_loading(&self) -> bool {
         self.active_load_request_id.is_some()
             || self.search_request_id.is_some()
+            || self.pending_roots_request_id.is_some()
             || self.filtered_tree.any_loading()
     }
 
@@ -1613,6 +689,7 @@ impl App {
             || self.board.v_scroll.is_animating()
             || self.board.h_scroll.is_animating()
             || self.is_loading()
+            || matches!(self.active_tab(), "Timeline" | "Filters")
     }
 
     pub fn take_effects(&mut self) -> Vec<AppEffect> {
@@ -1635,6 +712,14 @@ impl App {
                 parent_key,
                 result,
             } => self.apply_children_result(request_id, parent_key, result),
+            AppEvent::ChildrenBatchLoaded { results, logs } => {
+                self.apply_children_batch_result(results, logs)
+            }
+            AppEvent::BoardReloaded {
+                request_id,
+                board,
+                logs,
+            } => self.apply_board_reloaded(request_id, board, logs),
             AppEvent::SearchLoaded {
                 request_id,
                 term,
@@ -1727,7 +812,12 @@ impl App {
         }
     }
 
-    fn queue_jira_load(&mut self, purpose: JiraLoadPurpose, credentials: JiraCredentials) {
+    fn queue_jira_load(
+        &mut self,
+        purpose: JiraLoadPurpose,
+        credentials: JiraCredentials,
+        root_max_results: u32,
+    ) {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.active_load_request_id = Some(request_id);
@@ -1743,12 +833,14 @@ impl App {
         self.soft_reload_parents.clear();
         self.reload_root_ids = None;
         self.pending_reload_seamless = false;
+        self.reload_children_buffer.clear();
         self.filtered_tree.set_flat(false);
         self.pending_effects.push(AppEffect::LoadJiraProject {
             request_id,
             purpose,
             credentials,
             fields: self.current_fields_param(),
+            root_max_results,
         });
     }
 
@@ -1778,25 +870,35 @@ impl App {
             return;
         }
         self.active_load_request_id = None;
+        if matches!(purpose, JiraLoadPurpose::Initial) {
+            self.awaiting_initial_load = false;
+        }
 
         self.command_log.extend(result.logs);
 
-        if let Ok(fields) = result.fields {
-            self.apply_available_columns(fields);
-        } else {
-            self.notifications.push(Notification::error(
-                "Jira fields not loaded",
-                "Issue list is using built-in columns.",
-            ));
-        }
+        // A list reload (Shift+R on the List tab) refreshes only the issue tree;
+        // the board, projects, users, and field metadata are not refetched, so
+        // we must not apply (empty) placeholders for them here.
+        let list_only = matches!(purpose, JiraLoadPurpose::Reload);
 
-        if let Ok(projects) = result.projects {
-            self.projects = projects;
-        } else {
-            self.notifications.push(Notification::error(
-                "Jira projects not loaded",
-                "Project switcher is unavailable until reload succeeds.",
-            ));
+        if !list_only {
+            if let Ok(fields) = result.fields {
+                self.apply_available_columns(fields);
+            } else {
+                self.notifications.push(Notification::error(
+                    "Jira fields not loaded",
+                    "Issue list is using built-in columns.",
+                ));
+            }
+
+            if let Ok(projects) = result.projects {
+                self.projects = projects;
+            } else {
+                self.notifications.push(Notification::error(
+                    "Jira projects not loaded",
+                    "Project switcher is unavailable until reload succeeds.",
+                ));
+            }
         }
 
         let users = result.users;
@@ -1805,24 +907,26 @@ impl App {
         match result.issues {
             Ok(issues) => {
                 let fallback_board_issues = issues.clone();
-                if let Ok(users) = users {
-                    self.users = users;
-                } else {
-                    self.users.clear();
-                    self.notifications.push(Notification::error(
-                        "Jira users not loaded",
-                        "Assignee selector is unavailable until reload succeeds.",
-                    ));
-                }
+                if !list_only {
+                    if let Ok(users) = users {
+                        self.users = users;
+                    } else {
+                        self.users.clear();
+                        self.notifications.push(Notification::error(
+                            "Jira users not loaded",
+                            "Assignee selector is unavailable until reload succeeds.",
+                        ));
+                    }
 
-                if let Ok(current_user) = current_user {
-                    self.current_user = Some(current_user);
-                } else {
-                    self.current_user = None;
-                    self.notifications.push(Notification::error(
-                        "Current Jira user not loaded",
-                        "Assign-to-me shortcut is unavailable until reload succeeds.",
-                    ));
+                    if let Ok(current_user) = current_user {
+                        self.current_user = Some(current_user);
+                    } else {
+                        self.current_user = None;
+                        self.notifications.push(Notification::error(
+                            "Current Jira user not loaded",
+                            "Assign-to-me shortcut is unavailable until reload succeeds.",
+                        ));
+                    }
                 }
 
                 self.credentials = Some(credentials);
@@ -1838,30 +942,33 @@ impl App {
                     self.filtered_tree
                         .set_items(roots, &self.expansion_to_restore);
                     self.next_root_page_token = result.next_page_token;
-                    self.maybe_queue_next_root_page();
+                    // Lazy paging: the next page is pulled in on scroll
+                    // (`maybe_prefetch_more_roots`), not eagerly up front.
                     // Re-open and re-fetch any roots whose expansion is being
                     // restored; nested levels follow as their children arrive.
                     self.drive_expansion_restore();
                 }
-                match board {
-                    Ok(mut board) => {
-                        normalize_board_user_fields(
-                            &mut board,
-                            &self.users,
-                            self.current_user.as_ref(),
-                        );
-                        merge_board_issue_fields(&mut board, &fallback_board_issues);
-                        self.board.set_data(board);
-                    }
-                    Err(error) => {
-                        let message = error.0;
-                        self.board
-                            .set_data(BoardData::from_issues(fallback_board_issues));
-                        self.board.set_error(message.clone());
-                        self.notifications.push(Notification::error(
-                            "Jira board not loaded",
-                            "Board tab is grouped by issue status until the board endpoint succeeds.",
-                        ));
+                if !list_only {
+                    match board {
+                        Ok(mut board) => {
+                            normalize_board_user_fields(
+                                &mut board,
+                                &self.users,
+                                self.current_user.as_ref(),
+                            );
+                            merge_board_issue_fields(&mut board, &fallback_board_issues);
+                            self.board.set_data(board);
+                        }
+                        Err(error) => {
+                            let message = error.0;
+                            self.board
+                                .set_data(BoardData::from_issues(fallback_board_issues));
+                            self.board.set_error(message.clone());
+                            self.notifications.push(Notification::error(
+                                "Jira board not loaded",
+                                "Board tab is grouped by issue status until the board endpoint succeeds.",
+                            ));
+                        }
                     }
                 }
                 self.screen = Screen::Main;
@@ -1879,7 +986,7 @@ impl App {
                 };
             }
             Err(error) => {
-                if let Ok(board) = board {
+                if !list_only && let Ok(board) = board {
                     self.board.set_data(board);
                 }
                 self.status = error.0;
@@ -1887,251 +994,31 @@ impl App {
         }
     }
 
-    /// Queues the next page of root issues if one is pending and no root-page
-    /// load is already in flight. Browsing only.
-    fn maybe_queue_next_root_page(&mut self) {
-        if self.pending_roots_request_id.is_some() || self.view != ListView::Browse {
-            return;
-        }
-        let Some(token) = self.next_root_page_token.clone() else {
-            return;
-        };
-        let Some(credentials) = self.credentials.clone() else {
-            return;
-        };
-        let request_id = self.next_request_id();
-        self.pending_roots_request_id = Some(request_id);
-        self.pending_effects.push(AppEffect::LoadMoreRoots {
-            request_id,
-            credentials,
-            fields: self.current_fields_param(),
-            page_token: token,
-        });
-    }
-
-    /// Applies the first root page of a seamless (in-place) reload: merges the
-    /// fresh roots without tearing the tree down, kicks off paging for the rest,
-    /// and starts background refreshes of the previously-expanded subtrees. The
-    /// selection, scroll, and expansion stay exactly where they were.
-    fn begin_seamless_reload(&mut self, roots: Vec<TreeItem>, next_token: Option<String>) {
-        let mut seen: std::collections::HashSet<String> =
-            roots.iter().map(|item| item.id.clone()).collect();
-        self.filtered_tree.merge_root_items(roots);
-        self.next_root_page_token = next_token;
-        if self.next_root_page_token.is_some() {
-            // More pages coming: hold the accumulator and prune once they land.
-            self.reload_root_ids = Some(std::mem::take(&mut seen));
-            self.maybe_queue_next_root_page();
-        } else {
-            // Single page: prune any roots deleted server-side right away.
-            self.filtered_tree.retain_roots(&seen);
-            self.reload_root_ids = None;
-        }
-
-        // Refresh each previously-expanded subtree in place. The stale children
-        // stay visible (greyed) until the fresh set arrives.
-        let expanded = std::mem::take(&mut self.expansion_to_restore);
-        for parent in self.filtered_tree.begin_soft_reload(&expanded) {
-            self.soft_reload_parents.insert(parent.clone());
-            self.request_children(parent);
-        }
-    }
-
-    fn apply_roots_page_result(&mut self, request_id: u64, result: JiraLoadResult) {
-        self.command_log.extend(result.logs);
-        if self.pending_roots_request_id != Some(request_id) {
-            // Superseded by a newer load (reload, project switch, or search).
-            return;
-        }
-        self.pending_roots_request_id = None;
-
-        match result.issues {
-            Ok(issues) => {
-                let items = tree_items_from_issues(issues);
-                if self.reload_root_ids.is_some() {
-                    // Seamless reload paging: merge in place and accumulate ids.
-                    if let Some(seen) = self.reload_root_ids.as_mut() {
-                        seen.extend(items.iter().map(|item| item.id.clone()));
-                    }
-                    self.filtered_tree.merge_root_items(items);
-                    self.next_root_page_token = result.next_page_token;
-                    if self.next_root_page_token.is_some() {
-                        self.maybe_queue_next_root_page();
-                    } else if let Some(seen) = self.reload_root_ids.take() {
-                        // Final page: prune roots deleted server-side.
-                        self.filtered_tree.retain_roots(&seen);
-                    }
-                } else {
-                    if self.view == ListView::Browse {
-                        self.filtered_tree.append_items(items);
-                    }
-                    self.next_root_page_token = result.next_page_token;
-                    self.maybe_queue_next_root_page();
-                }
-            }
-            Err(error) => {
-                self.next_root_page_token = None;
-                self.reload_root_ids = None;
-                self.notifications
-                    .push(Notification::error("Could not load more issues", error.0));
-            }
-        }
-    }
-
-    fn request_children(&mut self, parent_key: String) {
-        let Some(credentials) = self.credentials.clone() else {
-            return;
-        };
-        let request_id = self.next_request_id();
-        self.pending_child_requests
-            .insert(parent_key.clone(), request_id);
-        self.pending_effects.push(AppEffect::LoadChildren {
-            request_id,
-            credentials,
-            parent_key,
-            fields: self.current_fields_param(),
-        });
-    }
-
-    /// Removes `parent_key` from the restore set once its children have arrived
-    /// (or failed), so the restoration is considered complete for that node.
-    fn parent_key_done_restoring(&mut self, parent_key: &str) {
-        self.expansion_to_restore.remove(parent_key);
-    }
-
-    /// Advances expansion restoration one step: marks every present node in the
-    /// restore set that still needs its children (`NotLoaded`) as loading, and
-    /// fires a child fetch for each — in parallel. Re-invoked after each child
-    /// batch arrives so deeper levels restore as they reappear. No-op when the
-    /// restore set is empty.
-    fn drive_expansion_restore(&mut self) {
-        if !self.expansion_to_restore.is_empty() {
-            // Take the set out to avoid borrowing `self` twice; the retain below
-            // reinstates whatever still needs restoring.
-            let restore = std::mem::take(&mut self.expansion_to_restore);
-            let to_fetch = self.filtered_tree.nodes_needing_child_reload(&restore);
-            for parent_key in to_fetch {
-                self.request_children(parent_key);
-            }
-            // Settle the set: drop ids that are present but no longer awaiting
-            // work (already loaded/reopened). Keep ids still in flight and ids
-            // not yet materialized — deeper levels appear once their parent's
-            // children load.
-            self.expansion_to_restore = restore;
-            self.expansion_to_restore.retain(|id| {
-                !self.filtered_tree.contains_item(id)
-                    || self.pending_child_requests.contains_key(id.as_str())
-            });
-        }
-    }
-
-    fn apply_children_result(
+    /// Applies a board-only reload: refreshes the board without touching the
+    /// list view, its selection, or its paging state.
+    fn apply_board_reloaded(
         &mut self,
         request_id: u64,
-        parent_key: String,
-        result: JiraLoadResult,
+        board: Result<BoardData, JiraError>,
+        logs: Vec<CommandLogEntry>,
     ) {
-        self.command_log.extend(result.logs);
-        if self.pending_child_requests.get(parent_key.as_str()) != Some(&request_id) {
-            // The node was collapsed/reloaded, or a newer request superseded this.
+        if !self.is_current_load(request_id) {
             return;
         }
-        self.pending_child_requests.remove(parent_key.as_str());
-
-        // A seamless reload refreshes this subtree in place: swap the stale
-        // children for the fresh set without collapsing or moving the view.
-        if self.soft_reload_parents.remove(&parent_key) {
-            match result.issues {
-                Ok(issues) => {
-                    self.filtered_tree
-                        .replace_children(&parent_key, tree_items_from_issues(issues));
-                }
-                Err(error) => {
-                    // Keep the stale subtree on screen; just clear the spinner.
-                    self.filtered_tree.mark_children_loaded(&parent_key);
-                    self.notifications.push(Notification::error(
-                        "Could not refresh child issues",
-                        error.0,
-                    ));
-                }
-            }
-            return;
-        }
-
-        match result.issues {
-            Ok(issues) => {
-                self.filtered_tree
-                    .add_children(&parent_key, tree_items_from_issues(issues));
-                // Newly-arrived children may themselves be nodes whose expansion
-                // is being restored; fetch and re-open them too.
-                self.parent_key_done_restoring(&parent_key);
-                self.drive_expansion_restore();
+        self.active_load_request_id = None;
+        self.command_log.extend(logs);
+        match board {
+            Ok(mut board) => {
+                normalize_board_user_fields(&mut board, &self.users, self.current_user.as_ref());
+                self.board.set_data(board);
+                self.status = String::from("Jira board loaded.");
             }
             Err(error) => {
-                self.filtered_tree.mark_children_failed(&parent_key);
-                self.parent_key_done_restoring(&parent_key);
-                self.notifications
-                    .push(Notification::error("Could not load child issues", error.0));
-            }
-        }
-    }
-
-    /// Starts a server-side search for `term`, or restores the browse view when
-    /// `term` is empty.
-    fn run_search(&mut self, term: String) {
-        if term.trim().is_empty() {
-            self.restore_browse_view();
-            return;
-        }
-        let Some(credentials) = self.credentials.clone() else {
-            return;
-        };
-        // Entering search abandons any in-flight browse expansion restore and
-        // lazy child loads; their results must not touch the flat search view.
-        self.pending_child_requests.clear();
-        self.expansion_to_restore.clear();
-        // Likewise drop any in-flight seamless-reload paging/refresh so a late
-        // root page or child batch can't merge into the search results.
-        self.pending_roots_request_id = None;
-        self.next_root_page_token = None;
-        self.reload_root_ids = None;
-        self.soft_reload_parents.clear();
-        self.pending_reload_seamless = false;
-        self.view = ListView::Search(term.clone());
-        let request_id = self.next_request_id();
-        self.search_request_id = Some(request_id);
-        self.status = format!("Searching for \"{term}\"");
-        self.pending_effects.push(AppEffect::SearchIssues {
-            request_id,
-            credentials,
-            term,
-            fields: self.current_fields_param(),
-        });
-    }
-
-    fn apply_search_result(&mut self, request_id: u64, term: String, result: JiraLoadResult) {
-        self.command_log.extend(result.logs);
-        // Only the most recent search is applied (debounce-by-latest), and only
-        // while still searching for the same term.
-        if self.search_request_id != Some(request_id) || !self.view.is_searching_for(&term) {
-            return;
-        }
-        self.search_request_id = None;
-
-        match result.issues {
-            Ok(issues) => {
-                self.filtered_tree.set_flat(true);
-                self.filtered_tree.set_items(
-                    tree_items_from_issues(issues),
-                    &std::collections::HashSet::new(),
-                );
-                // Highlights now follow the term that produced these results.
-                self.applied_search_term = Some(term.clone());
-                let count = self.filtered_tree.items().len();
-                self.status = format!("{count} result(s) for \"{term}\".");
-            }
-            Err(error) => {
-                self.status = error.0;
+                self.board.set_error(error.0);
+                self.notifications.push(Notification::error(
+                    "Jira board not loaded",
+                    "Board endpoint failed; the previous board is still shown.",
+                ));
             }
         }
     }
@@ -2144,27 +1031,17 @@ impl App {
                 let Some(credentials) = self.credentials.clone() else {
                     return;
                 };
-                self.queue_jira_load(JiraLoadPurpose::Reload, credentials);
+                self.queue_jira_load(
+                    JiraLoadPurpose::Reload,
+                    credentials,
+                    crate::services::jira::ROOT_PAGE_SIZE,
+                );
             }
             ListView::Search(term) => {
                 let term = term.clone();
                 self.run_search(term);
             }
         }
-    }
-    /// Reloads the browse tree from scratch after leaving search.
-    fn restore_browse_view(&mut self) {
-        if self.view == ListView::Browse {
-            return;
-        }
-        self.view = ListView::Browse;
-        self.search_request_id = None;
-        self.applied_search_term = None;
-        let Some(credentials) = self.credentials.clone() else {
-            return;
-        };
-        self.status = String::from("Loading Jira issues");
-        self.queue_jira_load(JiraLoadPurpose::Reload, credentials);
     }
 
     fn apply_available_columns(&mut self, fields: Vec<FieldSummary>) {
@@ -2423,7 +1300,7 @@ impl App {
     }
 
     pub fn is_help_open(&self) -> bool {
-        self.help_open
+        matches!(self.modal, Some(ModalState::Help { .. }))
     }
 
     pub fn is_project_dropdown_filter_focused(&self) -> bool {
@@ -2453,16 +1330,88 @@ impl App {
         &self.command_log
     }
 
+    pub fn command_log_follows_tail(&self) -> bool {
+        self.command_log_view.follow.get()
+    }
+
+    pub fn command_log_scroll(&self) -> usize {
+        self.command_log_view.offset.get()
+    }
+
+    /// Records the wrapped-line total, viewport height, and clamped scroll
+    /// offset from the latest render so keyboard/mouse scrolling can clamp
+    /// without knowing the dialog width. Leaves `follow` untouched.
+    pub fn cache_command_log_layout(&self, scroll: usize, total: usize, viewport: usize) {
+        self.command_log_view.offset.set(scroll);
+        self.command_log_view.last_total.set(total);
+        self.command_log_view.last_viewport.set(viewport);
+    }
+
+    fn command_log_max_scroll(&self) -> usize {
+        let viewport = self.command_log_view.last_viewport.get().max(1);
+        self.command_log_view
+            .last_total
+            .get()
+            .saturating_sub(viewport)
+    }
+
+    /// Scrolls the command log by `delta` wrapped lines, leaving follow mode
+    /// when scrolling up and re-entering it once the bottom is reached again.
+    pub(crate) fn scroll_command_log(&mut self, delta: isize) {
+        self.command_log_view.go_to_start_pending.set(false);
+        let max_scroll = self.command_log_max_scroll();
+        let current = if self.command_log_view.follow.get() {
+            max_scroll
+        } else {
+            self.command_log_view.offset.get().min(max_scroll)
+        };
+        let next = (current as isize + delta).clamp(0, max_scroll as isize) as usize;
+        self.command_log_view.offset.set(next);
+        self.command_log_view.follow.set(next >= max_scroll);
+    }
+
+    pub(crate) fn page_command_log(&mut self, direction: isize) {
+        let viewport = self.command_log_view.last_viewport.get().max(1) as isize;
+        self.scroll_command_log(direction * viewport);
+    }
+
+    /// Scrolls by half a viewport (Ctrl+U / Ctrl+D).
+    pub(crate) fn half_page_command_log(&mut self, direction: isize) {
+        let half = (self.command_log_view.last_viewport.get().max(2) / 2) as isize;
+        self.scroll_command_log(direction * half);
+    }
+
+    pub(crate) fn command_log_to_start(&mut self) {
+        self.command_log_view.go_to_start_pending.set(false);
+        self.command_log_view.follow.set(false);
+        self.command_log_view.offset.set(0);
+    }
+
+    pub(crate) fn command_log_to_end(&mut self) {
+        self.command_log_view.go_to_start_pending.set(false);
+        self.command_log_view.follow.set(true);
+    }
+
+    /// Handles a `g` keypress: the first arms the prefix, the second (`gg`)
+    /// jumps to the top.
+    pub(crate) fn command_log_arm_go_to_start(&mut self) {
+        if self.command_log_view.go_to_start_pending.get() {
+            self.command_log_to_start();
+        } else {
+            self.command_log_view.go_to_start_pending.set(true);
+        }
+    }
+
     pub fn notifications(&self) -> &[Notification] {
         &self.notifications
     }
 
     pub fn is_command_log_open(&self) -> bool {
-        self.command_log_open
+        matches!(self.modal, Some(ModalState::CommandLog))
     }
 
     pub fn is_sprint_details_open(&self) -> bool {
-        self.sprint_details_open
+        matches!(self.modal, Some(ModalState::SprintDetails))
     }
 
     pub fn status(&self) -> &str {
@@ -2519,7 +1468,7 @@ impl App {
             return;
         }
 
-        if self.help_open {
+        if self.is_help_open() {
             self.handle_help_key(key, keybindings);
             return;
         }
@@ -2606,10 +1555,10 @@ impl App {
 
         match self.screen {
             Screen::Setup => self.dispatch_setup(keybindings.setup_action_for(key)),
-            Screen::Main if self.command_log_open => {
+            Screen::Main if self.is_command_log_open() => {
                 self.dispatch(keybindings.command_log_action_for(key))
             }
-            Screen::Main if self.sprint_details_open => {
+            Screen::Main if self.is_sprint_details_open() => {
                 self.dispatch(keybindings.sprint_details_action_for(key))
             }
             Screen::Main if self.project_dropdown.is_some() => {
@@ -2721,7 +1670,7 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect, keybindings: &KeyBindings) {
-        if self.help_open {
+        if self.is_help_open() {
             let scroll_delta = match mouse.kind {
                 MouseEventKind::ScrollUp => Some(-1),
                 MouseEventKind::ScrollDown => Some(1),
@@ -2737,10 +1686,15 @@ impl App {
             }
             return;
         }
-        if self.command_log_open {
+        if self.is_command_log_open() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_command_log(-3),
+                MouseEventKind::ScrollDown => self.scroll_command_log(3),
+                _ => {}
+            }
             return;
         }
-        if self.sprint_details_open {
+        if self.is_sprint_details_open() {
             return;
         }
         // Shift + vertical wheel and native horizontal wheel both scroll left/
@@ -2901,6 +1855,9 @@ impl App {
         };
         if let Some(delta) = scroll_delta {
             self.filtered_tree.scroll_viewport(delta, viewport_height);
+            // Wheeling toward the bottom lazily pulls the next page; the wheel
+            // moves the viewport, not the selection, so pass the real height.
+            self.maybe_prefetch_more_roots(viewport_height);
             return;
         }
         if !is_left_click {
@@ -3336,23 +2293,37 @@ impl App {
             crate::keymap::HelpDialogAction::Down => self.move_help_selection(1, item_count),
             crate::keymap::HelpDialogAction::PageUp => self.move_help_selection(-4, item_count),
             crate::keymap::HelpDialogAction::PageDown => self.move_help_selection(4, item_count),
-            crate::keymap::HelpDialogAction::First => self.help_selected = 0,
+            crate::keymap::HelpDialogAction::First => {
+                if let Some(selected) = self.help_selected_mut() {
+                    *selected = 0;
+                }
+            }
             crate::keymap::HelpDialogAction::Last => {
-                self.help_selected = item_count.saturating_sub(1)
+                if let Some(selected) = self.help_selected_mut() {
+                    *selected = item_count.saturating_sub(1);
+                }
             }
             crate::keymap::HelpDialogAction::None => {}
         }
     }
 
+    /// Mutable handle to the help dialog's selection index, when help is open.
+    fn help_selected_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.modal {
+            Some(ModalState::Help { selected }) => Some(selected),
+            _ => None,
+        }
+    }
+
     fn move_help_selection(&mut self, delta: isize, item_count: usize) {
+        let Some(selected) = self.help_selected_mut() else {
+            return;
+        };
         if item_count == 0 {
-            self.help_selected = 0;
+            *selected = 0;
             return;
         }
-        self.help_selected = self
-            .help_selected
-            .saturating_add_signed(delta)
-            .min(item_count - 1);
+        *selected = selected.saturating_add_signed(delta).min(item_count - 1);
     }
 
     fn dropdown_key_action(
@@ -3460,6 +2431,12 @@ impl App {
             Action::ThemeDropdown(action) => self.dispatch_theme_dropdown(action),
             Action::AssigneeDropdown(action) => self.dispatch_assignee_dropdown(action),
             Action::CloseCommandLog => self.close_dialog(DialogKind::CommandLog),
+            Action::ScrollCommandLog(delta) => self.scroll_command_log(delta),
+            Action::PageCommandLog(direction) => self.page_command_log(direction),
+            Action::HalfPageCommandLog(direction) => self.half_page_command_log(direction),
+            Action::CommandLogToStart => self.command_log_to_start(),
+            Action::CommandLogToStartPrefix => self.command_log_arm_go_to_start(),
+            Action::CommandLogToEnd => self.command_log_to_end(),
             Action::Quit => self.running = false,
             Action::None => self.filtered_tree.clear_transient_input(),
         }
@@ -3581,6 +2558,9 @@ impl App {
         if can_dispatch && let Some(event) = self.filtered_tree.dispatch(action) {
             self.handle_jira_filtered_tree_event(event);
         }
+        // Navigating toward the bottom of the list lazily pulls the next page.
+        // Height 0: keyboard nav moves the selection, which is the bottom signal.
+        self.maybe_prefetch_more_roots(0);
     }
 
     fn handle_jira_filtered_tree_event(&mut self, event: JiraFilteredTreeEvent) {
@@ -3608,39 +2588,33 @@ impl App {
     }
 
     fn open_dialog(&mut self, dialog: DialogKind) {
+        // Opening a non-help dialog also dismisses any open dropdown; help opens
+        // on top of the current view (dropdowns aside) like before. Replacing the
+        // single `modal` slot dismisses any other dialog automatically.
         if !matches!(dialog, DialogKind::Help) {
-            self.close_overlays();
-        } else {
-            self.command_log_open = false;
-            self.sprint_details_open = false;
+            self.close_dropdowns();
         }
-        match dialog {
-            DialogKind::CommandLog => self.command_log_open = true,
-            DialogKind::SprintDetails => self.sprint_details_open = true,
-            DialogKind::Help => {
-                self.help_open = true;
-                self.reset_help_selection();
-            }
+        self.modal = Some(match dialog {
+            DialogKind::CommandLog => ModalState::CommandLog,
+            DialogKind::SprintDetails => ModalState::SprintDetails,
+            DialogKind::Help => ModalState::Help { selected: 0 },
+        });
+        if matches!(dialog, DialogKind::CommandLog) {
+            // Open scrolled to the latest entry at the bottom.
+            self.command_log_view.follow.set(true);
+            self.command_log_view.offset.set(0);
+            self.command_log_view.go_to_start_pending.set(false);
         }
     }
 
     fn close_dialog(&mut self, dialog: DialogKind) {
-        match dialog {
-            DialogKind::CommandLog => self.command_log_open = false,
-            DialogKind::SprintDetails => self.sprint_details_open = false,
-            DialogKind::Help => {
-                self.help_open = false;
-                self.reset_help_selection();
-            }
+        if self.is_dialog_open(dialog) {
+            self.modal = None;
         }
     }
 
     fn is_dialog_open(&self, dialog: DialogKind) -> bool {
-        match dialog {
-            DialogKind::CommandLog => self.command_log_open,
-            DialogKind::SprintDetails => self.sprint_details_open,
-            DialogKind::Help => self.help_open,
-        }
+        self.modal.as_ref().map(ModalState::kind) == Some(dialog)
     }
 
     fn toggle_dropdown(&mut self, dropdown: DropdownKind) {
@@ -3697,10 +2671,7 @@ impl App {
     }
 
     fn close_dialogs(&mut self) {
-        self.command_log_open = false;
-        self.sprint_details_open = false;
-        self.help_open = false;
-        self.reset_help_selection();
+        self.modal = None;
     }
 
     fn open_quick_switcher(&mut self) {
@@ -4090,7 +3061,11 @@ impl App {
 
         credentials.default_project = project.key.clone();
         self.status = format!("Loading Jira project {}", project.key);
-        self.queue_jira_load(JiraLoadPurpose::SwitchProject, credentials);
+        self.queue_jira_load(
+            JiraLoadPurpose::SwitchProject,
+            credentials,
+            crate::services::jira::ROOT_PAGE_SIZE,
+        );
     }
 
     fn submit_setup(&mut self) {
@@ -4102,58 +3077,11 @@ impl App {
         self.status = String::from("Loading Jira issues");
         self.credentials = Some(credentials.clone());
         self.filtered_tree.set_jira_site(credentials.site.clone());
-        self.queue_jira_load(JiraLoadPurpose::Setup, credentials);
-    }
-
-    fn reload_list(&mut self) {
-        if !self.tabs.is_active(APP_TABS, "List") {
-            return;
-        }
-
-        let Some(credentials) = self.credentials.clone() else {
-            self.status = String::from("No Jira credentials available for reload.");
-            return;
-        };
-
-        // A seamless reload refreshes the existing tree in place rather than
-        // tearing it down, so the selection, scroll position, and expanded
-        // subtrees stay put — no anchoring to the root, no jump to the top.
-        // Capture the currently-expanded nodes so their children are refreshed
-        // in the background. Must be set after queue_jira_load, which clears the
-        // restore set for non-reload loads.
-        let expanded = self.filtered_tree.expanded_item_ids().clone();
-        self.status = String::from("Reloading Jira issues");
-        self.queue_jira_load(JiraLoadPurpose::Reload, credentials);
-        self.expansion_to_restore = expanded;
-        self.pending_reload_seamless = true;
-    }
-
-    /// Refreshes the children of the selected tree node in place, keeping the
-    /// stale subtree visible (greyed) until the fresh set arrives so the node
-    /// never collapses or jumps. Does nothing when the selection has no loaded
-    /// children (or there is no selection); only `Shift+R` reloads the whole
-    /// list.
-    fn reload_node(&mut self) {
-        if !self.tabs.is_active(APP_TABS, "List") || self.view != ListView::Browse {
-            return;
-        }
-        let Some(node_id) = self.filtered_tree.selected_item_id().map(str::to_owned) else {
-            return;
-        };
-        // Refresh the node and any open descendant subtrees in place, in
-        // parallel. `begin_soft_reload` marks each as loading without dropping
-        // its children and returns the ids to refetch.
-        let mut targets = self.filtered_tree.expanded_descendant_ids(&node_id);
-        targets.insert(node_id.clone());
-        let to_fetch = self.filtered_tree.begin_soft_reload(&targets);
-        if to_fetch.is_empty() {
-            return;
-        }
-        self.status = format!("Reloading {node_id}");
-        for parent in to_fetch {
-            self.soft_reload_parents.insert(parent.clone());
-            self.request_children(parent);
-        }
+        self.queue_jira_load(
+            JiraLoadPurpose::Setup,
+            credentials,
+            crate::services::jira::ROOT_PAGE_SIZE,
+        );
     }
 
     fn reload_board(&mut self) {
@@ -4167,7 +3095,12 @@ impl App {
         };
 
         self.status = String::from("Reloading Jira board...");
-        self.queue_jira_load(JiraLoadPurpose::ReloadBoard, credentials);
+        let request_id = self.next_request_id();
+        self.active_load_request_id = Some(request_id);
+        self.pending_effects.push(AppEffect::ReloadBoardOnly {
+            request_id,
+            credentials,
+        });
     }
 }
 

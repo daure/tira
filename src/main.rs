@@ -76,6 +76,7 @@ fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
                 purpose,
                 credentials,
                 fields,
+                root_max_results,
             } => {
                 let tx = event_tx.clone();
                 thread::spawn(move || {
@@ -90,7 +91,8 @@ fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
                         return;
                     }
 
-                    let result = load_jira_project_data(&credentials, &fields);
+                    let result =
+                        load_jira_project_data(&credentials, &fields, purpose, root_max_results);
                     if matches!(purpose, JiraLoadPurpose::SwitchProject)
                         && result.issues.is_ok()
                         && let Err(error) = config::save_jira_credentials(&credentials)
@@ -111,16 +113,35 @@ fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
                     });
                 });
             }
+            AppEffect::ReloadBoardOnly {
+                request_id,
+                credentials,
+            } => {
+                let tx = event_tx.clone();
+                thread::spawn(move || {
+                    let board = jira::load_project_board(&credentials);
+                    let _ = tx.send(AppEvent::BoardReloaded {
+                        request_id,
+                        board: board.board,
+                        logs: board.logs,
+                    });
+                });
+            }
             AppEffect::LoadMoreRoots {
                 request_id,
                 credentials,
                 fields,
                 page_token,
+                max_results,
             } => {
                 let tx = event_tx.clone();
                 thread::spawn(move || {
-                    let result =
-                        jira::load_root_issues(&credentials, &fields, Some(page_token.as_str()));
+                    let result = jira::load_root_issues(
+                        &credentials,
+                        &fields,
+                        Some(page_token.as_str()),
+                        max_results,
+                    );
                     let _ = tx.send(AppEvent::RootsPageLoaded { request_id, result });
                 });
             }
@@ -138,6 +159,31 @@ fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
                         request_id,
                         parent_key,
                         result,
+                    });
+                });
+            }
+            AppEffect::LoadChildrenBatch {
+                credentials,
+                parents,
+                fields,
+            } => {
+                let tx = event_tx.clone();
+                thread::spawn(move || {
+                    let keys = parents
+                        .iter()
+                        .map(|(key, _)| key.clone())
+                        .collect::<Vec<_>>();
+                    let batch = jira::load_children_batch(&credentials, &keys, &fields);
+                    // `groups` is ordered the same as `keys` (and thus
+                    // `parents`), so zip positionally to attach request ids.
+                    let results = parents
+                        .into_iter()
+                        .zip(batch.groups)
+                        .map(|((key, request_id), (_group_key, issues))| (request_id, key, issues))
+                        .collect();
+                    let _ = tx.send(AppEvent::ChildrenBatchLoaded {
+                        results,
+                        logs: batch.logs,
                     });
                 });
             }
@@ -200,19 +246,40 @@ fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
 fn load_jira_project_data(
     credentials: &config::JiraCredentials,
     fields: &str,
+    purpose: JiraLoadPurpose,
+    root_max_results: u32,
 ) -> JiraProjectLoadResult {
+    let issues_credentials = credentials.clone();
+    let issues_fields = fields.to_owned();
+    let issues_handle = thread::spawn(move || {
+        jira::load_root_issues(&issues_credentials, &issues_fields, None, root_max_results)
+    });
+
+    // A list reload (Shift+R on the List tab) refreshes only the issue tree, so
+    // skip the board, projects, users, and field-metadata fetches entirely. The
+    // skipped fields are placeholders the reload path in `app` does not apply.
+    if matches!(purpose, JiraLoadPurpose::Reload) {
+        let issues = issues_handle.join().expect("jira issues thread panicked");
+        return JiraProjectLoadResult {
+            logs: issues.logs,
+            fields: Ok(Vec::new()),
+            board: Err(jira::JiraError(String::from("skipped"))),
+            projects: Ok(Vec::new()),
+            users: Ok(Vec::new()),
+            current_user: Err(jira::JiraError(String::from("skipped"))),
+            issues: issues.issues,
+            next_page_token: issues.next_page_token,
+        };
+    }
+
     let fields_credentials = credentials.clone();
     let projects_credentials = credentials.clone();
     let users_credentials = credentials.clone();
-    let issues_credentials = credentials.clone();
     let board_credentials = credentials.clone();
-    let issues_fields = fields.to_owned();
 
     let fields_handle = thread::spawn(move || jira::load_issue_fields(&fields_credentials));
     let projects_handle = thread::spawn(move || jira::load_projects(&projects_credentials));
     let users_handle = thread::spawn(move || jira::load_assignable_users(&users_credentials));
-    let issues_handle =
-        thread::spawn(move || jira::load_root_issues(&issues_credentials, &issues_fields, None));
     let board_handle = thread::spawn(move || jira::load_project_board(&board_credentials));
 
     let field_summaries = fields_handle.join().expect("jira fields thread panicked");
@@ -224,7 +291,6 @@ fn load_jira_project_data(
     let board = board_handle.join().expect("jira board thread panicked");
 
     let mut logs = vec![field_summaries.log.clone(), projects.log.clone()];
-    logs.extend(users.logs.clone());
     logs.extend(users.logs.clone());
     logs.extend(board.logs.clone());
     logs.extend(issues.logs.clone());

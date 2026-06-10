@@ -88,6 +88,45 @@ fn deliver_children(app: &mut App, parent: &str, children: Vec<IssueSummary>) {
     });
 }
 
+/// Drains the pending `LoadChildrenBatch` effect, returning its `(parent, id)` pairs.
+fn take_child_batch(app: &mut App) -> Vec<(String, u64)> {
+    app.take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            AppEffect::LoadChildrenBatch { parents, .. } => Some(parents),
+            _ => None,
+        })
+        .expect("expected LoadChildrenBatch effect")
+}
+
+/// Delivers batched children results for the given parent->children sets,
+/// matching each parent to the request id drained from the batch effect.
+fn deliver_child_batch(
+    app: &mut App,
+    parents: &[(String, u64)],
+    groups: Vec<(&str, Vec<IssueSummary>)>,
+) {
+    let results = groups
+        .into_iter()
+        .map(|(parent, children)| {
+            let request_id = parents
+                .iter()
+                .find(|(key, _)| key == parent)
+                .map(|(_, id)| *id)
+                .unwrap_or_else(|| panic!("batch missing parent {parent}"));
+            (
+                request_id,
+                parent.to_owned(),
+                Ok::<Vec<IssueSummary>, JiraError>(children),
+            )
+        })
+        .collect();
+    app.handle_event(AppEvent::ChildrenBatchLoaded {
+        results,
+        logs: Vec::new(),
+    });
+}
+
 /// Expands an epic and delivers its first child set, returning the app with the
 /// epic expanded and loaded.
 fn expand_and_load(
@@ -140,29 +179,25 @@ fn reload_node_refetches_children_of_selected_node() {
     assert!(rows[0].loading, "node shows loading indicator");
     assert!(rows[1].reloading, "stale child greyed while refreshing");
 
-    let request_id = app
-        .take_effects()
-        .iter()
-        .find_map(|effect| match effect {
-            AppEffect::LoadChildren {
-                request_id,
-                parent_key,
-                ..
-            } if parent_key == "KAN-1" => Some(*request_id),
-            _ => None,
-        })
-        .expect("expected reload LoadChildren effect");
+    let parents = take_child_batch(&mut app);
+    assert_eq!(
+        parents
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["KAN-1"],
+        "reload refetches the selected node"
+    );
 
     // Deliver fresh children.
-    app.handle_event(AppEvent::ChildrenLoaded {
-        request_id,
-        parent_key: String::from("KAN-1"),
-        result: JiraLoadResult {
-            issues: Ok(vec![child("KAN-3", "KAN-1"), child("KAN-4", "KAN-1")]),
-            next_page_token: None,
-            logs: Vec::new(),
-        },
-    });
+    deliver_child_batch(
+        &mut app,
+        &parents,
+        vec![(
+            "KAN-1",
+            vec![child("KAN-3", "KAN-1"), child("KAN-4", "KAN-1")],
+        )],
+    );
 
     let rows = app.visible_issue_rows();
     assert_eq!(rows.len(), 3, "refreshed children appear");
@@ -266,19 +301,28 @@ fn full_reload_restores_previously_expanded_nodes() {
         "KAN-1 expanded with a child"
     );
 
-    // Shift+R reloads the whole project.
+    // Shift+R reloads the whole project. The expanded subtree refreshes
+    // immediately, in parallel with the root query, so the child batch is
+    // queued alongside the root load rather than after its response.
     app.handle_key(
         KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
         &bindings,
     );
-    let request_id = app
-        .take_effects()
+    let effects = app.take_effects();
+    let request_id = effects
         .iter()
         .find_map(|effect| match effect {
             AppEffect::LoadJiraProject { request_id, .. } => Some(*request_id),
             _ => None,
         })
         .expect("expected full reload effect");
+    let parents = effects
+        .iter()
+        .find_map(|effect| match effect {
+            AppEffect::LoadChildrenBatch { parents, .. } => Some(parents.clone()),
+            _ => None,
+        })
+        .expect("expected child batch queued with the reload");
     app.handle_event(AppEvent::JiraProjectLoaded {
         request_id,
         purpose: JiraLoadPurpose::Reload,
@@ -309,36 +353,71 @@ fn full_reload_restores_previously_expanded_nodes() {
     assert!(rows[0].loading, "refreshing epic shows loading spinner");
     assert_eq!(app.issues()[rows[1].item_index].id, "KAN-2");
     assert!(rows[1].reloading, "stale child greyed while refreshing");
-    let child_loads: Vec<(u64, String)> = app
-        .take_effects()
-        .into_iter()
-        .filter_map(|effect| match effect {
-            AppEffect::LoadChildren {
-                request_id,
-                parent_key,
-                ..
-            } => Some((request_id, parent_key)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(child_loads.len(), 1, "only the expanded epic refetches");
-    assert_eq!(child_loads[0].1, "KAN-1");
+    assert_eq!(
+        parents
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["KAN-1"],
+        "only the expanded epic refetches"
+    );
 
     // Deliver KAN-1's children; it settles with the fresh child visible.
-    app.handle_event(AppEvent::ChildrenLoaded {
-        request_id: child_loads[0].0,
-        parent_key: String::from("KAN-1"),
-        result: JiraLoadResult {
-            issues: Ok(vec![child("KAN-2", "KAN-1")]),
-            next_page_token: None,
-            logs: Vec::new(),
-        },
-    });
+    deliver_child_batch(
+        &mut app,
+        &parents,
+        vec![("KAN-1", vec![child("KAN-2", "KAN-1")])],
+    );
     let rows = app.visible_issue_rows();
     assert_eq!(rows.len(), 3, "subtree intact after refresh");
     assert!(rows[0].expanded && !rows[0].loading);
     assert!(!rows[1].reloading, "child no longer greyed");
     assert_eq!(app.issues()[rows[1].item_index].id, "KAN-2");
+}
+
+#[test]
+fn full_reload_batches_all_expanded_nodes_into_one_query() {
+    let bindings = KeyBindings::default();
+    let mut app = loaded_app(vec![
+        issue_with_children("KAN-1", "Epic", "Epic", true),
+        issue_with_children("KAN-9", "Other epic", "Epic", true),
+    ]);
+    // Expand both sibling epics.
+    expand_and_load(&mut app, "KAN-1", vec![child("KAN-2", "KAN-1")], &bindings);
+    app.handle_key(key('j'), &bindings); // KAN-2
+    app.handle_key(key('j'), &bindings); // KAN-9
+    assert_eq!(app.selected_issue_key(), Some("KAN-9"));
+    expand_and_load(&mut app, "KAN-9", vec![child("KAN-10", "KAN-9")], &bindings);
+
+    // Full reload — the two expanded subtrees refresh immediately, in parallel
+    // with the root query, rather than waiting for the root response.
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+        &bindings,
+    );
+
+    // The two expanded subtrees refresh in a SINGLE batched query, not one
+    // request per node — this is the whole point of batching.
+    let effects = app.take_effects();
+    let singles = effects
+        .iter()
+        .filter(|effect| matches!(effect, AppEffect::LoadChildren { .. }))
+        .count();
+    let batches: Vec<&Vec<(String, u64)>> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            AppEffect::LoadChildrenBatch { parents, .. } => Some(parents),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(singles, 0, "no per-parent child loads");
+    assert_eq!(batches.len(), 1, "exactly one batched query for all nodes");
+    let names: std::collections::HashSet<&str> =
+        batches[0].iter().map(|(key, _)| key.as_str()).collect();
+    assert!(
+        names.contains("KAN-1") && names.contains("KAN-9"),
+        "the single batch covers both expanded nodes"
+    );
 }
 
 #[test]
@@ -366,19 +445,27 @@ fn full_reload_restores_nested_expanded_subtree_in_parallel() {
         "KAN-1 > KAN-2 > KAN-3 open"
     );
 
-    // Full reload.
+    // Full reload. The expanded subtrees refresh immediately, in parallel with
+    // the root query, so their child batch is queued alongside the root load.
     app.handle_key(
         KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
         &bindings,
     );
-    let request_id = app
-        .take_effects()
-        .into_iter()
+    let effects = app.take_effects();
+    let request_id = effects
+        .iter()
         .find_map(|effect| match effect {
-            AppEffect::LoadJiraProject { request_id, .. } => Some(request_id),
+            AppEffect::LoadJiraProject { request_id, .. } => Some(*request_id),
             _ => None,
         })
         .expect("expected full reload effect");
+    let parents = effects
+        .iter()
+        .find_map(|effect| match effect {
+            AppEffect::LoadChildrenBatch { parents, .. } => Some(parents.clone()),
+            _ => None,
+        })
+        .expect("expected child batch queued with the reload");
     app.handle_event(AppEvent::JiraProjectLoaded {
         request_id,
         purpose: JiraLoadPurpose::Reload,
@@ -395,44 +482,24 @@ fn full_reload_restores_nested_expanded_subtree_in_parallel() {
         },
     });
 
-    // Both expanded levels refresh in parallel: KAN-1 and KAN-2 refetch at once
-    // while their stale rows stay visible.
-    let mut child_loads: std::collections::HashMap<String, u64> = app
-        .take_effects()
-        .into_iter()
-        .filter_map(|effect| match effect {
-            AppEffect::LoadChildren {
-                request_id,
-                parent_key,
-                ..
-            } => Some((parent_key, request_id)),
-            _ => None,
-        })
-        .collect();
+    // Both expanded levels refresh together in one batched query: KAN-1 and
+    // KAN-2 refetch at once while their stale rows stay visible.
+    let names: std::collections::HashSet<&str> =
+        parents.iter().map(|(key, _)| key.as_str()).collect();
     assert!(
-        child_loads.contains_key("KAN-1") && child_loads.contains_key("KAN-2"),
-        "both expanded subtrees refresh in parallel"
+        names.contains("KAN-1") && names.contains("KAN-2"),
+        "both expanded subtrees refresh in one batch"
     );
 
     // Deliver both refreshes; each subtree swaps in place.
-    app.handle_event(AppEvent::ChildrenLoaded {
-        request_id: child_loads.remove("KAN-1").unwrap(),
-        parent_key: String::from("KAN-1"),
-        result: JiraLoadResult {
-            issues: Ok(vec![parent_child("KAN-2", "KAN-1")]),
-            next_page_token: None,
-            logs: Vec::new(),
-        },
-    });
-    app.handle_event(AppEvent::ChildrenLoaded {
-        request_id: child_loads.remove("KAN-2").unwrap(),
-        parent_key: String::from("KAN-2"),
-        result: JiraLoadResult {
-            issues: Ok(vec![child("KAN-3", "KAN-2")]),
-            next_page_token: None,
-            logs: Vec::new(),
-        },
-    });
+    deliver_child_batch(
+        &mut app,
+        &parents,
+        vec![
+            ("KAN-1", vec![parent_child("KAN-2", "KAN-1")]),
+            ("KAN-2", vec![child("KAN-3", "KAN-2")]),
+        ],
+    );
 
     let rows = app.visible_issue_rows();
     let ids: Vec<&str> = rows
@@ -446,6 +513,70 @@ fn full_reload_restores_nested_expanded_subtree_in_parallel() {
     );
     assert!(rows.iter().all(|row| !row.loading), "no spinners left");
     assert!(rows.iter().all(|row| !row.reloading), "nothing left greyed");
+}
+
+#[test]
+fn full_reload_holds_subtree_dimmed_until_roots_land_when_children_arrive_first() {
+    let bindings = KeyBindings::default();
+    let mut app = loaded_app(vec![issue_with_children("KAN-1", "Epic", "Epic", true)]);
+    expand_and_load(&mut app, "KAN-1", vec![child("KAN-2", "KAN-1")], &bindings);
+
+    // Shift+R fires the root query and the expanded subtree's child batch in
+    // parallel; capture both.
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+        &bindings,
+    );
+    let effects = app.take_effects();
+    let request_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            AppEffect::LoadJiraProject { request_id, .. } => Some(*request_id),
+            _ => None,
+        })
+        .expect("expected full reload effect");
+    let parents = effects
+        .iter()
+        .find_map(|effect| match effect {
+            AppEffect::LoadChildrenBatch { parents, .. } => Some(parents.clone()),
+            _ => None,
+        })
+        .expect("expected child batch queued with the reload");
+
+    // The child batch returns BEFORE the roots. The subtree must stay dimmed —
+    // its result is held back so the reload settles as one unit, not flicker.
+    deliver_child_batch(
+        &mut app,
+        &parents,
+        vec![("KAN-1", vec![child("KAN-2", "KAN-1")])],
+    );
+    let rows = app.visible_issue_rows();
+    assert_eq!(rows.len(), 2, "subtree stays visible while held");
+    assert!(
+        rows[0].loading,
+        "node stays dimmed until the root query lands"
+    );
+
+    // The roots land: the held children apply and everything settles together.
+    app.handle_event(AppEvent::JiraProjectLoaded {
+        request_id,
+        purpose: JiraLoadPurpose::Reload,
+        credentials: credentials(),
+        result: JiraProjectLoadResult {
+            issues: Ok(vec![issue_with_children("KAN-1", "Epic", "Epic", true)]),
+            board: Err(JiraError(String::from("board unavailable"))),
+            next_page_token: None,
+            fields: Ok(Vec::new()),
+            projects: Ok(Vec::new()),
+            users: Ok(Vec::new()),
+            current_user: Err(JiraError(String::new())),
+            logs: Vec::new(),
+        },
+    });
+    let rows = app.visible_issue_rows();
+    assert_eq!(rows.len(), 2, "subtree intact after the reload");
+    assert!(!rows[0].loading, "node settles once the reload completes");
+    assert!(!rows[1].reloading, "child no longer greyed");
 }
 
 #[test]
@@ -473,41 +604,22 @@ fn node_reload_restores_expanded_grandchildren() {
     assert_eq!(app.selected_issue_key(), Some("KAN-1"));
     app.handle_key(key('r'), &bindings);
 
-    // KAN-1 and KAN-2 refetch at once; deliver both.
-    let mut child_loads: std::collections::HashMap<String, u64> = app
-        .take_effects()
-        .into_iter()
-        .filter_map(|effect| match effect {
-            AppEffect::LoadChildren {
-                request_id,
-                parent_key,
-                ..
-            } => Some((parent_key, request_id)),
-            _ => None,
-        })
-        .collect();
+    // KAN-1 and KAN-2 refetch together in one batch; deliver both.
+    let parents = take_child_batch(&mut app);
+    let names: std::collections::HashSet<&str> =
+        parents.iter().map(|(key, _)| key.as_str()).collect();
     assert!(
-        child_loads.contains_key("KAN-1") && child_loads.contains_key("KAN-2"),
-        "node reload refreshes the open subtree in parallel"
+        names.contains("KAN-1") && names.contains("KAN-2"),
+        "node reload refreshes the open subtree in one batch"
     );
-    app.handle_event(AppEvent::ChildrenLoaded {
-        request_id: child_loads.remove("KAN-1").unwrap(),
-        parent_key: String::from("KAN-1"),
-        result: JiraLoadResult {
-            issues: Ok(vec![parent_child("KAN-2", "KAN-1")]),
-            next_page_token: None,
-            logs: Vec::new(),
-        },
-    });
-    app.handle_event(AppEvent::ChildrenLoaded {
-        request_id: child_loads.remove("KAN-2").unwrap(),
-        parent_key: String::from("KAN-2"),
-        result: JiraLoadResult {
-            issues: Ok(vec![child("KAN-3", "KAN-2")]),
-            next_page_token: None,
-            logs: Vec::new(),
-        },
-    });
+    deliver_child_batch(
+        &mut app,
+        &parents,
+        vec![
+            ("KAN-1", vec![parent_child("KAN-2", "KAN-1")]),
+            ("KAN-2", vec![child("KAN-3", "KAN-2")]),
+        ],
+    );
 
     let ids: Vec<&str> = app
         .visible_issue_rows()

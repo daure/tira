@@ -2,8 +2,8 @@ mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tira::{
-    Action, App, AppEffect, AppEvent, BoardAction, JiraFilteredTreeAction, JiraLoadPurpose,
-    KeyBindings, Screen, TabAction,
+    Action, App, AppEffect, AppEvent, BoardAction, JiraFilteredTreeAction, KeyBindings, Screen,
+    TabAction,
     config::JiraCredentials,
     services::jira::{
         BoardColumnSummary, BoardData, BoardSwimlaneSummary, CommandLogEntry, SprintSummary,
@@ -1357,10 +1357,19 @@ fn shift_r_reloads_board_on_board_tab() {
 
     assert_eq!(app.status(), "Reloading Jira board...");
     let effects = app.take_effects();
-    let AppEffect::LoadJiraProject { purpose, .. } = effects.first().expect("reload effect") else {
-        panic!("expected Jira reload effect");
-    };
-    assert_eq!(*purpose, JiraLoadPurpose::ReloadBoard);
+    assert!(
+        matches!(
+            effects.first().expect("reload effect"),
+            AppEffect::ReloadBoardOnly { .. }
+        ),
+        "Shift+R on the board reloads only the board"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, AppEffect::LoadJiraProject { .. })),
+        "board reload must not reload the list"
+    );
 }
 
 #[test]
@@ -1398,10 +1407,19 @@ fn quick_switcher_reload_board_queues_board_reload() {
 
     assert_eq!(app.status(), "Reloading Jira board...");
     let effects = app.take_effects();
-    let AppEffect::LoadJiraProject { purpose, .. } = effects.first().expect("reload effect") else {
-        panic!("expected Jira reload effect");
-    };
-    assert_eq!(*purpose, JiraLoadPurpose::ReloadBoard);
+    assert!(
+        matches!(
+            effects.first().expect("reload effect"),
+            AppEffect::ReloadBoardOnly { .. }
+        ),
+        "Reload board reloads only the board"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, AppEffect::LoadJiraProject { .. })),
+        "board reload must not reload the list"
+    );
 }
 
 #[test]
@@ -1441,7 +1459,9 @@ fn board_with_active_sprint() -> BoardData {
         issues: vec![support::issue("KAN-1", "Sprint task", "Task", None)],
         sprint: Some(SprintSummary {
             name: String::from("DICE Sprint 196"),
-            goal: Some(String::from("Deal Makers can publish offer drafts end-to-end.")),
+            goal: Some(String::from(
+                "Deal Makers can publish offer drafts end-to-end.",
+            )),
             days_remaining: Some(4),
             start_date: Some(String::from("Jun 3, 2026")),
             end_date: Some(String::from("Jun 17, 2026")),

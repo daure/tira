@@ -250,6 +250,11 @@ impl JiraFilteredTreeState {
         self.filtered_tree.items()
     }
 
+    /// Number of currently-loaded root items (those without a parent).
+    pub fn root_count(&self) -> usize {
+        self.filtered_tree.root_count()
+    }
+
     pub fn selected_item_index(&self) -> usize {
         self.filtered_tree.selected_item_index()
     }

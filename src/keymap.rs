@@ -594,11 +594,27 @@ impl KeyBindings {
 
     pub fn command_log_action_for(&self, key: KeyEvent) -> Action {
         if is_escape_key(key) {
-            Action::CloseCommandLog
-        } else if is_ctrl_q(key) {
-            Action::Quit
-        } else {
-            Action::None
+            return Action::CloseCommandLog;
+        }
+        if is_ctrl_q(key) {
+            return Action::Quit;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return match key.code {
+                KeyCode::Char('u') => Action::HalfPageCommandLog(-1),
+                KeyCode::Char('d') => Action::HalfPageCommandLog(1),
+                _ => Action::None,
+            };
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Action::ScrollCommandLog(-1),
+            KeyCode::Down | KeyCode::Char('j') => Action::ScrollCommandLog(1),
+            KeyCode::PageUp => Action::PageCommandLog(-1),
+            KeyCode::PageDown => Action::PageCommandLog(1),
+            KeyCode::Home => Action::CommandLogToStart,
+            KeyCode::End | KeyCode::Char('G') => Action::CommandLogToEnd,
+            KeyCode::Char('g') => Action::CommandLogToStartPrefix,
+            _ => Action::None,
         }
     }
 

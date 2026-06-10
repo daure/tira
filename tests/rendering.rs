@@ -9,8 +9,8 @@ use tira::{
     config::JiraCredentials,
     draw,
     services::jira::{
-        BoardColumnSummary, BoardData, BoardSwimlaneSummary, FieldSummary, JiraError,
-        SprintSummary, UserSummary,
+        BoardColumnSummary, BoardData, BoardSwimlaneSummary, CommandLogEntry, FieldSummary,
+        JiraError, SprintSummary, UserSummary,
     },
     ui::theme::{Theme, ThemeName},
 };
@@ -75,6 +75,173 @@ fn command_log_dialog_renders_for_current_session() {
     let (screen, bottom_row) = rendered_text(&terminal);
     assert!(screen.contains("Command log"));
     assert!(bottom_row.contains("NORMAL"));
+}
+
+/// Pushes a command-log entry with the given long path by replaying an
+/// assignment result (no pending request, so it only records the log line).
+fn push_log_entry(app: &mut App, path: &str) {
+    app.handle_event(AppEvent::IssueAssigned {
+        request_id: 999,
+        issue_key: String::from("KAN-1"),
+        assignee: None,
+        result: Ok(CommandLogEntry {
+            timestamp: String::from("10:00:00"),
+            method: "GET",
+            path: path.to_owned(),
+            status: String::from("200"),
+            duration_ms: 5,
+        }),
+    });
+}
+
+#[test]
+fn command_log_wraps_paths_and_opens_scrolled_to_latest() {
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(Vec::new());
+
+    // More long-path entries than the viewport can show, so opening must scroll
+    // to the bottom (latest) and the long paths must wrap to stay fully visible.
+    for letter in 'a'..='o' {
+        push_log_entry(
+            &mut app,
+            &format!(
+                "/rest/api/2/issue/ZONE{letter}/segment/one/two/three/four/five/six/tail-{letter}"
+            ),
+        );
+    }
+    app.dispatch(Action::ToggleCommandLog);
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    let (screen, _) = rendered_text(&terminal);
+
+    // The latest entry is shown in full (its wrapped tail is visible), proving
+    // both the scroll-to-bottom on open and the cell wrapping of the path.
+    assert!(
+        screen.contains("ZONEo"),
+        "latest entry visible at the bottom"
+    );
+    assert!(
+        screen.contains("tail-o"),
+        "long path wraps to show its tail"
+    );
+    // The earliest entry has scrolled off the top.
+    assert!(
+        !screen.contains("ZONEa"),
+        "oldest entry scrolled out of view"
+    );
+
+    // Jumping to the top reveals the earliest entry.
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &bindings);
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    let (screen, _) = rendered_text(&terminal);
+    assert!(
+        screen.contains("ZONEa"),
+        "scrolling to the top shows the oldest entry"
+    );
+}
+
+#[test]
+fn command_log_keyboard_navigation_jumps_and_pages() {
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(Vec::new());
+    for letter in 'a'..='o' {
+        push_log_entry(
+            &mut app,
+            &format!(
+                "/rest/api/2/issue/ZONE{letter}/segment/one/two/three/four/five/six/tail-{letter}"
+            ),
+        );
+    }
+    app.dispatch(Action::ToggleCommandLog);
+
+    // `gg` jumps to the top: the first `g` arms the prefix, the second jumps.
+    app.handle_key(key('g'), &bindings);
+    app.handle_key(key('g'), &bindings);
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("ZONEa"), "gg jumps to the oldest entry");
+    assert!(!screen.contains("ZONEo"), "latest is scrolled off after gg");
+
+    // A lone `g` must not jump; the following PageDown still scrolls down.
+    app.handle_key(key('g'), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        &bindings,
+    );
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    let (screen, _) = rendered_text(&terminal);
+    assert!(
+        !screen.contains("ZONEa"),
+        "PageDown after a lone g scrolls down instead of jumping to the top"
+    );
+
+    // `G` jumps back to the bottom (latest entry).
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        &bindings,
+    );
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("ZONEo"), "G jumps back to the latest entry");
+}
+
+#[test]
+fn command_log_highlights_path_but_not_query_string() {
+    let backend = TestBackend::new(120, 10);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(Vec::new());
+    push_log_entry(&mut app, "/agile/board?projectKeyOrId=DPP");
+    app.dispatch(Action::ToggleCommandLog);
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let highlight = app.theme().selected_bg();
+    let buffer = terminal.backend().buffer();
+    let width = buffer.area().width as usize;
+    let height = buffer.area().height as usize;
+    let content = buffer.content();
+    let row = (0..height)
+        .find(|&y| {
+            let line: String = content[y * width..(y + 1) * width]
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            line.contains("board?projectKeyOrId")
+        })
+        .expect("row with the path");
+    let line: String = content[row * width..(row + 1) * width]
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    let path_col = line.find("board").expect("path segment");
+    let query_col = line.find("projectKeyOrId").expect("query segment");
+
+    assert_eq!(
+        content[row * width + path_col].bg,
+        highlight,
+        "the path is background-highlighted"
+    );
+    assert_ne!(
+        content[row * width + query_col].bg,
+        highlight,
+        "the query string is not highlighted"
+    );
 }
 
 #[test]
@@ -1185,7 +1352,12 @@ fn board_left_click_still_selects_a_card() {
 fn board_group_header_label_is_horizontally_sticky_when_scrolled() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let names = [
-        "To Do", "In Progress", "In Review", "In Staging", "Ready For Prod", "Done",
+        "To Do",
+        "In Progress",
+        "In Review",
+        "In Staging",
+        "Ready For Prod",
+        "Done",
     ];
     let columns = names
         .iter()
@@ -1217,7 +1389,10 @@ fn board_group_header_label_is_horizontally_sticky_when_scrolled() {
     // Group by assignee, then move right to the far-right "Done" card to scroll right.
     app.handle_key(key('r'), &bindings);
     app.handle_key(ctrl('j'), &bindings);
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), &bindings);
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &bindings,
+    );
     for _ in 0..names.len() {
         app.dispatch(Action::Board(tira::BoardAction::MoveRight));
     }
@@ -1236,10 +1411,16 @@ fn board_group_header_label_is_horizontally_sticky_when_scrolled() {
     let row = |i: usize| -> String { chars[i * 120..(i + 1) * 120].iter().collect() };
     // We are scrolled right: the rightmost column shows; leftmost is gone.
     let board_text = screen.clone();
-    assert!(board_text.contains("DONE"), "scrolled to show the Done column");
+    assert!(
+        board_text.contains("DONE"),
+        "scrolled to show the Done column"
+    );
     // The group header label stays pinned near the left edge while scrolled
     // (a leading space + avatar glyph precede the name).
-    let header_row = (0..10).map(row).find(|r| r.contains("Alice")).expect("header row");
+    let header_row = (0..10)
+        .map(row)
+        .find(|r| r.contains("Alice"))
+        .expect("header row");
     let label_at = header_row.find("Alice").expect("label present");
     assert!(
         label_at < 6,

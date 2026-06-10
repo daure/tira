@@ -175,8 +175,9 @@ impl BoardData {
 
 /// Issues per page when walking the root issue list.
 pub const ROOT_PAGE_SIZE: u32 = 100;
-/// Upper bound for a single child probe / child fetch response.
-const CHILD_PAGE_SIZE: u32 = 5_000;
+/// Upper bound for a single `/search/jql` response (child probe / child fetch,
+/// and the one-shot root-extent refetch on reload).
+pub const CHILD_PAGE_SIZE: u32 = 5_000;
 
 /// Loads one page of top-level issues (no parent) for the default project,
 /// most-recently-updated first, then probes which of them have children so the
@@ -185,12 +186,13 @@ pub fn load_root_issues(
     credentials: &JiraCredentials,
     fields: &str,
     page_token: Option<&str>,
+    max_results: u32,
 ) -> JiraLoadResult {
     let jql = format!(
         "project = {} AND parent IS EMPTY ORDER BY updated DESC",
         credentials.default_project.trim()
     );
-    let (issues, token, log) = run_search(credentials, &jql, fields, page_token, ROOT_PAGE_SIZE);
+    let (issues, token, log) = run_search(credentials, &jql, fields, page_token, max_results);
     annotate_with_children(credentials, issues, token, log)
 }
 
@@ -206,8 +208,102 @@ pub fn load_child_issues(
     annotate_with_children(credentials, issues, token, log)
 }
 
-/// Runs a server-side text search over the default project. Results are a flat
-/// list (no hierarchy), so children are not probed.
+/// Maximum number of parent keys packed into a single `parent in (...)` query,
+/// bounding the JQL/URL length. Larger parent sets are split across queries.
+const BATCH_PARENT_CHUNK: usize = 50;
+
+/// The direct children of several parents fetched together, grouped by parent.
+pub struct ChildrenBatch {
+    /// One entry per requested parent, in the same order as the input keys.
+    /// `Ok(children)` (possibly empty) on success; `Err` when that parent's
+    /// query chunk failed, so callers can leave its stale subtree in place.
+    pub groups: Vec<(String, Result<Vec<IssueSummary>, JiraError>)>,
+    pub logs: Vec<CommandLogEntry>,
+}
+
+/// Loads the direct children of many parents in as few queries as possible:
+/// one `parent in (...)` search per chunk of parents (instead of one query per
+/// parent), then a single grandchild probe across every returned child. The
+/// children carry their own `parent` field, so the flat result is regrouped by
+/// parent here. Parents with no children map to an empty vec so the caller can
+/// clear a stale subtree.
+pub fn load_children_batch(
+    credentials: &JiraCredentials,
+    parent_keys: &[String],
+    fields: &str,
+) -> ChildrenBatch {
+    let mut logs = Vec::new();
+    let mut all_issues: Vec<IssueSummary> = Vec::new();
+    let mut failed: HashSet<String> = HashSet::new();
+    let mut last_error: Option<JiraError> = None;
+
+    for chunk in parent_keys.chunks(BATCH_PARENT_CHUNK) {
+        let jql = format!("parent in ({}) ORDER BY updated DESC", chunk.join(","));
+        let (issues, _token, log) = run_search(credentials, &jql, fields, None, CHILD_PAGE_SIZE);
+        logs.push(log);
+        match issues {
+            Ok(mut chunk_issues) => all_issues.append(&mut chunk_issues),
+            Err(error) => {
+                for key in chunk {
+                    failed.insert(key.clone());
+                }
+                last_error = Some(error);
+            }
+        }
+    }
+
+    // One grandchild probe across every fetched child, so each child still
+    // shows an expansion chevron when it has children of its own.
+    if !all_issues.is_empty() {
+        let child_keys = all_issues
+            .iter()
+            .map(|issue| issue.key.clone())
+            .collect::<Vec<_>>();
+        let (parents_with_children, probe_log) = probe_children(credentials, &child_keys);
+        logs.push(probe_log);
+        for issue in &mut all_issues {
+            issue.has_children = parents_with_children.contains(issue.key.as_str());
+        }
+    }
+
+    // Regroup the flat result by each child's own parent key.
+    let groups = group_children_for_parents(parent_keys, all_issues, &failed, last_error.as_ref());
+
+    ChildrenBatch { groups, logs }
+}
+
+/// Buckets a flat list of children under their requested parents, in input
+/// order. Parents present in `failed` map to that chunk's error so their stale
+/// subtree survives; every other requested parent gets its children (or an
+/// empty vec, which lets callers clear a subtree whose children all vanished).
+/// Pure (no IO) so the grouping/empty/failure logic is unit-testable.
+fn group_children_for_parents(
+    parent_keys: &[String],
+    issues: Vec<IssueSummary>,
+    failed: &HashSet<String>,
+    error: Option<&JiraError>,
+) -> Vec<(String, Result<Vec<IssueSummary>, JiraError>)> {
+    let mut by_parent: BTreeMap<String, Vec<IssueSummary>> = BTreeMap::new();
+    for issue in issues {
+        if let Some(parent) = issue.parent_key.clone() {
+            by_parent.entry(parent).or_default().push(issue);
+        }
+    }
+    parent_keys
+        .iter()
+        .map(|key| {
+            if failed.contains(key) {
+                let error = error
+                    .cloned()
+                    .unwrap_or_else(|| JiraError(String::from("child fetch failed")));
+                (key.clone(), Err(error))
+            } else {
+                (key.clone(), Ok(by_parent.remove(key).unwrap_or_default()))
+            }
+        })
+        .collect()
+}
+
 pub fn search_issues(
     credentials: &JiraCredentials,
     term: &str,
@@ -1217,7 +1313,9 @@ fn board_sprint_from_value(payload: &serde_json::Value) -> Option<SprintSummary>
     Some(SprintSummary {
         name: text_property(sprint, &["name"]).unwrap_or_else(|| String::from("Sprint")),
         goal: text_property(sprint, &["goal"]),
-        days_remaining: sprint.get("daysRemaining").and_then(serde_json::Value::as_i64),
+        days_remaining: sprint
+            .get("daysRemaining")
+            .and_then(serde_json::Value::as_i64),
         start_date: text_property(sprint, &["isoStartDate"])
             .as_deref()
             .and_then(format_iso_date),
@@ -1568,11 +1666,74 @@ fn format_field_value(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParentProbeResponse, SearchResponse, board_data_from_greenhopper,
-        issue_summary_from_search_issue, log_path, search_match_clause,
+        IssueSummary, JiraError, ParentProbeResponse, SearchResponse, board_data_from_greenhopper,
+        group_children_for_parents, issue_summary_from_search_issue, log_path, search_match_clause,
     };
     use reqwest::Url;
     use serde_json::json;
+    use std::collections::{BTreeMap, HashSet};
+
+    fn child_issue(key: &str, parent: &str) -> IssueSummary {
+        let mut issue = IssueSummary {
+            key: key.to_owned(),
+            summary: String::from("child"),
+            status: String::from("To Do"),
+            issue_type: String::from("Story"),
+            parent_key: Some(parent.to_owned()),
+            has_children: false,
+            field_values: BTreeMap::new(),
+        };
+        issue
+            .field_values
+            .insert(String::from("parent"), parent.to_owned());
+        issue
+    }
+
+    #[test]
+    fn group_children_buckets_by_parent_and_fills_empty_parents() {
+        let parents = vec![
+            String::from("KAN-1"),
+            String::from("KAN-2"),
+            String::from("KAN-3"),
+        ];
+        let issues = vec![
+            child_issue("KAN-10", "KAN-1"),
+            child_issue("KAN-11", "KAN-1"),
+            child_issue("KAN-20", "KAN-2"),
+        ];
+
+        let groups = group_children_for_parents(&parents, issues, &HashSet::new(), None);
+
+        let keys: Vec<&str> = groups.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["KAN-1", "KAN-2", "KAN-3"], "order matches input");
+        let kan1 = groups[0].1.as_ref().expect("KAN-1 ok");
+        assert_eq!(
+            kan1.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(),
+            vec!["KAN-10", "KAN-11"]
+        );
+        assert_eq!(groups[1].1.as_ref().expect("KAN-2 ok").len(), 1);
+        // KAN-3 had no children in the response -> empty, so a stale subtree clears.
+        assert!(groups[2].1.as_ref().expect("KAN-3 ok").is_empty());
+    }
+
+    #[test]
+    fn group_children_marks_failed_parents_as_errors() {
+        let parents = vec![String::from("KAN-1"), String::from("KAN-2")];
+        let mut failed = HashSet::new();
+        failed.insert(String::from("KAN-2"));
+        let error = JiraError(String::from("boom"));
+
+        let groups = group_children_for_parents(
+            &parents,
+            vec![child_issue("KAN-10", "KAN-1")],
+            &failed,
+            Some(&error),
+        );
+
+        assert!(groups[0].1.is_ok(), "succeeding parent keeps its children");
+        // The failed parent surfaces the error so its stale subtree is preserved.
+        assert_eq!(groups[1].1.as_ref().unwrap_err().0, "boom");
+    }
 
     #[test]
     fn search_clause_matches_each_word_as_a_prefix() {
@@ -1780,7 +1941,10 @@ mod tests {
 
         let sprint = board.sprint.expect("active sprint");
         assert_eq!(sprint.name, "DICE Sprint 196");
-        assert_eq!(sprint.goal.as_deref(), Some("Publish offer drafts end-to-end."));
+        assert_eq!(
+            sprint.goal.as_deref(),
+            Some("Publish offer drafts end-to-end.")
+        );
         assert_eq!(sprint.days_remaining, Some(4));
         assert_eq!(sprint.start_date.as_deref(), Some("Jun 3, 2026"));
         assert_eq!(sprint.end_date.as_deref(), Some("Jun 17, 2026"));

@@ -16,20 +16,64 @@ use super::{chrome, layout, scrollbar};
 
 pub fn render_command_log_dialog(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let entries = app.command_log_entries();
-    let height = entries.len().min(8) as u16 + 2;
     let width = area.width.saturating_sub(area.width / 10);
-    let height = height.min(area.height.saturating_sub(2)).max(3);
+    // The path cell wraps within the content column: dialog border (2) +
+    // dialog padding (2) + scrollbar column (1) are reserved.
+    let content_width = width.saturating_sub(5).max(1);
+
+    let lines: Vec<Line<'static>> = entries
+        .iter()
+        .flat_map(|entry| command_log_entry_lines(entry, app, content_width))
+        .collect();
+    let total = lines.len();
+
+    // Grow with the content up to 80% of the screen height.
+    let max_height = (area.height * 4 / 5).max(3);
+    let height = (total as u16)
+        .saturating_add(2)
+        .min(max_height)
+        .min(area.height.saturating_sub(2))
+        .max(3);
+
     let inner = Dialog::new("Command log", width, height)
         .border_style(Style::default().fg(app.theme().border_fg()))
         .y_offset(area.height.saturating_sub(height) / 2)
         .render(frame, area);
 
-    let start = entries.len().saturating_sub(inner.height as usize);
-    let lines = entries[start..]
-        .iter()
-        .map(|entry| render_command_log_line(entry, app))
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), inner);
+    let content_area = Rect {
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
+    let scrollbar_area = Rect {
+        x: inner.x + inner.width.saturating_sub(1),
+        y: inner.y,
+        width: 1,
+        height: inner.height,
+    };
+
+    let viewport = inner.height as usize;
+    let max_scroll = total.saturating_sub(viewport);
+    let scroll = if app.command_log_follows_tail() {
+        max_scroll
+    } else {
+        app.command_log_scroll().min(max_scroll)
+    };
+    app.cache_command_log_layout(scroll, total, viewport);
+
+    frame.render_widget(
+        Paragraph::new(lines).scroll((scroll as u16, 0)),
+        content_area,
+    );
+
+    if total > viewport {
+        scrollbar::render_range(
+            frame,
+            scrollbar_area,
+            total,
+            scroll..scroll + viewport,
+            app.theme(),
+        );
+    }
 }
 
 pub fn render_sprint_details_dialog(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -72,7 +116,11 @@ fn no_sprint_lines(board_name: &str, app: &App) -> Vec<Line<'static>> {
     ]
 }
 
-fn sprint_details_lines(sprint: &SprintSummary, text_width: usize, app: &App) -> Vec<Line<'static>> {
+fn sprint_details_lines(
+    sprint: &SprintSummary,
+    text_width: usize,
+    app: &App,
+) -> Vec<Line<'static>> {
     let theme = app.theme();
     let mut lines = vec![Line::from(Span::styled(
         sprint.name.clone(),
@@ -434,27 +482,140 @@ pub fn render_notifications(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 }
 
-fn render_command_log_line(entry: &CommandLogEntry, app: &App) -> Line<'static> {
+/// Renders one command-log entry as one or more lines. The leading
+/// `timestamp method` prefix and the trailing `status duration` suffix stay on
+/// the first and last lines; the path wraps within the remaining width with its
+/// continuation lines indented to align under the path column (cell wrapping),
+/// never back to column zero. Only the path itself is background-highlighted —
+/// the query string (from `?` on) stays unhighlighted.
+fn command_log_entry_lines(entry: &CommandLogEntry, app: &App, width: u16) -> Vec<Line<'static>> {
+    let theme = app.theme();
     let status_style = if entry.status == "ERR" {
-        Style::default().fg(app.theme().error_fg())
+        Style::default().fg(theme.error_fg())
     } else {
-        Style::default().fg(app.theme().success_fg())
+        Style::default().fg(theme.success_fg())
     };
+    let path_style = Style::default()
+        .fg(theme.selected_alt_fg())
+        .bg(theme.selected_bg());
+    let query_style = Style::default().fg(theme.muted_fg());
 
-    Line::from(vec![
+    let indent = entry.timestamp.chars().count() + 1 + entry.method.chars().count() + 1;
+    let available = (width as usize).saturating_sub(indent).max(1);
+    let suffix_len =
+        entry.status.chars().count() + 2 + entry.duration_ms.to_string().chars().count() + 2;
+
+    let path_chars: Vec<char> = entry.path.chars().collect();
+    // The query string (from the first `?`) is not part of the highlighted path.
+    let query_start = path_chars
+        .iter()
+        .position(|&c| c == '?')
+        .unwrap_or(path_chars.len());
+    let segments = path_segments(path_chars.len(), available);
+    let last = segments.len().saturating_sub(1);
+
+    let mut lines = Vec::new();
+    for (index, &(start, end)) in segments.iter().enumerate() {
+        let mut spans = if index == 0 {
+            vec![
+                Span::styled(
+                    format!("{} ", entry.timestamp),
+                    Style::default().fg(theme.muted_fg()),
+                ),
+                Span::styled(
+                    format!("{} ", entry.method),
+                    Style::default().fg(theme.accent_fg()),
+                ),
+            ]
+        } else {
+            vec![Span::raw(" ".repeat(indent))]
+        };
+        push_path_spans(
+            &mut spans,
+            &path_chars,
+            start,
+            end,
+            query_start,
+            path_style,
+            query_style,
+        );
+
+        if index == last {
+            let fits = (end - start) + 1 + suffix_len <= available;
+            if fits {
+                spans.extend(command_log_suffix_spans(entry, status_style, theme, true));
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(spans));
+                let mut suffix = vec![Span::raw(" ".repeat(indent))];
+                suffix.extend(command_log_suffix_spans(entry, status_style, theme, false));
+                lines.push(Line::from(suffix));
+            }
+        } else {
+            lines.push(Line::from(spans));
+        }
+    }
+    lines
+}
+
+/// Pushes the `[start, end)` slice of `chars` as styled spans, splitting at
+/// `query_start` so the path is background-highlighted and the query string is
+/// not.
+fn push_path_spans(
+    spans: &mut Vec<Span<'static>>,
+    chars: &[char],
+    start: usize,
+    end: usize,
+    query_start: usize,
+    path_style: Style,
+    query_style: Style,
+) {
+    let path_end = end.min(query_start);
+    if start < path_end {
+        spans.push(Span::styled(
+            chars[start..path_end].iter().collect::<String>(),
+            path_style,
+        ));
+    }
+    let query_begin = start.max(query_start);
+    if query_begin < end {
+        spans.push(Span::styled(
+            chars[query_begin..end].iter().collect::<String>(),
+            query_style,
+        ));
+    }
+}
+
+fn command_log_suffix_spans(
+    entry: &CommandLogEntry,
+    status_style: Style,
+    theme: &crate::ui::theme::Theme,
+    leading_space: bool,
+) -> Vec<Span<'static>> {
+    let status = if leading_space {
+        format!(" {}", entry.status)
+    } else {
+        entry.status.clone()
+    };
+    vec![
+        Span::styled(status, status_style),
         Span::styled(
-            format!("{} ", entry.timestamp),
-            Style::default().fg(app.theme().muted_fg()),
+            format!("  {}ms", entry.duration_ms),
+            Style::default().fg(theme.muted_fg()),
         ),
-        Span::styled(
-            format!("{} ", entry.method),
-            Style::default().fg(app.theme().accent_fg()),
-        ),
-        Span::raw(format!("{} ", entry.path)),
-        Span::styled(format!("{} ", entry.status), status_style),
-        Span::styled(
-            format!(" {}ms", entry.duration_ms),
-            Style::default().fg(app.theme().muted_fg()),
-        ),
-    ])
+    ]
+}
+
+/// Fixed-width character ranges covering a path of `len` chars. Paths are
+/// unbroken URLs, so they wrap by character rather than by word. Always returns
+/// at least one (possibly empty) range so the prefix line is emitted.
+fn path_segments(len: usize, width: usize) -> Vec<(usize, usize)> {
+    if len == 0 {
+        return vec![(0, 0)];
+    }
+    let width = width.max(1);
+    (0..len)
+        .step_by(width)
+        .map(|start| (start, (start + width).min(len)))
+        .collect()
 }
