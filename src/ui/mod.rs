@@ -51,6 +51,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
     if app.is_command_log_open() {
         overlays::render_command_log_dialog(frame, inner, app);
     }
+    if app.is_sprint_details_open() {
+        overlays::render_sprint_details_dialog(frame, inner, app);
+    }
     if app.is_help_open() {
         overlays::render_help_dialog(frame, inner, app, keybindings);
     }

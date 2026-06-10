@@ -13,7 +13,7 @@ use crate::{
     App, KeyBindings,
     app::{board_empty_cell_key, board_group_key, board_grouped_lanes, board_issue_column},
     components::{
-        generic::{avatar, filter, label, priority},
+        generic::{avatar, filter, label, priority, tree::fuzzy_matches},
         jira::work_item_key,
     },
     services::jira::{BoardData, BoardSwimlaneSummary, IssueSummary},
@@ -196,11 +196,18 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .areas(area);
     let group_width = (app.board_grouping().label().len() as u16 + 9).max(16);
-    let [filter_area, group_area] = Layout::default()
+    let details_text = details_trigger_text(app);
+    let details_width = details_text.chars().count() as u16 + 2;
+    let [filter_area, details_area, group_area] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(1), Constraint::Length(group_width)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(details_width),
+            Constraint::Length(group_width),
+        ])
         .areas(top_area);
     render_filter(frame, filter_area, app, keybindings);
+    render_details_trigger(frame, details_area, app, &details_text);
     render_group_trigger(frame, group_area, app);
 
     let [main_content_area, _, scrollbar_area] = Layout::default()
@@ -966,18 +973,47 @@ fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, _keybindings: &Ke
     }
 }
 
+fn details_trigger_text(app: &App) -> String {
+    match app
+        .board()
+        .data()
+        .and_then(|data| data.sprint.as_ref())
+        .and_then(|sprint| sprint.days_left_label())
+    {
+        Some(days_left) => format!("details: {days_left}"),
+        None => String::from("details"),
+    }
+}
+
+fn render_details_trigger(frame: &mut Frame<'_>, area: Rect, app: &App, text: &str) {
+    let theme = app.theme();
+    let (hotkey, rest) = text.split_at(1);
+    let line = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            hotkey.to_owned(),
+            Style::default()
+                .fg(theme.accent_fg())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(rest.to_owned(), Style::default().fg(theme.muted_fg())),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 fn render_group_trigger(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let theme = app.theme();
     let label = app.board_grouping().label();
     let text = Line::from(vec![
         Span::styled(" ", Style::default()),
+        Span::styled("g", Style::default().fg(theme.muted_fg())),
         Span::styled(
-            "G",
+            "r",
             Style::default()
                 .fg(theme.accent_fg())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("roup: ", Style::default().fg(theme.muted_fg())),
+        Span::styled("oup: ", Style::default().fg(theme.muted_fg())),
         Span::styled(
             label.to_owned(),
             Style::default().fg(theme.selected_alt_fg()),
@@ -991,30 +1027,28 @@ fn board_issue_matches_filter(issue: &IssueSummary, search: &str) -> bool {
     if search.is_empty() {
         return true;
     }
-    let search = search.to_ascii_lowercase();
-    issue.key.to_ascii_lowercase().contains(&search)
-        || issue.summary.to_ascii_lowercase().contains(&search)
-        || issue.status.to_ascii_lowercase().contains(&search)
-        || issue.issue_type.to_ascii_lowercase().contains(&search)
-        || displayed_field_matches(issue, "epic_summary", &search)
-        || displayed_field_matches(issue, "labels", &search)
-        || displayed_field_matches(issue, "dueDate", &search)
-        || displayed_field_matches(issue, "priorityName", &search)
-        || assignee_matches(issue, &search)
+    fuzzy_matches(&issue.key, search)
+        || fuzzy_matches(&issue.summary, search)
+        || fuzzy_matches(&issue.status, search)
+        || fuzzy_matches(&issue.issue_type, search)
+        || displayed_field_matches(issue, "epic_summary", search)
+        || displayed_field_matches(issue, "labels", search)
+        || displayed_field_matches(issue, "dueDate", search)
+        || displayed_field_matches(issue, "priorityName", search)
+        || assignee_matches(issue, search)
 }
 
 fn displayed_field_matches(issue: &IssueSummary, field: &str, search: &str) -> bool {
     issue
         .field_values
         .get(field)
-        .is_some_and(|value| value.to_ascii_lowercase().contains(search))
+        .is_some_and(|value| fuzzy_matches(value, search))
 }
 
 fn assignee_matches(issue: &IssueSummary, search: &str) -> bool {
     issue.field_values.get("assignee").is_some_and(|assignee| {
-        let assignee = assignee.to_ascii_lowercase();
-        let initials = avatar::initials(&assignee).to_ascii_lowercase();
-        assignee.contains(search) || initials.contains(search)
+        let initials = avatar::initials(assignee);
+        fuzzy_matches(assignee, search) || fuzzy_matches(&initials, search)
     })
 }
 
@@ -1433,6 +1467,46 @@ mod tests {
             width,
             height: 40,
         }
+    }
+
+    fn issue(key: &str, summary: &str) -> IssueSummary {
+        IssueSummary {
+            key: key.to_owned(),
+            summary: summary.to_owned(),
+            status: "To Do".to_owned(),
+            issue_type: "Task".to_owned(),
+            parent_key: None,
+            has_children: false,
+            field_values: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn filter_matches_non_contiguous_subsequence() {
+        let issue = issue("KAN-1", "Improve navigation flow");
+        // "imnav" is not a substring but is a fuzzy subsequence of the summary.
+        assert!(board_issue_matches_filter(&issue, "imnav"));
+        // Characters out of order never match.
+        assert!(!board_issue_matches_filter(&issue, "vanimprove"));
+    }
+
+    #[test]
+    fn filter_matches_assignee_initials() {
+        let mut issue = issue("KAN-2", "Unrelated summary");
+        issue
+            .field_values
+            .insert("assignee".to_owned(), "Marlo Vlietstra".to_owned());
+        // The avatar shows "MV"; searching the initials still matches.
+        assert!(board_issue_matches_filter(&issue, "mv"));
+        // The full name fuzzy-matches too.
+        assert!(board_issue_matches_filter(&issue, "marlo"));
+    }
+
+    #[test]
+    fn empty_filter_matches_everything() {
+        let issue = issue("KAN-3", "anything");
+        assert!(board_issue_matches_filter(&issue, ""));
+        assert!(board_issue_matches_filter(&issue, "   "));
     }
 
     #[test]

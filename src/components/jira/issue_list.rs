@@ -429,7 +429,7 @@ fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &Key
         filter::render_text(app.filter_state(), app.theme()),
         text_area,
     );
-    frame.render_widget(column_trigger(keybindings, app.theme()), trigger_area);
+    frame.render_widget(column_trigger(app.theme()), trigger_area);
 
     if app.is_filter_focused() {
         let cursor_x = text_area.x + app.filter_cursor() as u16;
@@ -437,16 +437,10 @@ fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &Key
     }
 }
 
-fn column_trigger(
-    keybindings: &KeyBindings,
-    theme: &crate::ui::theme::Theme,
-) -> Paragraph<'static> {
+fn column_trigger(theme: &crate::ui::theme::Theme) -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
-        Span::styled(
-            keybindings.open_columns_label(),
-            Style::default().fg(theme.accent_fg()),
-        ),
-        Span::raw(" columns"),
+        Span::styled("c", Style::default().fg(theme.accent_fg())),
+        Span::styled("olumns", Style::default().fg(theme.muted_fg())),
     ]))
     .alignment(Alignment::Right)
 }

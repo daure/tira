@@ -39,9 +39,12 @@ pub enum Action {
     Board(BoardAction),
     Leader,
     FocusBoardFilter,
+    ClearBoardFilter,
     ToggleBoardGrouping,
     ToggleCommandLog,
     CloseCommandLog,
+    ToggleSprintDetails,
+    CloseSprintDetails,
     ToggleProjectDropdown,
     ProjectDropdown(crate::components::generic::dropdown::DropdownAction),
     ToggleQuickSwitcher,
@@ -231,6 +234,7 @@ pub struct JiraProjectLoadResult {
 enum DialogKind {
     CommandLog,
     Help,
+    SprintDetails,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -668,8 +672,15 @@ impl BoardState {
                 search,
                 1,
             ),
-            BoardAction::GoToStart => cells.first().map(|cell| cell.key.clone()),
-            BoardAction::GoToEnd => cells.last().map(|cell| cell.key.clone()),
+            BoardAction::GoToStart => cells
+                .iter()
+                .find(|cell| !cell.is_group && cell.column == pref)
+                .map(|cell| cell.key.clone()),
+            BoardAction::GoToEnd => cells
+                .iter()
+                .rev()
+                .find(|cell| !cell.is_group && cell.column == pref)
+                .map(|cell| cell.key.clone()),
             BoardAction::GoToStartPrefix => None,
             BoardAction::CollapseAllGroups => {
                 let selected_group = selected.group.clone();
@@ -1298,6 +1309,7 @@ pub struct App {
     credentials: Option<JiraCredentials>,
     command_log: Vec<CommandLogEntry>,
     command_log_open: bool,
+    sprint_details_open: bool,
     board_filter: crate::FilterState,
     status: String,
     notifications: Vec<Notification>,
@@ -1379,6 +1391,7 @@ impl App {
             credentials: None,
             command_log: Vec::new(),
             command_log_open: false,
+            sprint_details_open: false,
             status: status.into(),
             notifications: Vec::new(),
             projects: Vec::new(),
@@ -1430,6 +1443,7 @@ impl App {
             credentials: None,
             command_log: Vec::new(),
             command_log_open: false,
+            sprint_details_open: false,
             status: String::from("Jira issues loaded"),
             notifications: Vec::new(),
             projects: Vec::new(),
@@ -2447,6 +2461,10 @@ impl App {
         self.command_log_open
     }
 
+    pub fn is_sprint_details_open(&self) -> bool {
+        self.sprint_details_open
+    }
+
     pub fn status(&self) -> &str {
         &self.status
     }
@@ -2524,10 +2542,18 @@ impl App {
                 && !key.modifiers.contains(KeyModifiers::ALT);
             let is_ctrl_q = keybindings.is_forced_quit(key);
             let reserved_input_action = matches!(action, Action::OpenHelp);
-            if !(focused_text_input
-                && (printable_text || is_navigation_shortcut)
-                && !reserved_input_action
-                || typing && matches!(action, Action::Quit) && !is_ctrl_q)
+            // On the board, the grouping key takes precedence over the global
+            // reload binding so it can be bound to a letter that also reloads
+            // elsewhere (reload stays available on the board via reload_list).
+            let board_grouping_override = self.screen == Screen::Main
+                && self.active_tab() == "Board"
+                && !self.is_board_filter_focused()
+                && keybindings.board_action_for(key) == Action::ToggleBoardGrouping;
+            if !board_grouping_override
+                && !(focused_text_input
+                    && (printable_text || is_navigation_shortcut)
+                    && !reserved_input_action
+                    || typing && matches!(action, Action::Quit) && !is_ctrl_q)
             {
                 self.dispatch(self.contextual_global_action(action));
                 return;
@@ -2582,6 +2608,9 @@ impl App {
             Screen::Setup => self.dispatch_setup(keybindings.setup_action_for(key)),
             Screen::Main if self.command_log_open => {
                 self.dispatch(keybindings.command_log_action_for(key))
+            }
+            Screen::Main if self.sprint_details_open => {
+                self.dispatch(keybindings.sprint_details_action_for(key))
             }
             Screen::Main if self.project_dropdown.is_some() => {
                 self.dispatch(Action::ProjectDropdown(self.dropdown_key_action(
@@ -2676,7 +2705,9 @@ impl App {
                             | Action::Board(_)
                             | Action::JiraFilteredTree(_)
                             | Action::FocusBoardFilter
+                            | Action::ClearBoardFilter
                             | Action::ToggleBoardGrouping
+                            | Action::ToggleSprintDetails
                             | Action::ToggleAssigneeDropdown
                             | Action::AssignSelectedToMe
                             | Action::UnassignSelected
@@ -2707,6 +2738,9 @@ impl App {
             return;
         }
         if self.command_log_open {
+            return;
+        }
+        if self.sprint_details_open {
             return;
         }
         // Shift + vertical wheel and native horizontal wheel both scroll left/
@@ -3394,11 +3428,19 @@ impl App {
                 self.board.dispatch(action, &search, self.board_grouping);
             }
             Action::FocusBoardFilter => self.board_filter.focus(),
+            Action::ClearBoardFilter => {
+                if !self.board_filter.value().is_empty() {
+                    self.board_filter.clear();
+                    self.board.select_first("", self.board_grouping);
+                }
+            }
             Action::ReloadList => self.reload_list(),
             Action::ReloadBoard => self.reload_board(),
             Action::ReloadNode => self.reload_node(),
             Action::Leader => self.leader_pending = true,
             Action::ToggleCommandLog => self.toggle_dialog(DialogKind::CommandLog),
+            Action::ToggleSprintDetails => self.toggle_dialog(DialogKind::SprintDetails),
+            Action::CloseSprintDetails => self.close_dialog(DialogKind::SprintDetails),
             Action::ToggleQuickSwitcher => self.toggle_dropdown(DropdownKind::QuickSwitcher),
             Action::ToggleProjectDropdown => self.toggle_dropdown(DropdownKind::ProjectSwitcher),
             Action::ToggleThemeDropdown => self.toggle_dropdown(DropdownKind::ThemePicker),
@@ -3426,10 +3468,6 @@ impl App {
     fn dispatch_board_filter(&mut self, action: FilterAction) {
         match action {
             FilterAction::Quit => self.running = false,
-            FilterAction::Exit if !self.board_filter.value().is_empty() => {
-                self.board_filter.clear();
-                self.board.select_first("", self.board_grouping);
-            }
             _ => {
                 self.board_filter.dispatch(action);
             }
@@ -3574,9 +3612,11 @@ impl App {
             self.close_overlays();
         } else {
             self.command_log_open = false;
+            self.sprint_details_open = false;
         }
         match dialog {
             DialogKind::CommandLog => self.command_log_open = true,
+            DialogKind::SprintDetails => self.sprint_details_open = true,
             DialogKind::Help => {
                 self.help_open = true;
                 self.reset_help_selection();
@@ -3587,6 +3627,7 @@ impl App {
     fn close_dialog(&mut self, dialog: DialogKind) {
         match dialog {
             DialogKind::CommandLog => self.command_log_open = false,
+            DialogKind::SprintDetails => self.sprint_details_open = false,
             DialogKind::Help => {
                 self.help_open = false;
                 self.reset_help_selection();
@@ -3597,6 +3638,7 @@ impl App {
     fn is_dialog_open(&self, dialog: DialogKind) -> bool {
         match dialog {
             DialogKind::CommandLog => self.command_log_open,
+            DialogKind::SprintDetails => self.sprint_details_open,
             DialogKind::Help => self.help_open,
         }
     }
@@ -3656,6 +3698,7 @@ impl App {
 
     fn close_dialogs(&mut self) {
         self.command_log_open = false;
+        self.sprint_details_open = false;
         self.help_open = false;
         self.reset_help_selection();
     }

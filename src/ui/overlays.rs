@@ -9,7 +9,7 @@ use ratatui::{
 use crate::{
     App, KeyBindings, components::generic::dialog::Dialog,
     components::generic::notification::NotificationKind, keymap::HelpScope,
-    services::jira::CommandLogEntry,
+    services::jira::CommandLogEntry, services::jira::SprintSummary,
 };
 
 use super::{chrome, layout, scrollbar};
@@ -30,6 +30,137 @@ pub fn render_command_log_dialog(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map(|entry| render_command_log_line(entry, app))
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+pub fn render_sprint_details_dialog(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let theme = app.theme();
+    let width = area.width.saturating_sub(4).min(64).max(24);
+    let text_width = width.saturating_sub(4) as usize;
+
+    let board = app.board().data();
+    let board_name = board.map(|data| data.name.as_str()).unwrap_or("Board");
+    let sprint = board.and_then(|data| data.sprint.as_ref());
+
+    let lines = sprint
+        .map(|sprint| sprint_details_lines(sprint, text_width, app))
+        .unwrap_or_else(|| no_sprint_lines(board_name, app));
+
+    let height = (lines.len() as u16 + 2)
+        .min(area.height.saturating_sub(2))
+        .max(3);
+    let inner = Dialog::new("Sprint details", width, height)
+        .border_style(Style::default().fg(theme.border_fg()))
+        .y_offset(area.height.saturating_sub(height) / 2)
+        .render(frame, area);
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn no_sprint_lines(board_name: &str, app: &App) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            board_name.to_owned(),
+            Style::default()
+                .fg(app.theme().selected_alt_fg())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            "No active sprint",
+            Style::default().fg(app.theme().muted_fg()),
+        )),
+    ]
+}
+
+fn sprint_details_lines(sprint: &SprintSummary, text_width: usize, app: &App) -> Vec<Line<'static>> {
+    let theme = app.theme();
+    let mut lines = vec![Line::from(Span::styled(
+        sprint.name.clone(),
+        Style::default()
+            .fg(theme.selected_alt_fg())
+            .add_modifier(Modifier::BOLD),
+    ))];
+
+    if let Some(goal) = &sprint.goal {
+        for goal_line in wrap_text(goal, text_width) {
+            lines.push(Line::from(Span::styled(
+                goal_line,
+                Style::default().fg(theme.status_text()),
+            )));
+        }
+    }
+
+    if let Some(days_left) = sprint.days_left_label() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            days_left,
+            Style::default().fg(theme.subtle_fg()),
+        )));
+    }
+
+    if sprint.start_date.is_some() || sprint.end_date.is_some() {
+        let column = (text_width / 2).max(12);
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<column$}", "Start date"),
+                Style::default()
+                    .fg(theme.muted_fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "End date",
+                Style::default()
+                    .fg(theme.muted_fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        let start = sprint
+            .start_date
+            .clone()
+            .unwrap_or_else(|| String::from("—"));
+        let end = sprint.end_date.clone().unwrap_or_else(|| String::from("—"));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{start:<column$}"),
+                Style::default().fg(theme.selected_alt_fg()),
+            ),
+            Span::styled(end, Style::default().fg(theme.selected_alt_fg())),
+        ]));
+    }
+
+    lines
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_owned()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let next_len = if current.is_empty() {
+            word.chars().count()
+        } else {
+            current.chars().count() + 1 + word.chars().count()
+        };
+        if next_len > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        } else {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {

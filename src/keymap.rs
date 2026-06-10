@@ -47,6 +47,8 @@ pub struct KeyBindings {
     quit: KeySpec,
     reload_node: KeySpec,
     reload_list: KeySpec,
+    board_details: KeySpec,
+    board_group: KeySpec,
     leader: KeySpec,
     leader_command_log: KeySpec,
     leader_project: KeySpec,
@@ -224,6 +226,8 @@ impl Default for KeyBindings {
             quit: KeySpec::code_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL),
             reload_node: KeySpec::plain('r'),
             reload_list: KeySpec::shifted('r'),
+            board_details: KeySpec::plain('d'),
+            board_group: KeySpec::plain('r'),
             leader: KeySpec::code_with_modifiers(KeyCode::Char('x'), KeyModifiers::CONTROL),
             leader_command_log: KeySpec::plain('c'),
             leader_project: KeySpec::plain('p'),
@@ -268,6 +272,8 @@ impl KeyBindings {
         set_key(&value, "global", "quit", &mut bindings.quit);
         set_key(&value, "global", "reload_node", &mut bindings.reload_node);
         set_key(&value, "global", "reload_list", &mut bindings.reload_list);
+        set_key(&value, "board", "details", &mut bindings.board_details);
+        set_key(&value, "board", "group", &mut bindings.board_group);
         set_key(&value, "global", "leader", &mut bindings.leader);
         set_key(
             &value,
@@ -489,6 +495,10 @@ impl KeyBindings {
             Action::Tabs(TabAction::Next)
         } else if self.tree.focus_filter.matches(key) {
             Action::FocusBoardFilter
+        } else if is_escape_key(key) || is_ctrl_left_bracket(key) {
+            Action::ClearBoardFilter
+        } else if self.board_details.matches(key) {
+            Action::ToggleSprintDetails
         } else if key.code == KeyCode::Char(' ') {
             Action::Board(BoardAction::ToggleCollapse)
         } else if self.tree.collapse_all.matches(key) {
@@ -513,8 +523,10 @@ impl KeyBindings {
             Action::Board(BoardAction::HalfPageUp)
         } else if matches_any(&self.board.page_down, key) {
             Action::Board(BoardAction::HalfPageDown)
-        } else if self.tree.go_to_start_prefix.matches(key) {
+        } else if self.board_group.matches(key) {
             Action::ToggleBoardGrouping
+        } else if self.tree.go_to_start_prefix.matches(key) {
+            Action::Board(BoardAction::GoToStartPrefix)
         } else if matches_any(&self.board.first, key) {
             Action::Board(BoardAction::GoToStart)
         } else if matches_any(&self.board.last, key) {
@@ -590,6 +602,16 @@ impl KeyBindings {
         }
     }
 
+    pub fn sprint_details_action_for(&self, key: KeyEvent) -> Action {
+        if is_escape_key(key) || is_ctrl_left_bracket(key) || self.board_details.matches(key) {
+            Action::CloseSprintDetails
+        } else if is_ctrl_q(key) {
+            Action::Quit
+        } else {
+            Action::None
+        }
+    }
+
     pub fn help_dialog_action_for(&self, key: KeyEvent) -> HelpDialogAction {
         if self.open_help.matches(key) || self.help.close.matches(key) || is_escape_key(key) {
             HelpDialogAction::Close
@@ -634,8 +656,9 @@ impl KeyBindings {
 
     pub fn board_hint_text(&self) -> String {
         format!(
-            "{} search | {} reload | {} columns | {} cards | {} page | {}/{} groups | {} help",
+            "{} search | {} details | {} reload | {} columns | {} cards | {} page | {}/{} groups | {} help",
             self.tree.focus_filter.label(),
+            self.board_details.label(),
             self.reload_list.label(),
             key_labels(&self.board.move_left, &self.board.move_right),
             key_labels(&self.board.move_up, &self.board.move_down),
@@ -797,6 +820,18 @@ impl KeyBindings {
                             self.tree.focus_filter.label(),
                             "Search board",
                             "Focus the board search and narrow visible cards.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.board_details.label(),
+                            "Sprint details",
+                            "Show the active sprint's name, goal, dates, and time remaining.",
+                        ));
+                        items.push(self.help_item(
+                            HelpScope::Local,
+                            self.board_group.label(),
+                            "Group board",
+                            "Group the board by assignee, epic, stories, or spaces.",
                         ));
                         items.push(self.help_item(
                             HelpScope::Local,

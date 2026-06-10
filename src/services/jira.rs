@@ -93,6 +93,32 @@ pub struct BoardData {
     pub columns: Vec<BoardColumnSummary>,
     pub swimlanes: Vec<BoardSwimlaneSummary>,
     pub issues: Vec<IssueSummary>,
+    /// The board's active sprint, when the board is sprint-backed (scrum) and
+    /// the payload carries one. Kanban boards and sprintless scrum boards have
+    /// `None`, which the UI surfaces as "No active sprint".
+    pub sprint: Option<SprintSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SprintSummary {
+    pub name: String,
+    pub goal: Option<String>,
+    pub days_remaining: Option<i64>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+impl SprintSummary {
+    /// Human-readable time remaining (e.g. `4 days left`), or `None` when the
+    /// sprint carries no day count.
+    pub fn days_left_label(&self) -> Option<String> {
+        self.days_remaining.map(|days| match days {
+            d if d < 0 => String::from("Sprint ended"),
+            0 => String::from("Ends today"),
+            1 => String::from("1 day left"),
+            d => format!("{d} days left"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -142,6 +168,7 @@ impl BoardData {
                 issue_keys: issues.iter().map(|issue| issue.key.clone()).collect(),
             }],
             issues,
+            sprint: None,
         }
     }
 }
@@ -1168,7 +1195,53 @@ fn board_data_from_greenhopper(
         columns,
         swimlanes,
         issues,
+        sprint: board_sprint_from_value(&payload),
     })
+}
+
+/// Picks the sprint to summarise from the greenhopper payload: the ACTIVE
+/// sprint if present, otherwise the first listed. Returns `None` for boards
+/// without sprint data (e.g. Kanban).
+fn board_sprint_from_value(payload: &serde_json::Value) -> Option<SprintSummary> {
+    let sprints = payload
+        .pointer("/sprintsData/sprints")
+        .and_then(serde_json::Value::as_array)?;
+    let sprint = sprints
+        .iter()
+        .find(|sprint| {
+            text_property(sprint, &["state"])
+                .is_some_and(|state| state.eq_ignore_ascii_case("active"))
+        })
+        .or_else(|| sprints.first())?;
+
+    Some(SprintSummary {
+        name: text_property(sprint, &["name"]).unwrap_or_else(|| String::from("Sprint")),
+        goal: text_property(sprint, &["goal"]),
+        days_remaining: sprint.get("daysRemaining").and_then(serde_json::Value::as_i64),
+        start_date: text_property(sprint, &["isoStartDate"])
+            .as_deref()
+            .and_then(format_iso_date),
+        end_date: text_property(sprint, &["isoEndDate"])
+            .as_deref()
+            .and_then(format_iso_date),
+    })
+}
+
+/// Formats the leading `YYYY-MM-DD` of an ISO 8601 timestamp into a short
+/// human date such as `Jun 3, 2026`. Greenhopper encodes the zone offset
+/// without a colon (`+0200`), which is not RFC3339-valid, so only the date
+/// portion is parsed.
+fn format_iso_date(iso: &str) -> Option<String> {
+    let date = iso.get(..10)?;
+    let mut parts = date.split('-');
+    let year = parts.next()?;
+    let month: usize = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    let month_name = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .get(month.checked_sub(1)?)?;
+    Some(format!("{month_name} {day}, {year}"))
 }
 
 fn board_column_from_value(value: &serde_json::Value) -> (i64, BoardColumnSummary) {
@@ -1669,6 +1742,64 @@ mod tests {
         assert_eq!(board.columns[2].max, Some(8));
         assert_eq!(board.columns[3].max, Some(4));
         assert_eq!(board.columns[4].max, None);
+    }
+
+    #[test]
+    fn greenhopper_board_data_extracts_active_sprint_with_formatted_dates() {
+        let board = board_data_from_greenhopper(
+            7,
+            String::from("Scrum"),
+            json!({
+                "columnsData": { "columns": [{ "name": "To Do", "position": 0, "statusIds": ["100"] }] },
+                "issuesData": { "issues": [] },
+                "swimlanesData": { "swimlanes": [] },
+                "sprintsData": {
+                    "sprints": [
+                        {
+                            "id": 1,
+                            "name": "DICE Sprint 195",
+                            "state": "CLOSED",
+                            "isoStartDate": "2026-05-20T10:30:00+0200",
+                            "isoEndDate": "2026-06-03T00:00:00+0200",
+                            "daysRemaining": 0
+                        },
+                        {
+                            "id": 2,
+                            "name": "DICE Sprint 196",
+                            "state": "ACTIVE",
+                            "goal": "Publish offer drafts end-to-end.",
+                            "isoStartDate": "2026-06-03T10:30:55+0200",
+                            "isoEndDate": "2026-06-17T00:00:00+0200",
+                            "daysRemaining": 4
+                        }
+                    ]
+                }
+            }),
+        )
+        .expect("board data");
+
+        let sprint = board.sprint.expect("active sprint");
+        assert_eq!(sprint.name, "DICE Sprint 196");
+        assert_eq!(sprint.goal.as_deref(), Some("Publish offer drafts end-to-end."));
+        assert_eq!(sprint.days_remaining, Some(4));
+        assert_eq!(sprint.start_date.as_deref(), Some("Jun 3, 2026"));
+        assert_eq!(sprint.end_date.as_deref(), Some("Jun 17, 2026"));
+    }
+
+    #[test]
+    fn greenhopper_board_data_has_no_sprint_when_payload_omits_one() {
+        let board = board_data_from_greenhopper(
+            7,
+            String::from("Kanban"),
+            json!({
+                "columnsData": { "columns": [{ "name": "To Do", "position": 0, "statusIds": ["100"] }] },
+                "issuesData": { "issues": [] },
+                "swimlanesData": { "swimlanes": [] }
+            }),
+        )
+        .expect("board data");
+
+        assert_eq!(board.sprint, None);
     }
 
     #[test]

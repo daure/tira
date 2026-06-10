@@ -912,6 +912,14 @@ pub fn fuzzy_indices(text: &str, filter: &str) -> Vec<usize> {
         .map_or_else(Vec::new, |(_, indices)| indices)
 }
 
+pub fn fuzzy_matches(text: &str, filter: &str) -> bool {
+    filter.is_empty()
+        || SkimMatcherV2::default()
+            .smart_case()
+            .fuzzy_match(text, filter)
+            .is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Children, TreeAction, TreeEvent, TreeItem, TreeState};

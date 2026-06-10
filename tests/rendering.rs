@@ -9,7 +9,8 @@ use tira::{
     config::JiraCredentials,
     draw,
     services::jira::{
-        BoardColumnSummary, BoardData, BoardSwimlaneSummary, FieldSummary, JiraError, UserSummary,
+        BoardColumnSummary, BoardData, BoardSwimlaneSummary, FieldSummary, JiraError,
+        SprintSummary, UserSummary,
     },
     ui::theme::{Theme, ThemeName},
 };
@@ -432,6 +433,7 @@ fn board_tab_search_filters_visible_cards() {
             issue_keys: vec![String::from("KAN-1"), String::from("KAN-2")],
         }],
         issues: vec![cart, profile],
+        sprint: None,
     };
     let bindings = KeyBindings::default();
     let mut app = App::with_board_data(board);
@@ -555,7 +557,7 @@ fn board_grouping_by_assignee_shows_assignee_swimlanes() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(vec![assigned, unassigned]);
     app.dispatch(Action::Tabs(TabAction::Previous));
-    app.handle_key(key('g'), &bindings);
+    app.handle_key(key('r'), &bindings);
     app.handle_key(ctrl('j'), &bindings);
     app.handle_key(
         crossterm::event::KeyEvent::new(
@@ -570,7 +572,7 @@ fn board_grouping_by_assignee_shows_assignee_swimlanes() {
         .expect("draw app");
 
     let (screen, _) = rendered_text(&terminal);
-    assert!(screen.contains("Group: Assignee"));
+    assert!(screen.contains("group: Assignee"));
     assert!(screen.contains("Marlo Vlietstra"));
     assert!(screen.contains("") || screen.contains("v"));
     assert!(screen.contains("Unassigned"));
@@ -618,6 +620,7 @@ fn board_cards_use_display_name_avatar_from_issue_search() {
                     issue_keys: vec![String::from("KAN-2")],
                 }],
                 issues: vec![board_issue],
+                sprint: None,
             }),
             next_page_token: None,
             fields: Ok(Vec::new()),
@@ -677,6 +680,7 @@ fn board_grouping_resolves_assignee_account_ids_from_users() {
                     issue_keys: vec![String::from("KAN-2")],
                 }],
                 issues: vec![board_issue],
+                sprint: None,
             }),
             next_page_token: None,
             fields: Ok(Vec::new()),
@@ -691,7 +695,7 @@ fn board_grouping_resolves_assignee_account_ids_from_users() {
     });
     app.dispatch(Action::Tabs(TabAction::Previous));
     let bindings = KeyBindings::default();
-    app.handle_key(key('g'), &bindings);
+    app.handle_key(key('r'), &bindings);
     app.handle_key(ctrl('j'), &bindings);
     app.handle_key(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
@@ -747,6 +751,7 @@ fn board_tab_renders_swimlanes_and_uses_theme_selection_style() {
             },
         ],
         issues: vec![todo, done],
+        sprint: None,
     };
     let theme = Theme::named(ThemeName::Catppuccin);
     let selected_bg = theme.selected_bg();
@@ -809,6 +814,7 @@ fn board_scroll_keeps_swimlane_context_when_returning_to_edges() {
             },
         ],
         issues,
+        sprint: None,
     };
     let bindings = KeyBindings::default();
     let mut app = App::with_board_data(board);
@@ -884,11 +890,12 @@ fn grouped_board_heading_sticks_while_scrolling_cards() {
             },
         ],
         issues,
+        sprint: None,
     };
     let bindings = KeyBindings::default();
     let mut app = App::with_board_data(board);
     app.dispatch(Action::Tabs(TabAction::Previous));
-    app.handle_key(key('g'), &bindings);
+    app.handle_key(key('r'), &bindings);
     app.handle_key(ctrl('j'), &bindings);
     app.handle_key(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
@@ -937,6 +944,7 @@ fn board_cards_render_without_blank_gaps() {
             issue_keys: vec![String::from("KAN-1"), String::from("KAN-2")],
         }],
         issues: vec![first, second],
+        sprint: None,
     };
     let app = App::with_board_data(board);
 
@@ -1002,7 +1010,7 @@ fn board_tab_shows_visible_fallback_when_board_load_fails() {
 
 #[test]
 fn board_help_overlay_shows_board_keybindings() {
-    let backend = TestBackend::new(100, 18);
+    let backend = TestBackend::new(100, 24);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let mut app = App::with_issues(vec![issue("KAN-1", "Help task", "Task", None)]);
     let bindings = KeyBindings::default();
@@ -1015,6 +1023,7 @@ fn board_help_overlay_shows_board_keybindings() {
 
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains("Search board"));
+    assert!(screen.contains("Sprint details"));
     assert!(screen.contains("Move columns"));
     assert!(screen.contains("Move cards"));
     assert!(screen.contains("Page cards"));
@@ -1094,6 +1103,7 @@ fn board_mouse_wheel_scrolls_viewport_without_moving_selection() {
             issue_keys: keys,
         }],
         issues,
+        sprint: None,
     };
     let bindings = KeyBindings::default();
     let mut app = App::with_board_data(board);
@@ -1146,6 +1156,7 @@ fn board_left_click_still_selects_a_card() {
             issue_keys: keys,
         }],
         issues,
+        sprint: None,
     };
     let bindings = KeyBindings::default();
     let mut app = App::with_board_data(board);
@@ -1198,15 +1209,18 @@ fn board_group_header_label_is_horizontally_sticky_when_scrolled() {
             issue_keys: vec![String::from("KAN-1")],
         }],
         issues: vec![done],
+        sprint: None,
     };
     let bindings = KeyBindings::default();
     let mut app = App::with_board_data(board);
     app.dispatch(Action::Tabs(TabAction::Previous));
-    // Group by assignee, then focus the far-right "Done" card to scroll right.
-    app.handle_key(key('g'), &bindings);
+    // Group by assignee, then move right to the far-right "Done" card to scroll right.
+    app.handle_key(key('r'), &bindings);
     app.handle_key(ctrl('j'), &bindings);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), &bindings);
-    app.dispatch(Action::Board(tira::BoardAction::GoToEnd));
+    for _ in 0..names.len() {
+        app.dispatch(Action::Board(tira::BoardAction::MoveRight));
+    }
 
     let backend = TestBackend::new(120, 10);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1231,4 +1245,125 @@ fn board_group_header_label_is_horizontally_sticky_when_scrolled() {
         label_at < 6,
         "group label should be sticky at the left, got: {header_row:?}"
     );
+}
+
+#[test]
+fn sprint_details_dialog_shows_sprint_summary() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let bindings = KeyBindings::default();
+    let board = BoardData {
+        id: 7,
+        name: String::from("DICE Development Scrum Board"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+            max: None,
+        }],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1")],
+        }],
+        issues: vec![issue("KAN-1", "Sprint task", "Task", None)],
+        sprint: Some(SprintSummary {
+            name: String::from("DICE Sprint 196"),
+            goal: Some(String::from(
+                "Deal Makers can create, edit, delete, and publish offer drafts end-to-end.",
+            )),
+            days_remaining: Some(4),
+            start_date: Some(String::from("Jun 3, 2026")),
+            end_date: Some(String::from("Jun 17, 2026")),
+        }),
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('d'), &bindings);
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("Sprint details"));
+    assert!(screen.contains("DICE Sprint 196"));
+    assert!(screen.contains("4 days left"));
+    assert!(screen.contains("Start date"));
+    assert!(screen.contains("End date"));
+    assert!(screen.contains("Jun 3, 2026"));
+    assert!(screen.contains("Jun 17, 2026"));
+}
+
+#[test]
+fn sprint_details_dialog_shows_no_active_sprint_message() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let bindings = KeyBindings::default();
+    let board = BoardData {
+        id: 9,
+        name: String::from("DICE Upstream"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+            max: None,
+        }],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1")],
+        }],
+        issues: vec![issue("KAN-1", "Kanban task", "Task", None)],
+        sprint: None,
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('d'), &bindings);
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("DICE Upstream"));
+    assert!(screen.contains("No active sprint"));
+}
+
+#[test]
+fn board_top_bar_shows_details_days_left_and_lowercase_group() {
+    let backend = TestBackend::new(100, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let bindings = KeyBindings::default();
+    let board = BoardData {
+        id: 7,
+        name: String::from("DICE Development Scrum Board"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+            max: None,
+        }],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1")],
+        }],
+        issues: vec![issue("KAN-1", "Sprint task", "Task", None)],
+        sprint: Some(SprintSummary {
+            name: String::from("DICE Sprint 196"),
+            goal: None,
+            days_remaining: Some(4),
+            start_date: None,
+            end_date: None,
+        }),
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    // Trigger reads "details: 4 days left" and the group label is lowercase.
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("details: 4 days left"));
+    assert!(screen.contains("group: None"));
 }
