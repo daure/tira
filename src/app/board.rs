@@ -95,6 +95,21 @@ pub struct BoardState {
     /// Manual horizontal offset in cells, used while `manual_h_scroll` is set.
     pub manual_h_offset: std::cell::Cell<u16>,
     pub column_widths: std::cell::RefCell<Vec<usize>>,
+    /// The viewport height at which `scroll_offset` was last committed. The
+    /// selection-follow logic only runs (and persists `scroll_offset`) when the
+    /// current viewport is at least this tall. While a pane is shrunk — e.g.
+    /// zellij rendering a stacked pane at near-zero height — the follow logic is
+    /// skipped so the stored scroll position is preserved instead of collapsing
+    /// to the bottom. Keyboard navigation and wheel scrolling reset this so a
+    /// genuine resize still re-commits to the new size.
+    pub committed_v_viewport: std::cell::Cell<Option<usize>>,
+    /// Last vertical viewport height actually rendered, used to snap (rather
+    /// than glide) the vertical animator when the height changes between frames.
+    pub last_v_viewport: std::cell::Cell<Option<usize>>,
+    /// Last `(board_width, strip_width)` seen while rendering; on change the
+    /// horizontal animator snaps to its target instead of gliding, preventing a
+    /// scrollbar "bounce" when switching back to the pane.
+    pub last_h_dims: std::cell::Cell<Option<(u16, u16)>>,
 }
 
 impl Clone for BoardState {
@@ -113,6 +128,9 @@ impl Clone for BoardState {
             manual_h_scroll: std::cell::Cell::new(self.manual_h_scroll.get()),
             manual_h_offset: std::cell::Cell::new(self.manual_h_offset.get()),
             column_widths: std::cell::RefCell::new(self.column_widths.borrow().clone()),
+            committed_v_viewport: std::cell::Cell::new(self.committed_v_viewport.get()),
+            last_v_viewport: std::cell::Cell::new(self.last_v_viewport.get()),
+            last_h_dims: std::cell::Cell::new(self.last_h_dims.get()),
         }
     }
 }
@@ -154,6 +172,9 @@ impl BoardState {
             manual_h_scroll: std::cell::Cell::new(false),
             manual_h_offset: std::cell::Cell::new(0),
             column_widths: std::cell::RefCell::new(Vec::new()),
+            committed_v_viewport: std::cell::Cell::new(None),
+            last_v_viewport: std::cell::Cell::new(None),
+            last_h_dims: std::cell::Cell::new(None),
         }
     }
 
@@ -268,6 +289,7 @@ impl BoardState {
         let next = self.scroll_offset.get().saturating_add_signed(delta);
         self.scroll_offset.set(next);
         self.manual_v_scroll.set(true);
+        self.committed_v_viewport.set(None);
     }
 
     /// Scroll the board viewport horizontally by `delta` cells without moving
@@ -288,6 +310,10 @@ impl BoardState {
         // Keyboard navigation re-enables selection-following for both axes.
         self.manual_v_scroll.set(false);
         self.manual_h_scroll.set(false);
+        // A real interaction re-commits the scroll position to whatever viewport
+        // is rendered next, so a genuine resize-down (not a hidden pane) still
+        // follows the selection at the new, smaller size.
+        self.committed_v_viewport.set(None);
         let Some(data) = &self.data else {
             return;
         };

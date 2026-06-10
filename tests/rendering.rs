@@ -795,6 +795,54 @@ fn board_card_footer_highlights_key_and_avatar_matches() {
 }
 
 #[test]
+fn board_card_footer_highlights_avatar_bubble_for_at_prefixed_search() {
+    let backend = TestBackend::new(80, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut issue = issue("KAN-1", "Footer highlight", "Story", None);
+    issue.status = String::from("To Do");
+    issue
+        .field_values
+        .insert(String::from("assignee"), String::from("Marlo Vlietstra"));
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![issue]);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('/'), &bindings);
+    // The avatar renders as "@MV"; searching the visible "@MV" text should
+    // highlight the bubble just like searching the bare "MV" initials does.
+    for c in "@mv".chars() {
+        app.handle_key(key(c), &bindings);
+    }
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("@MV"));
+    // The "@MV" bubble cells themselves must carry the highlight background.
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    let highlight_bg = app.theme().highlight_bg();
+    let mut bubble_highlighted = false;
+    for y in 0..area.height {
+        for x in 0..area.width.saturating_sub(2) {
+            if buffer[(x, y)].symbol() == "@"
+                && buffer[(x + 1, y)].symbol() == "M"
+                && buffer[(x + 2, y)].symbol() == "V"
+            {
+                bubble_highlighted = buffer[(x, y)].bg == highlight_bg
+                    && buffer[(x + 1, y)].bg == highlight_bg
+                    && buffer[(x + 2, y)].bg == highlight_bg;
+            }
+        }
+    }
+    assert!(
+        bubble_highlighted,
+        "the @MV avatar bubble should be highlighted for an '@mv' search"
+    );
+}
+
+#[test]
 fn board_grouping_by_assignee_shows_assignee_swimlanes() {
     let backend = TestBackend::new(100, 18);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1645,3 +1693,77 @@ fn board_top_bar_shows_details_days_left_and_lowercase_group() {
     assert!(screen.contains("details: 4 days left"));
     assert!(screen.contains("group: None"));
 }
+
+#[test]
+fn board_preserves_scroll_when_pane_is_temporarily_shrunk() {
+    // A tall single-column board so the viewport must scroll vertically.
+    let mut issues = Vec::new();
+    let mut issue_keys = Vec::new();
+    for index in 1..=15 {
+        let key = format!("KAN-{index}");
+        let mut item = issue(&key, &format!("Issue number {index}"), "Task", None);
+        item.status = String::from("To Do");
+        issue_keys.push(key);
+        issues.push(item);
+    }
+    let board = BoardData {
+        id: 1,
+        name: String::from("Kanban"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+            max: None,
+        }],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys,
+        }],
+        issues,
+        sprint: None,
+    };
+    let bindings = KeyBindings::default();
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    // Move the selection well down the list so the viewport is scrolled.
+    for _ in 0..10 {
+        app.handle_key(key('j'), &bindings);
+    }
+
+    // Settle at the full pane size.
+    let mut full = Terminal::new(TestBackend::new(60, 20)).expect("full terminal");
+    full.draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw full");
+    app.tick(std::time::Duration::from_secs(1));
+    full.draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw full");
+    let before = app.board().scroll_offset.get();
+    assert!(
+        before > 0,
+        "precondition: the board should be scrolled away from the top"
+    );
+
+    // Simulate zellij stacking the pane: many renders at a near-zero height.
+    let mut tiny = Terminal::new(TestBackend::new(60, 2)).expect("tiny terminal");
+    for _ in 0..5 {
+        tiny.draw(|frame| draw(frame, &app, &bindings))
+            .expect("draw tiny");
+        app.tick(std::time::Duration::from_millis(50));
+    }
+
+    // Restore the pane and let any animation settle.
+    full.draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw restored");
+    app.tick(std::time::Duration::from_secs(1));
+    full.draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw restored");
+    let after = app.board().scroll_offset.get();
+
+    assert_eq!(
+        before, after,
+        "scroll position is preserved across a temporary pane shrink, \
+         not anchored to the bottom"
+    );
+}
+

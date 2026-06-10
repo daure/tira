@@ -29,7 +29,10 @@ fn displayed_field_matches(issue: &IssueSummary, field: &str, search: &str) -> b
 fn assignee_matches(issue: &IssueSummary, search: &str) -> bool {
     issue.field_values.get("assignee").is_some_and(|assignee| {
         let initials = avatar::initials(assignee);
-        fuzzy_matches(assignee, search) || fuzzy_matches(&initials, search)
+        let bubble = format!("@{initials}");
+        fuzzy_matches(assignee, search)
+            || fuzzy_matches(&initials, search)
+            || fuzzy_matches(&bubble, search)
     })
 }
 
@@ -67,6 +70,9 @@ mod tests {
             .insert("assignee".to_owned(), "Marlo Vlietstra".to_owned());
         // The avatar shows "MV"; searching the initials still matches.
         assert!(board_issue_matches_filter(&issue, "mv"));
+        // The avatar bubble shows "@MV"; the visible "@" prefix matches too.
+        assert!(board_issue_matches_filter(&issue, "@mv"));
+        assert!(board_issue_matches_filter(&issue, "@MV"));
         // The full name fuzzy-matches too.
         assert!(board_issue_matches_filter(&issue, "marlo"));
     }

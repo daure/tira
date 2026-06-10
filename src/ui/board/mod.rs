@@ -254,18 +254,43 @@ fn resolve_vertical_offset(
     sel_y_end: usize,
 ) -> usize {
     let max_v = total_lines.saturating_sub(viewport_height);
-    let mut scroll_offset = app.board().scroll_offset.get();
-    if !app.board().manual_v_scroll.get() {
-        if sel_y_start < scroll_offset {
-            scroll_offset = sel_y_start;
-        } else if sel_y_end > scroll_offset + viewport_height {
-            scroll_offset = sel_y_end.saturating_sub(viewport_height);
+    let board = app.board();
+    // The follow logic is committed only when the viewport is at least as tall
+    // as the height it was last committed at. A shorter viewport — e.g. zellij
+    // rendering a stacked (hidden) pane at near-zero height — would otherwise
+    // drag `scroll_offset` to the bottom to "keep the selection visible" in a
+    // 1-row strip; on restore the selection is then anchored to the bottom. By
+    // skipping the follow logic (and not persisting) while shrunk, the stored
+    // position is preserved and restored intact. A real interaction clears the
+    // commitment (see `BoardState::dispatch`/`scroll_viewport`), so a genuine
+    // resize-down re-commits and follows at the new size.
+    let committed = board.committed_v_viewport.get();
+    let is_committed = committed.is_none_or(|height| viewport_height >= height);
+
+    if is_committed {
+        let mut scroll_offset = board.scroll_offset.get();
+        if !board.manual_v_scroll.get() {
+            if sel_y_start < scroll_offset {
+                scroll_offset = sel_y_start;
+            } else if sel_y_end > scroll_offset + viewport_height {
+                scroll_offset = sel_y_end.saturating_sub(viewport_height);
+            }
         }
+        scroll_offset = scroll_offset.min(max_v);
+        board.scroll_offset.set(scroll_offset);
+        board.committed_v_viewport.set(Some(viewport_height));
     }
-    scroll_offset = scroll_offset.min(max_v);
-    app.board().scroll_offset.set(scroll_offset);
-    let v_anim = &app.board().v_scroll;
+
+    let scroll_offset = board.scroll_offset.get().min(max_v);
+    let v_anim = &board.v_scroll;
     v_anim.set_target(scroll_offset as f64);
+    // When the committed viewport height changes (resize, including the
+    // shrink/restore zellij does for stacked panes), snap to the target instead
+    // of gliding so there is no scrollbar "bounce".
+    if board.last_v_viewport.get() != Some(viewport_height) {
+        board.last_v_viewport.set(Some(viewport_height));
+        v_anim.snap_to(scroll_offset as f64);
+    }
     (v_anim.current().round() as usize).min(max_v)
 }
 
@@ -292,6 +317,11 @@ fn resolve_horizontal_offset(
     };
     let h_anim = &app.board().h_scroll;
     h_anim.set_target(f64::from(h_target));
+    // Snap on resize, mirroring the vertical handling above.
+    if app.board().last_h_dims.get() != Some((board_width, strip_width)) {
+        app.board().last_h_dims.set(Some((board_width, strip_width)));
+        h_anim.snap_to(f64::from(h_target));
+    }
     (h_anim.current().round() as u16).min(max_h)
 }
 

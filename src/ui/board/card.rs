@@ -256,8 +256,9 @@ fn highlighted_avatar_spans(
         return spans;
     }
     let initials = avatar::initials(assignee).to_ascii_lowercase();
+    let bubble = format!("@{initials}");
     let assignee = assignee.to_ascii_lowercase();
-    if assignee.contains(&search) || initials.contains(&search) {
+    if assignee.contains(&search) || initials.contains(&search) || bubble.contains(&search) {
         for span in &mut spans {
             span.style = span.style.fg(theme.highlight_fg()).bg(theme.highlight_bg());
         }
