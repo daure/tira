@@ -55,6 +55,12 @@ impl JiraIssueColumn {
             || matches!(self, Self::Field { id, .. } if id == "priority")
     }
     pub fn label(&self) -> &str {
+        self.header_label()
+    }
+
+    /// The label shown in the issue-table header for this column. The priority
+    /// column renders an empty header by design.
+    pub fn header_label(&self) -> &str {
         match self {
             Self::IssueKey => "Work",
             Self::Summary => "Summary",

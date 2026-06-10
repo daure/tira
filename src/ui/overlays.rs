@@ -8,8 +8,8 @@ use ratatui::{
 
 use crate::{
     App, KeyBindings, components::generic::dialog::Dialog,
-    components::generic::notification::NotificationKind, keymap::HelpScope,
-    services::jira::CommandLogEntry, services::jira::SprintSummary,
+    components::generic::notification::NotificationKind, keymap::HelpItem, keymap::HelpScope,
+    services::jira::CommandLogEntry, services::jira::SprintSummary, ui::theme::Theme,
 };
 
 use super::{chrome, layout, scrollbar};
@@ -211,8 +211,52 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// One key-binding row: a fixed-width binding column followed by the summary,
+/// background-highlighted when selected.
+fn help_row_line<'a>(
+    item: &'a HelpItem,
+    is_selected: bool,
+    binding_width: usize,
+    theme: &Theme,
+) -> Line<'a> {
+    let row_style = if is_selected {
+        Style::default().bg(theme.selected_bg())
+    } else {
+        Style::default()
+    };
+    let binding = format!("{:width$}", item.binding, width = binding_width);
+    Line::from(vec![
+        Span::styled(
+            binding,
+            row_style.fg(theme.accent_fg()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", row_style),
+        Span::styled(item.summary.as_str(), row_style.fg(theme.status_text())),
+    ])
+}
+
+/// Rows for the items belonging to `scope`, in their original order, with the
+/// globally-selected item highlighted.
+fn section_lines<'a>(
+    items: &'a [HelpItem],
+    scope: HelpScope,
+    selected: usize,
+    binding_width: usize,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.scope == scope)
+        .map(|(index, item)| help_row_line(item, index == selected, binding_width, theme))
+        .collect()
+}
+
 pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
-    let items = keybindings.help_items(app.screen(), app.active_tab(), app.is_any_dropdown_open());
+    let items = keybindings.help_items(app.screen(), app.active_tab().title(), app.is_any_dropdown_open());
+    if items.is_empty() {
+        return;
+    }
     let selected = app.help_selected().min(items.len().saturating_sub(1));
     let binding_width = items
         .iter()
@@ -239,7 +283,6 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
             ratatui::layout::Constraint::Length(3),
         ])
         .areas(inner);
-    let list_content_area = list_area;
     let scrollbar_area = Rect {
         x: list_area.x + list_area.width + 1,
         y: list_area.y,
@@ -271,7 +314,7 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
         1 + local_count + 2 + index_in_global
     };
 
-    let viewport = list_content_area.height as usize;
+    let viewport = list_area.height as usize;
     let mut scroll = 0;
     if total_lines > viewport {
         let max_scroll = total_lines.saturating_sub(viewport);
@@ -284,8 +327,6 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
         scroll = scroll.min(max_scroll);
     }
 
-    // binding_width is already defined at the top
-
     let mut lines = Vec::new();
     lines.push(Line::from(vec![Span::styled(
         "── Local ──",
@@ -293,31 +334,13 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
             .fg(app.theme().success_fg())
             .add_modifier(Modifier::BOLD),
     )]));
-
-    for (index, item) in items.iter().enumerate() {
-        if item.scope == HelpScope::Local {
-            let is_selected = index == selected;
-            let row_style = if is_selected {
-                Style::default().bg(app.theme().selected_bg())
-            } else {
-                Style::default()
-            };
-            let binding = format!("{:width$}", item.binding, width = binding_width);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    binding,
-                    row_style
-                        .fg(app.theme().accent_fg())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  ", row_style),
-                Span::styled(
-                    item.summary.as_str(),
-                    row_style.fg(app.theme().status_text()),
-                ),
-            ]));
-        }
-    }
+    lines.extend(section_lines(
+        &items,
+        HelpScope::Local,
+        selected,
+        binding_width,
+        app.theme(),
+    ));
 
     lines.push(Line::default());
     lines.push(Line::from(vec![Span::styled(
@@ -326,36 +349,18 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
             .fg(app.theme().success_fg())
             .add_modifier(Modifier::BOLD),
     )]));
-
-    for (index, item) in items.iter().enumerate() {
-        if item.scope == HelpScope::Global {
-            let is_selected = index == selected;
-            let row_style = if is_selected {
-                Style::default().bg(app.theme().selected_bg())
-            } else {
-                Style::default()
-            };
-            let binding = format!("{:width$}", item.binding, width = binding_width);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    binding,
-                    row_style
-                        .fg(app.theme().accent_fg())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  ", row_style),
-                Span::styled(
-                    item.summary.as_str(),
-                    row_style.fg(app.theme().status_text()),
-                ),
-            ]));
-        }
-    }
+    lines.extend(section_lines(
+        &items,
+        HelpScope::Global,
+        selected,
+        binding_width,
+        app.theme(),
+    ));
 
     let scroll_u16 = scroll as u16;
     frame.render_widget(
         Paragraph::new(lines).scroll((scroll_u16, 0)),
-        list_content_area,
+        list_area,
     );
 
     if total_lines > viewport {

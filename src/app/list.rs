@@ -1,4 +1,4 @@
-use super::{APP_TABS, App, AppEffect, JiraLoadPurpose, ListView, tree_items_from_issues};
+use super::{App, AppEffect, ApplicationTab, JiraLoadPurpose, ListView, tree_items_from_issues};
 use crate::components::generic::notification::Notification;
 use crate::components::generic::tree::TreeItem;
 use crate::services::jira::{CommandLogEntry, IssueSummary, JiraError, JiraLoadResult};
@@ -12,7 +12,7 @@ impl App {
     /// Queues the next page of root issues if one is pending and no root-page
     /// load is already in flight. Browsing only. Fetches up to
     /// `ROOT_PAGE_SIZE` more roots.
-    pub(crate) fn maybe_queue_next_root_page(&mut self) {
+    fn maybe_queue_next_root_page(&mut self) {
         self.queue_next_root_page(crate::services::jira::ROOT_PAGE_SIZE);
     }
 
@@ -416,7 +416,7 @@ impl App {
     }
 
     pub(crate) fn reload_list(&mut self) {
-        if !self.tabs.is_active(APP_TABS, "List") {
+        if self.active_tab() != ApplicationTab::List {
             return;
         }
 
@@ -425,7 +425,7 @@ impl App {
             return;
         };
 
-        // A seamless reload refreshes the existing tree in place rather than
+        // A seamless reload the existing tree in place rather than
         // tearing it down, so the selection, scroll position, and expanded
         // subtrees stay put — no anchoring to the root, no jump to the top.
         // Capture the currently-expanded nodes so their children are refreshed
@@ -461,7 +461,7 @@ impl App {
     /// children (or there is no selection); only `Shift+R` reloads the whole
     /// list.
     pub(crate) fn reload_node(&mut self) {
-        if !self.tabs.is_active(APP_TABS, "List") || self.view != ListView::Browse {
+        if self.active_tab() != ApplicationTab::List || self.view != ListView::Browse {
             return;
         }
         let Some(node_id) = self.filtered_tree.selected_item_id().map(str::to_owned) else {

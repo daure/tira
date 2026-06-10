@@ -13,8 +13,7 @@ pub fn spans(theme: &Theme, labels: &str, filter: &str, base_style: Style) -> Ve
 pub fn display_width(labels: &str) -> usize {
     parse(labels)
         .into_iter()
-        .enumerate()
-        .map(|(_, label)| label.chars().count() + 2)
+        .map(|label| label.chars().count() + 2)
         .sum()
 }
 

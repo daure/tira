@@ -162,10 +162,20 @@ mod tests {
     }
 
     #[test]
-    fn test_tabbed_frame_rendering() {
+    fn tabbed_frame_renders_all_tab_titles() {
         use super::{TabsViewMode, tabbed_frame};
+        use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+
         let theme = crate::ui::theme::Theme::default();
-        let _block_classic = tabbed_frame(TABS, 1, TabsViewMode::Classic, &theme);
-        let _block_minimal = tabbed_frame(TABS, 1, TabsViewMode::Minimal, &theme);
+        let area = Rect::new(0, 0, 40, 3);
+
+        for view_mode in [TabsViewMode::Classic, TabsViewMode::Minimal] {
+            let mut buf = Buffer::empty(area);
+            tabbed_frame(TABS, 1, view_mode, &theme).render(area, &mut buf);
+            let rendered: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+            assert!(rendered.contains("One"));
+            assert!(rendered.contains("Two"));
+            assert!(rendered.contains("Three"));
+        }
     }
 }

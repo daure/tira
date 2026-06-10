@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         keybindings,
         32,
         10,
-        !app.is_help_open() && !app.is_command_log_open(),
+        app.dropdown_cursor_visible(),
     );
 }
 

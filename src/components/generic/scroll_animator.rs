@@ -1,6 +1,11 @@
 use std::cell::Cell;
 use std::time::Duration;
 
+/// Controls the speed/easing of the glide in the exponential-decay formula.
+const DECAY_RATE: f64 = 21.0;
+/// Distance from the target below which the animation snaps to it.
+const SETTLE_EPSILON: f64 = 0.01;
+
 #[derive(Debug)]
 pub struct ScrollAnimator {
     current: Cell<f64>,
@@ -35,15 +40,14 @@ impl ScrollAnimator {
     pub fn tick(&self, dt: Duration) {
         let current = self.current.get();
         let target = self.target.get();
-        if (current - target).abs() < 0.01 {
+        if (current - target).abs() < SETTLE_EPSILON {
             self.current.set(target);
         } else {
             // Exponential decay formula: current = current + (target - current) * (1.0 - exp(-decay * dt))
-            let decay = 21.0; // Decay rate controls the speed/easing of glide (increased by 40% from 15.0)
             let dt_secs = dt.as_secs_f64();
-            let factor = 1.0 - (-decay * dt_secs).exp();
+            let factor = 1.0 - (-DECAY_RATE * dt_secs).exp();
             let new_current = current + (target - current) * factor;
-            if (new_current - target).abs() < 0.01 {
+            if (new_current - target).abs() < SETTLE_EPSILON {
                 self.current.set(target);
             } else {
                 self.current.set(new_current);

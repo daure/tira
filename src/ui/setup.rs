@@ -8,6 +8,12 @@ use ratatui::{
 
 use crate::{App, CredentialField, KeyBindings};
 
+/// Width of the field-label column (e.g. `"API key"` padded). The value/cursor
+/// begins immediately after it.
+const LABEL_WIDTH: u16 = 12;
+/// Width of the active-field marker (`"> "` / `"  "`) preceding each label.
+const MARKER_WIDTH: u16 = 2;
+
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
     let form = app.setup_form();
     let active_field = form.active_field();
@@ -37,7 +43,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(app.theme().accent_fg())),
             Span::styled(
-                format!("{:12}", field.label()),
+                format!("{:width$}", field.label(), width = LABEL_WIDTH as usize),
                 Style::default().fg(app.theme().subtle_fg()),
             ),
             Span::raw(display_value),
@@ -53,7 +59,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
     frame.render_widget(Paragraph::new(lines), area);
 
     let cursor_offset = form.cursors()[form.active_field_idx()];
-    let cursor_x = area.x + 14 + cursor_offset as u16;
+    let cursor_x = area.x + MARKER_WIDTH + LABEL_WIDTH + cursor_offset as u16;
     let cursor_y = area.y + 2 + active_field_idx as u16;
     frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, cursor_y));
 }

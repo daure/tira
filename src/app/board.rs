@@ -312,7 +312,7 @@ impl BoardState {
         if !selected.is_group {
             self.preferred_column = selected.column;
         }
-        let pref = self
+        let preferred_column = self
             .preferred_column
             .min(data.columns.len().saturating_sub(1));
         let next = match action {
@@ -325,7 +325,7 @@ impl BoardState {
                 Some(board_lane_column_entry(
                     data,
                     &lanes[selected.lane],
-                    pref,
+                    preferred_column,
                     search,
                     false,
                 ))
@@ -351,7 +351,7 @@ impl BoardState {
                 &self.collapsed_groups,
                 grouping,
                 selected,
-                pref,
+                preferred_column,
                 search,
                 -1,
             ),
@@ -361,7 +361,7 @@ impl BoardState {
                 &self.collapsed_groups,
                 grouping,
                 selected,
-                pref,
+                preferred_column,
                 search,
                 1,
             ),
@@ -372,7 +372,7 @@ impl BoardState {
                 &self.collapsed_groups,
                 grouping,
                 selected,
-                pref,
+                preferred_column,
                 search,
                 -1,
             ),
@@ -383,18 +383,18 @@ impl BoardState {
                 &self.collapsed_groups,
                 grouping,
                 selected,
-                pref,
+                preferred_column,
                 search,
                 1,
             ),
             BoardAction::GoToStart => cells
                 .iter()
-                .find(|cell| !cell.is_group && cell.column == pref)
+                .find(|cell| !cell.is_group && cell.column == preferred_column)
                 .map(|cell| cell.key.clone()),
             BoardAction::GoToEnd => cells
                 .iter()
                 .rev()
-                .find(|cell| !cell.is_group && cell.column == pref)
+                .find(|cell| !cell.is_group && cell.column == preferred_column)
                 .map(|cell| cell.key.clone()),
             BoardAction::GoToStartPrefix => None,
             BoardAction::CollapseAllGroups => {

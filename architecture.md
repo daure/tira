@@ -452,6 +452,8 @@ Merge order:
 3. environment variables;
 4. CLI flags.
 
+Within `keybindings.toml`, the shared `[nav]` section merges over built-in defaults, and per-context sections (`[board]`, `[tree]`, `[dropdown]`, `[help]`) merge over `[nav]`.
+
 Keep config parsing separate from runtime state. Convert config into `RuntimeConfig` before entering the terminal. Secrets must never appear in logs, status bars, panic output, debug views, or test snapshots.
 
 Keymap contract:
@@ -459,9 +461,10 @@ Keymap contract:
 - External action IDs are stable snake_case strings such as `open_help`.
 - Rust action variants may use idiomatic names such as `Action::OpenHelp`, but the config mapping must be explicit.
 - Bindings may be global, mode-specific, screen-specific, panel-specific, or modal-specific.
-- Precedence must be documented from most specific to least specific.
+- Common navigation motions (up/down, half-page, page, goto-start/end, home/end edges, and arrow opt-ins) are defined once in a shared `[nav]` set. Per-context sections (`[board]`, `[tree]`, `[dropdown]`, `[help]`) may override any shared motion; context-specific keys (such as the board's `h`/`l` or the tree's collapse/expand) live only in their own context.
+- Precedence must be documented from most specific to least specific. For navigation: context section > shared `[nav]` > built-in default.
 - Startup validation rejects unknown action IDs, ambiguous duplicate bindings in the same scope, and unbound required keyboard paths.
-- Footer and help content are generated from the resolved keymap, never from hard-coded shortcut text.
+- Footer and help content are generated from the resolved keymap, never from hard-coded shortcut text. Help text renders navigation labels through `KeySpec::label()`/`join_labels`.
 
 Theme contract:
 

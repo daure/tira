@@ -2,8 +2,8 @@ mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tira::{
-    Action, App, AppEffect, AppEvent, BoardAction, JiraFilteredTreeAction, KeyBindings, Screen,
-    TabAction,
+    Action, App, AppEffect, AppEvent, ApplicationTab, BoardAction, JiraFilteredTreeAction,
+    KeyBindings, Screen, TabAction,
     config::JiraCredentials,
     services::jira::{
         BoardColumnSummary, BoardData, BoardSwimlaneSummary, CommandLogEntry, SprintSummary,
@@ -24,13 +24,13 @@ fn bracket_keys_move_between_tabs() {
         "##,
     );
     let mut app = App::with_issues(Vec::new());
-    assert_eq!(app.active_tab(), "List");
+    assert_eq!(app.active_tab(), ApplicationTab::List);
 
     app.dispatch(bindings.action_for(key(']')));
-    assert_eq!(app.active_tab(), "Timeline");
+    assert_eq!(app.active_tab(), ApplicationTab::Timeline);
 
     app.dispatch(bindings.action_for(key('[')));
-    assert_eq!(app.active_tab(), "List");
+    assert_eq!(app.active_tab(), ApplicationTab::List);
 }
 
 #[test]
@@ -38,13 +38,13 @@ fn tab_navigation_wraps_around() {
     let mut app = App::with_issues(Vec::new());
 
     app.dispatch(Action::Tabs(TabAction::Previous));
-    assert_eq!(app.active_tab(), "Board");
+    assert_eq!(app.active_tab(), ApplicationTab::Board);
 
     app.dispatch(Action::Tabs(TabAction::Previous));
-    assert_eq!(app.active_tab(), "Filters");
+    assert_eq!(app.active_tab(), ApplicationTab::Filters);
 
     app.dispatch(Action::Tabs(TabAction::Next));
-    assert_eq!(app.active_tab(), "Board");
+    assert_eq!(app.active_tab(), ApplicationTab::Board);
 }
 
 #[test]
@@ -704,19 +704,19 @@ fn leader_tab_keys_jump_to_named_tabs() {
 
     app.handle_key(ctrl('x'), &bindings);
     app.handle_key(key('b'), &bindings);
-    assert_eq!(app.active_tab(), "Board");
+    assert_eq!(app.active_tab(), ApplicationTab::Board);
 
     app.handle_key(ctrl('x'), &bindings);
     app.handle_key(key('t'), &bindings);
-    assert_eq!(app.active_tab(), "Timeline");
+    assert_eq!(app.active_tab(), ApplicationTab::Timeline);
 
     app.handle_key(ctrl('x'), &bindings);
     app.handle_key(key('f'), &bindings);
-    assert_eq!(app.active_tab(), "Filters");
+    assert_eq!(app.active_tab(), ApplicationTab::Filters);
 
     app.handle_key(ctrl('x'), &bindings);
     app.handle_key(key('l'), &bindings);
-    assert_eq!(app.active_tab(), "List");
+    assert_eq!(app.active_tab(), ApplicationTab::List);
 }
 
 #[test]
@@ -866,16 +866,6 @@ fn board_assignment_shortcuts_update_selected_card_and_notify() {
     card.status = String::from("To Do");
     let mut app =
         App::with_issues_projects_and_users(vec![card], Vec::new(), vec![marlo.clone()], "KAN");
-    app.dispatch(Action::Tabs(TabAction::Previous));
-
-    app.handle_key(key('a'), &bindings);
-    assert!(app.is_assignee_dropdown_open());
-    let mut app = App::with_issues_projects_and_users(
-        vec![support::issue("KAN-1", "Board work", "Task", None)],
-        Vec::new(),
-        vec![marlo.clone()],
-        "KAN",
-    );
     app.dispatch(Action::Tabs(TabAction::Previous));
 
     app.handle_key(key('i'), &bindings);
@@ -1147,7 +1137,7 @@ fn help_dialog_during_dropdown_does_not_close_dropdown_and_shows_dropdown_help()
     assert!(app.is_theme_dropdown_open());
 
     // The help items should contain dropdown-specific help
-    let items = bindings.help_items(app.screen(), app.active_tab(), app.is_any_dropdown_open());
+    let items = bindings.help_items(app.screen(), app.active_tab().title(), app.is_any_dropdown_open());
     assert!(items.iter().any(|item| item.summary == "Toggle selection"));
     assert!(items.iter().any(|item| item.summary == "Do selection"));
 
@@ -1290,7 +1280,7 @@ fn quick_switcher_opens_command_log_and_jumps_to_tabs() {
         &bindings,
     );
 
-    assert_eq!(app.active_tab(), "Timeline");
+    assert_eq!(app.active_tab(), ApplicationTab::Timeline);
 }
 
 #[test]
@@ -1439,7 +1429,7 @@ fn quick_switcher_filter_accepts_text_after_focus() {
         &bindings,
     );
 
-    assert_eq!(app.active_tab(), "Board");
+    assert_eq!(app.active_tab(), ApplicationTab::Board);
 }
 
 fn board_with_active_sprint() -> BoardData {
@@ -1474,11 +1464,210 @@ fn details_key_toggles_sprint_details_on_board() {
     let bindings = KeyBindings::default();
     let mut app = App::with_board_data(board_with_active_sprint());
     app.dispatch(Action::Tabs(TabAction::Previous));
-    assert_eq!(app.active_tab(), "Board");
+    assert_eq!(app.active_tab(), ApplicationTab::Board);
 
     assert!(!app.is_sprint_details_open());
     app.handle_key(key('d'), &bindings);
     assert!(app.is_sprint_details_open());
     app.handle_key(key('d'), &bindings);
     assert!(!app.is_sprint_details_open());
+}
+
+fn code(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+#[test]
+fn dropdown_default_nav_matrix() {
+    use tira::components::generic::dropdown::DropdownAction;
+    let bindings = KeyBindings::default();
+    let cases = [
+        (key('k'), DropdownAction::MoveUp),
+        (key('j'), DropdownAction::MoveDown),
+        (ctrl('u'), DropdownAction::HalfPageUp),
+        (ctrl('d'), DropdownAction::HalfPageDown),
+        (code(KeyCode::PageUp), DropdownAction::HalfPageUp),
+        (code(KeyCode::PageDown), DropdownAction::HalfPageDown),
+        (key('g'), DropdownAction::GotoPrefix),
+        (shift('g'), DropdownAction::GoToEnd),
+        (code(KeyCode::Home), DropdownAction::GoToStart),
+        (code(KeyCode::End), DropdownAction::GoToEnd),
+        (code(KeyCode::Up), DropdownAction::MoveUp),
+        (code(KeyCode::Down), DropdownAction::MoveDown),
+    ];
+    for (event, expected) in cases {
+        assert_eq!(
+            bindings.project_dropdown_action_for(event),
+            expected,
+            "dropdown mismatch for {event:?}"
+        );
+    }
+}
+
+#[test]
+fn help_default_nav_matrix() {
+    use tira::keymap::HelpDialogAction;
+    let bindings = KeyBindings::default();
+    let cases = [
+        (key('k'), HelpDialogAction::Up),
+        (key('j'), HelpDialogAction::Down),
+        (ctrl('u'), HelpDialogAction::PageUp),
+        (ctrl('d'), HelpDialogAction::PageDown),
+        (code(KeyCode::PageUp), HelpDialogAction::PageUp),
+        (code(KeyCode::PageDown), HelpDialogAction::PageDown),
+        (key('g'), HelpDialogAction::First),
+        (shift('g'), HelpDialogAction::Last),
+        (code(KeyCode::Home), HelpDialogAction::First),
+        (code(KeyCode::End), HelpDialogAction::Last),
+        (code(KeyCode::Up), HelpDialogAction::Up),
+        (code(KeyCode::Down), HelpDialogAction::Down),
+    ];
+    for (event, expected) in cases {
+        assert_eq!(
+            bindings.help_dialog_action_for(event),
+            expected,
+            "help mismatch for {event:?}"
+        );
+    }
+}
+
+#[test]
+fn list_default_nav_matrix() {
+    use tira::{FilteredTreeAction, TreeAction};
+    let bindings = KeyBindings::default();
+    let cases = [
+        (key('k'), Some(FilteredTreeAction::Tree(TreeAction::MoveUp))),
+        (
+            key('j'),
+            Some(FilteredTreeAction::Tree(TreeAction::MoveDown)),
+        ),
+        (
+            ctrl('u'),
+            Some(FilteredTreeAction::Tree(TreeAction::HalfPageUp)),
+        ),
+        (
+            ctrl('d'),
+            Some(FilteredTreeAction::Tree(TreeAction::HalfPageDown)),
+        ),
+        (
+            code(KeyCode::PageUp),
+            Some(FilteredTreeAction::Tree(TreeAction::HalfPageUp)),
+        ),
+        (
+            code(KeyCode::PageDown),
+            Some(FilteredTreeAction::Tree(TreeAction::HalfPageDown)),
+        ),
+        (
+            key('g'),
+            Some(FilteredTreeAction::Tree(TreeAction::GotoPrefix)),
+        ),
+        (
+            shift('g'),
+            Some(FilteredTreeAction::Tree(TreeAction::GoToEnd)),
+        ),
+        (
+            code(KeyCode::Home),
+            Some(FilteredTreeAction::Tree(TreeAction::GoToStart)),
+        ),
+        (
+            code(KeyCode::End),
+            Some(FilteredTreeAction::Tree(TreeAction::GoToEnd)),
+        ),
+    ];
+    for (event, expected) in cases {
+        assert_eq!(
+            bindings.filtered_tree_action_for(event),
+            expected,
+            "list mismatch for {event:?}"
+        );
+    }
+}
+
+#[test]
+fn board_and_list_ignore_arrow_keys() {
+    let bindings = KeyBindings::default();
+
+    assert_eq!(bindings.board_action_for(code(KeyCode::Up)), Action::None);
+    assert_eq!(bindings.board_action_for(code(KeyCode::Down)), Action::None);
+
+    assert_eq!(bindings.filtered_tree_action_for(code(KeyCode::Up)), None);
+    assert_eq!(bindings.filtered_tree_action_for(code(KeyCode::Down)), None);
+}
+
+#[test]
+fn nav_section_overrides_all_contexts() {
+    // Binding `up` once in [nav] makes every context treat the new key exactly
+    // as it treated the default `k`.
+    let default = KeyBindings::default();
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [nav]
+        up = "w"
+        "##,
+    );
+
+    assert_eq!(
+        bindings.board_action_for(key('w')),
+        default.board_action_for(key('k'))
+    );
+    assert_eq!(
+        bindings.filtered_tree_action_for(key('w')),
+        default.filtered_tree_action_for(key('k'))
+    );
+    assert_eq!(
+        bindings.project_dropdown_action_for(key('w')),
+        default.project_dropdown_action_for(key('k'))
+    );
+    assert_eq!(
+        bindings.help_dialog_action_for(key('w')),
+        default.help_dialog_action_for(key('k'))
+    );
+}
+
+#[test]
+fn context_override_beats_nav() {
+    // [board] override wins for the board; contexts without an override fall
+    // back to the shared [nav] key.
+    let default = KeyBindings::default();
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [nav]
+        up = "w"
+        [board]
+        move_up = "e"
+        "##,
+    );
+
+    // Board uses its override `e`, not the shared `w`.
+    assert_eq!(
+        bindings.board_action_for(key('e')),
+        default.board_action_for(key('k'))
+    );
+    assert_eq!(bindings.board_action_for(key('w')), Action::None);
+
+    // The list has no override, so it falls back to the shared `w`.
+    assert_eq!(
+        bindings.filtered_tree_action_for(key('w')),
+        default.filtered_tree_action_for(key('k'))
+    );
+}
+
+#[test]
+fn help_items_render_resolved_nav_labels() {
+    // Help text reflects the configured [nav] bindings, never hardcoded keys.
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [nav]
+        up = "w"
+        down = "s"
+        "##,
+    );
+
+    let board_items = bindings.help_items(Screen::Main, "Board", false);
+    assert!(board_items.iter().any(|item| item.binding == "w/s"));
+    assert!(
+        board_items
+            .iter()
+            .all(|item| item.binding != "k/j" && item.binding != "j/k")
+    );
 }

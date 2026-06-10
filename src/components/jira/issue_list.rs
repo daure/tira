@@ -9,7 +9,7 @@ use ratatui::{
 use crate::{
     App, JiraIssueColumn, KeyBindings, TreeRow,
     components::generic::{
-        avatar, dropdown::DropdownVisibleOption, filter, filtered_tree::FilteredTreeViewMode,
+        avatar, dropdown::{DropdownVisibleOption, MultiSelectDropdownState}, filter, filtered_tree::FilteredTreeViewMode,
         label, priority,
     },
     ui::{layout, scrollbar, style, theme::prefers_plain_icons},
@@ -97,52 +97,13 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let has_expandable = rows.iter().any(|row| row.expandable);
     let columns = app.visible_issue_columns();
-    let code_header = "Work";
     let tree_prefix_width = if has_expandable {
         rows.iter().map(|row| row.depth * 2 + 2).max().unwrap_or(2) as u16
     } else {
         0
     };
-    let first_column = columns.first();
-    let code_width = layout::max_column_width(&rows, code_header, |row| {
-        let prefix = usize::from(matches!(first_column, Some(JiraIssueColumn::IssueKey)))
-            * tree_prefix_width as usize;
-        prefix + 2 + app.issues()[row.item_index].id.chars().count()
-    });
-    let type_width = layout::max_column_width(&rows, "Work type", |row| {
-        let prefix = usize::from(matches!(first_column, Some(JiraIssueColumn::IssueType)))
-            * tree_prefix_width as usize;
-        prefix + app.issues()[row.item_index].kind.chars().count()
-    });
-    let status_width = layout::max_column_width(&rows, "Status", |row| {
-        let prefix = usize::from(matches!(first_column, Some(JiraIssueColumn::Status)))
-            * tree_prefix_width as usize;
-        prefix + app.issues()[row.item_index].status.chars().count()
-    });
 
-    let column_widths = columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| {
-            let prefix = usize::from(index == 0) * tree_prefix_width as usize;
-            match column {
-                JiraIssueColumn::IssueKey => code_width,
-                JiraIssueColumn::IssueType => type_width,
-                JiraIssueColumn::Status => status_width,
-                JiraIssueColumn::Field { id, label } => {
-                    let header_label = if id == "priority" { "" } else { label.as_str() };
-                    layout::max_column_width(&rows, header_label, |row| {
-                        prefix
-                            + app.issues()[row.item_index]
-                                .field_values
-                                .get(id)
-                                .map_or(0, |value| field_display_width(id, value))
-                    })
-                }
-                JiraIssueColumn::Summary => 0,
-            }
-        })
-        .collect::<Vec<_>>();
+    let column_widths = compute_column_widths(app, &rows, columns, tree_prefix_width);
     let fixed_width = columns
         .iter()
         .zip(column_widths.iter())
@@ -156,86 +117,17 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let table_rows = app
         .visible_issue_range(area.height.saturating_sub(1) as usize)
         .map(|row_index| {
-            let row = &rows[row_index];
-            let item = &app.issues()[row.item_index];
-            let row_style =
-                style::selected_row_style(app.theme(), row_index == app.selected_issue_index());
-            let row_style = if row.reloading {
-                row_style.add_modifier(Modifier::DIM)
-            } else {
-                row_style
-            };
-            let cells = columns
-                .iter()
-                .enumerate()
-                .map(|(column_index, column)| {
-                    let is_first = column_index == 0;
-                    let spans = match column {
-                        JiraIssueColumn::IssueKey => style::code_cell_spans(
-                            app.theme(),
-                            item,
-                            app.highlight_term(),
-                            row_style,
-                        ),
-                        JiraIssueColumn::Summary => {
-                            let truncated =
-                                layout::truncate_with_ellipsis(&item.label, description_width);
-                            style::highlighted_spans_owned(
-                                app.theme(),
-                                &truncated,
-                                app.highlight_term(),
-                                row_style,
-                            )
-                        }
-                        JiraIssueColumn::IssueType => style::highlighted_spans(
-                            app.theme(),
-                            &item.kind,
-                            app.highlight_term(),
-                            row_style,
-                        ),
-                        JiraIssueColumn::Status => style::highlighted_spans(
-                            app.theme(),
-                            &item.status,
-                            app.highlight_term(),
-                            row_style,
-                        ),
-                        JiraIssueColumn::Field { id, .. } => item
-                            .field_values
-                            .get(id)
-                            .map_or_else(Vec::new, |value| field_spans(app, id, value, row_style)),
-                    };
-                    Cell::from(Line::from(with_tree_prefix(
-                        app.theme(),
-                        spans,
-                        row,
-                        is_first && has_expandable,
-                        app.spinner_glyph(),
-                    )))
-                })
-                .collect::<Vec<_>>();
-            Row::new(cells).style(row_style)
+            build_table_row(
+                app,
+                &rows,
+                columns,
+                row_index,
+                description_width,
+                has_expandable,
+            )
         });
 
-    let header = Row::new(columns.iter().enumerate().map(|(index, column)| {
-        let label = match column {
-            JiraIssueColumn::IssueKey => code_header,
-            JiraIssueColumn::Summary => "Summary",
-            JiraIssueColumn::IssueType => "Work type",
-            JiraIssueColumn::Status => "Status",
-            JiraIssueColumn::Field { id, label } if id == "priority" => "",
-            JiraIssueColumn::Field { label, .. } => label.as_str(),
-        };
-        if index == 0 && has_expandable {
-            format!("  {label}")
-        } else {
-            label.to_owned()
-        }
-    }))
-    .style(
-        Style::default()
-            .fg(app.theme().muted_fg())
-            .add_modifier(Modifier::BOLD),
-    );
+    let header = build_header(app, columns, has_expandable);
     let widths = columns
         .iter()
         .zip(column_widths.iter())
@@ -250,6 +142,139 @@ fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .column_spacing(1),
         area,
     );
+}
+
+fn compute_column_widths(
+    app: &App,
+    rows: &[TreeRow],
+    columns: &[JiraIssueColumn],
+    tree_prefix_width: u16,
+) -> Vec<u16> {
+    let first_column = columns.first();
+    let prefix_for = |is_first: bool| usize::from(is_first) * tree_prefix_width as usize;
+    let code_width = layout::max_column_width(rows, "Work", |row| {
+        prefix_for(matches!(first_column, Some(JiraIssueColumn::IssueKey)))
+            + 2
+            + app.issues()[row.item_index].id.chars().count()
+    });
+    let type_width = layout::max_column_width(rows, "Work type", |row| {
+        prefix_for(matches!(first_column, Some(JiraIssueColumn::IssueType)))
+            + app.issues()[row.item_index].kind.chars().count()
+    });
+    let status_width = layout::max_column_width(rows, "Status", |row| {
+        prefix_for(matches!(first_column, Some(JiraIssueColumn::Status)))
+            + app.issues()[row.item_index].status.chars().count()
+    });
+
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let prefix = prefix_for(index == 0);
+            match column {
+                JiraIssueColumn::IssueKey => code_width,
+                JiraIssueColumn::IssueType => type_width,
+                JiraIssueColumn::Status => status_width,
+                JiraIssueColumn::Field { id, .. } => {
+                    layout::max_column_width(rows, column.header_label(), |row| {
+                        prefix
+                            + app.issues()[row.item_index]
+                                .field_values
+                                .get(id)
+                                .map_or(0, |value| field_display_width(id, value))
+                    })
+                }
+                JiraIssueColumn::Summary => 0,
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+fn build_table_row<'a>(
+    app: &'a App,
+    rows: &'a [TreeRow],
+    columns: &[JiraIssueColumn],
+    row_index: usize,
+    description_width: usize,
+    has_expandable: bool,
+) -> Row<'a> {
+    let row = &rows[row_index];
+    let item = &app.issues()[row.item_index];
+    let row_style = style::selected_row_style(app.theme(), row_index == app.selected_issue_index());
+    let row_style = if row.reloading {
+        row_style.add_modifier(Modifier::DIM)
+    } else {
+        row_style
+    };
+    let cells = columns
+        .iter()
+        .enumerate()
+        .map(|(column_index, column)| {
+            let is_first = column_index == 0;
+            let spans = match column {
+                JiraIssueColumn::IssueKey => style::code_cell_spans(
+                    app.theme(),
+                    item,
+                    app.highlight_term(),
+                    row_style,
+                ),
+                JiraIssueColumn::Summary => {
+                    let truncated =
+                        layout::truncate_with_ellipsis(&item.label, description_width);
+                    style::highlighted_spans_owned(
+                        app.theme(),
+                        &truncated,
+                        app.highlight_term(),
+                        row_style,
+                    )
+                }
+                JiraIssueColumn::IssueType => style::highlighted_spans(
+                    app.theme(),
+                    &item.kind,
+                    app.highlight_term(),
+                    row_style,
+                ),
+                JiraIssueColumn::Status => style::highlighted_spans(
+                    app.theme(),
+                    &item.status,
+                    app.highlight_term(),
+                    row_style,
+                ),
+                JiraIssueColumn::Field { id, .. } => item
+                    .field_values
+                    .get(id)
+                    .map_or_else(Vec::new, |value| field_spans(app, id, value, row_style)),
+            };
+            Cell::from(Line::from(with_tree_prefix(
+                app.theme(),
+                spans,
+                row,
+                is_first && has_expandable,
+                app.spinner_glyph(),
+            )))
+        })
+        .collect::<Vec<_>>();
+    Row::new(cells).style(row_style)
+}
+
+fn build_header(app: &App, columns: &[JiraIssueColumn], has_expandable: bool) -> Row<'static> {
+    let cells = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let label = column.header_label();
+            if index == 0 && has_expandable {
+                format!("  {label}")
+            } else {
+                label.to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    Row::new(cells).style(
+        Style::default()
+            .fg(app.theme().muted_fg())
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 fn render_empty_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -286,6 +311,37 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Clear, dropdown_area);
     frame.render_widget(block, dropdown_area);
 
+    let layout = dropdown_layout(dropdown_area, inner);
+
+    frame.render_widget(
+        filter::render_icon(dropdown.filter_state(), app.theme()),
+        layout.filter_icon_area,
+    );
+    frame.render_widget(
+        filter::render_text(dropdown.filter_state(), app.theme()),
+        layout.filter_text_area,
+    );
+
+    render_dropdown_options(frame, layout.options_area, app, dropdown);
+    render_dropdown_separators(frame, dropdown_area, &layout, app, dropdown);
+
+    if dropdown.is_filter_focused() {
+        let cursor_x = layout.filter_text_area.x + dropdown.filter_cursor() as u16;
+        frame.set_cursor_position(ratatui::layout::Position::new(
+            cursor_x,
+            layout.filter_text_area.y,
+        ));
+    }
+}
+
+struct DropdownLayout {
+    filter_icon_area: Rect,
+    filter_text_area: Rect,
+    options_area: Rect,
+    scrollbar_area: Rect,
+}
+
+fn dropdown_layout(dropdown_area: Rect, inner: Rect) -> DropdownLayout {
     let [_, padded_inner] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -309,15 +365,20 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .areas(filter_area);
 
-    frame.render_widget(
-        filter::render_icon(dropdown.filter_state(), app.theme()),
+    DropdownLayout {
         filter_icon_area,
-    );
-    frame.render_widget(
-        filter::render_text(dropdown.filter_state(), app.theme()),
         filter_text_area,
-    );
+        options_area,
+        scrollbar_area,
+    }
+}
 
+fn render_dropdown_options(
+    frame: &mut Frame<'_>,
+    options_area: Rect,
+    app: &App,
+    dropdown: &MultiSelectDropdownState<JiraIssueColumn>,
+) {
     let visible_window = dropdown.visible_window(options_area.height as usize);
     let options = visible_window.iter().map(|entry| match *entry {
         DropdownVisibleOption::Separator => ListItem::new(Line::default()),
@@ -328,11 +389,11 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
             let label_style =
                 style::dropdown_option_label_style(app.theme(), option.selected, is_focused);
             let icon = if option.selected {
-                if prefers_plain_icons() { "[x]" } else { "" }
+                if prefers_plain_icons() { "[x]" } else { "" }
             } else if prefers_plain_icons() {
                 "[ ]"
             } else {
-                ""
+                ""
             };
             let icon_style = if dropdown.is_option_toggle_enabled(index) {
                 Style::default().fg(app.theme().accent_fg())
@@ -351,7 +412,18 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
     });
 
     frame.render_widget(List::new(options), options_area);
+}
 
+fn render_dropdown_separators(
+    frame: &mut Frame<'_>,
+    dropdown_area: Rect,
+    layout: &DropdownLayout,
+    app: &App,
+    dropdown: &MultiSelectDropdownState<JiraIssueColumn>,
+) {
+    let options_area = layout.options_area;
+    let scrollbar_area = layout.scrollbar_area;
+    let visible_window = dropdown.visible_window(options_area.height as usize);
     let visible_range = dropdown.visible_range(options_area.height as usize);
     let thumb_range = scrollbar::thumb_range(
         dropdown.visible_row_count(),
@@ -403,11 +475,6 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 },
             );
         }
-    }
-
-    if dropdown.is_filter_focused() {
-        let cursor_x = filter_text_area.x + dropdown.filter_cursor() as u16;
-        frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, filter_text_area.y));
     }
 }
 fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {

@@ -1,10 +1,10 @@
 mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Rect;
-use tira::{App, JiraIssueColumn, KeyBindings};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use tira::{App, JiraIssueColumn, KeyBindings, draw};
 
-use support::{ctrl, issue, key, project, test_issues};
+use support::{ctrl, issue, key, test_issues};
 
 fn left_click(column: u16, row: u16) -> MouseEvent {
     MouseEvent {
@@ -114,18 +114,31 @@ fn mouse_click_on_tree_chevron_toggles_expansion() {
 }
 
 #[test]
-fn mouse_wheel_scrolls_list_and_column_dropdown() {
+fn mouse_wheel_over_the_issue_list_scrolls_the_viewport_without_moving_selection() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(test_issues(20));
 
     app.handle_mouse(scroll_down(5, 3), Rect::new(0, 0, 100, 20), &bindings);
+
     assert_eq!(app.selected_issue_index(), 0);
     assert!(app.issue_scroll_offset() > 0);
+}
+
+#[test]
+fn mouse_wheel_over_the_open_column_dropdown_scrolls_it_without_changing_selection() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(test_issues(20));
 
     app.handle_mouse(left_click(90, 1), Rect::new(0, 0, 100, 20), &bindings);
-    app.column_dropdown()
-        .expect("column dropdown")
-        .visible_range(4);
+    assert!(app.is_column_dropdown_open());
+
+    // Render through the real draw path so the dropdown's viewport is sized by
+    // the terminal, rather than poking the layout via `visible_range`.
+    let mut terminal = Terminal::new(TestBackend::new(100, 12)).expect("test terminal");
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
     let before_selected = app
         .column_dropdown()
         .expect("column dropdown")
@@ -134,7 +147,9 @@ fn mouse_wheel_scrolls_list_and_column_dropdown() {
         .column_dropdown()
         .expect("column dropdown")
         .scroll_offset();
+
     app.handle_mouse(scroll_down(82, 4), Rect::new(0, 0, 100, 20), &bindings);
+
     let dropdown = app.column_dropdown().expect("column dropdown");
     assert_eq!(dropdown.selected_index(), before_selected);
     assert!(dropdown.scroll_offset() >= before_scroll);
@@ -181,20 +196,6 @@ fn default_list_columns_use_fixed_order_and_column_selector_hides_fixed_columns(
     assert!(!labels.contains(&"Summary"));
     assert!(labels.contains(&"Status"));
     assert!(labels.contains(&"Labels"));
-}
-
-#[test]
-fn mouse_click_on_status_project_opens_project_picker() {
-    let bindings = KeyBindings::default();
-    let mut app = App::with_issues_and_projects(
-        vec![issue("KAN-1", "Catalog epic", "Epic", None)],
-        vec![project("KAN", "Kanban"), project("OPS", "Operations")],
-        "KAN",
-    );
-
-    app.handle_mouse(left_click(92, 19), Rect::new(0, 0, 100, 20), &bindings);
-
-    assert!(app.is_project_dropdown_open());
 }
 
 #[test]

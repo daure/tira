@@ -1,19 +1,17 @@
-extern crate chrono;
-
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
 
-use crate::{App, KeyBindings, app::APP_TABS, components::generic::tabs};
+use crate::{App, ApplicationTab, KeyBindings, app::app_tabs, components::generic::tabs};
 
 pub fn tabbed_frame(
     active_tab: usize,
     view_mode: tabs::TabsViewMode,
     theme: &crate::ui::theme::Theme,
 ) -> ratatui::widgets::Block<'static> {
-    tabs::tabbed_frame(APP_TABS, active_tab, view_mode, theme)
+    tabs::tabbed_frame(&app_tabs(), active_tab, view_mode, theme)
 }
 
 pub fn border_separator(width: u16, theme: &crate::ui::theme::Theme) -> Paragraph<'static> {
@@ -124,7 +122,7 @@ pub fn status_bar(app: &App, keybindings: &KeyBindings, width: u16) -> Paragraph
 fn status_hint(app: &App, keybindings: &KeyBindings) -> String {
     match app.screen() {
         crate::Screen::Setup => keybindings.setup_hint_text(),
-        crate::Screen::Main if app.active_tab() == "Board" => keybindings.board_hint_text(),
+        crate::Screen::Main if app.active_tab() == ApplicationTab::Board => keybindings.board_hint_text(),
         crate::Screen::Main => keybindings.list_hint_text(),
     }
 }

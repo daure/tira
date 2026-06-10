@@ -41,6 +41,7 @@ pub enum HelpDialogAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyBindings {
+    nav: NavBindings,
     tabs: TabsKeyBindings,
     board: BoardKeyBindings,
     tree: TreeKeyBindings,
@@ -69,6 +70,47 @@ pub struct KeyBindings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct NavBindings {
+    up: Vec<KeySpec>,
+    down: Vec<KeySpec>,
+    half_page_up: Vec<KeySpec>,
+    half_page_down: Vec<KeySpec>,
+    page_up: Vec<KeySpec>,
+    page_down: Vec<KeySpec>,
+    goto_start_prefix: Vec<KeySpec>,
+    goto_end: Vec<KeySpec>,
+    home: Vec<KeySpec>,
+    end: Vec<KeySpec>,
+    arrow_up: Vec<KeySpec>,
+    arrow_down: Vec<KeySpec>,
+}
+
+impl Default for NavBindings {
+    fn default() -> Self {
+        Self {
+            up: vec![KeySpec::plain('k')],
+            down: vec![KeySpec::plain('j')],
+            half_page_up: vec![KeySpec::code_with_modifiers(
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+            )],
+            half_page_down: vec![KeySpec::code_with_modifiers(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+            )],
+            page_up: vec![KeySpec::code(KeyCode::PageUp)],
+            page_down: vec![KeySpec::code(KeyCode::PageDown)],
+            goto_start_prefix: vec![KeySpec::plain('g')],
+            goto_end: vec![KeySpec::shifted('g')],
+            home: vec![KeySpec::code(KeyCode::Home)],
+            end: vec![KeySpec::code(KeyCode::End)],
+            arrow_up: vec![KeySpec::code(KeyCode::Up)],
+            arrow_down: vec![KeySpec::code(KeyCode::Down)],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TabsKeyBindings {
     previous: KeySpec,
     next: KeySpec,
@@ -76,10 +118,10 @@ struct TabsKeyBindings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TreeKeyBindings {
-    move_up: KeySpec,
-    move_down: KeySpec,
-    half_page_up: KeySpec,
-    half_page_down: KeySpec,
+    move_up: Option<Vec<KeySpec>>,
+    move_down: Option<Vec<KeySpec>>,
+    half_page_up: Option<Vec<KeySpec>>,
+    half_page_down: Option<Vec<KeySpec>>,
     collapse: KeySpec,
     expand: KeySpec,
     toggle_expand: KeySpec,
@@ -89,8 +131,8 @@ struct TreeKeyBindings {
     open_assignee: KeySpec,
     assign_to_me: KeySpec,
     unassign: KeySpec,
-    go_to_end: KeySpec,
-    go_to_start_prefix: KeySpec,
+    go_to_end: Option<Vec<KeySpec>>,
+    go_to_start_prefix: Option<Vec<KeySpec>>,
     focus_filter: KeySpec,
 }
 
@@ -98,12 +140,12 @@ struct TreeKeyBindings {
 struct BoardKeyBindings {
     move_left: Vec<KeySpec>,
     move_right: Vec<KeySpec>,
-    move_up: Vec<KeySpec>,
-    move_down: Vec<KeySpec>,
-    page_up: Vec<KeySpec>,
-    page_down: Vec<KeySpec>,
-    first: Vec<KeySpec>,
-    last: Vec<KeySpec>,
+    move_up: Option<Vec<KeySpec>>,
+    move_down: Option<Vec<KeySpec>>,
+    page_up: Option<Vec<KeySpec>>,
+    page_down: Option<Vec<KeySpec>>,
+    first: Option<Vec<KeySpec>>,
+    last: Option<Vec<KeySpec>>,
 }
 
 impl Default for BoardKeyBindings {
@@ -111,21 +153,12 @@ impl Default for BoardKeyBindings {
         Self {
             move_left: vec![KeySpec::plain('h')],
             move_right: vec![KeySpec::plain('l')],
-            move_up: vec![KeySpec::plain('k')],
-            move_down: vec![KeySpec::plain('j')],
-            page_up: vec![
-                KeySpec::code_with_modifiers(KeyCode::Char('u'), KeyModifiers::CONTROL),
-                KeySpec::code(KeyCode::PageUp),
-            ],
-            page_down: vec![
-                KeySpec::code_with_modifiers(KeyCode::Char('d'), KeyModifiers::CONTROL),
-                KeySpec::code(KeyCode::PageDown),
-            ],
-            first: vec![KeySpec::code(KeyCode::Home)],
-            last: vec![
-                KeySpec::code(KeyCode::End),
-                KeySpec::code_with_modifiers(KeyCode::Char('g'), KeyModifiers::SHIFT),
-            ],
+            move_up: None,
+            move_down: None,
+            page_up: None,
+            page_down: None,
+            first: None,
+            last: None,
         }
     }
 }
@@ -135,12 +168,12 @@ struct DropdownKeyBindings {
     focus_filter: KeySpec,
     submit: KeySpec,
     toggle_selected: KeySpec,
-    move_up: KeySpec,
-    move_down: KeySpec,
-    half_page_up: KeySpec,
-    half_page_down: KeySpec,
-    first: KeySpec,
-    last: KeySpec,
+    move_up: Option<Vec<KeySpec>>,
+    move_down: Option<Vec<KeySpec>>,
+    half_page_up: Option<Vec<KeySpec>>,
+    half_page_down: Option<Vec<KeySpec>>,
+    first: Option<Vec<KeySpec>>,
+    last: Option<Vec<KeySpec>>,
 }
 
 impl Default for DropdownKeyBindings {
@@ -150,12 +183,12 @@ impl Default for DropdownKeyBindings {
             focus_filter: KeySpec::plain('/'),
             submit: KeySpec::code(KeyCode::Enter),
             toggle_selected: KeySpec::plain(' '),
-            move_up: KeySpec::plain('k'),
-            move_down: KeySpec::plain('j'),
-            half_page_up: KeySpec::code_with_modifiers(KeyCode::Char('u'), KeyModifiers::CONTROL),
-            half_page_down: KeySpec::code_with_modifiers(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            first: KeySpec::plain('g'),
-            last: KeySpec::shifted('g'),
+            move_up: None,
+            move_down: None,
+            half_page_up: None,
+            half_page_down: None,
+            first: None,
+            last: None,
         }
     }
 }
@@ -163,12 +196,12 @@ impl Default for DropdownKeyBindings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HelpKeyBindings {
     close: KeySpec,
-    move_up: KeySpec,
-    move_down: KeySpec,
-    page_up: KeySpec,
-    page_down: KeySpec,
-    first: KeySpec,
-    last: KeySpec,
+    move_up: Option<Vec<KeySpec>>,
+    move_down: Option<Vec<KeySpec>>,
+    page_up: Option<Vec<KeySpec>>,
+    page_down: Option<Vec<KeySpec>>,
+    first: Option<Vec<KeySpec>>,
+    last: Option<Vec<KeySpec>>,
 }
 
 impl Default for TabsKeyBindings {
@@ -184,12 +217,12 @@ impl Default for HelpKeyBindings {
     fn default() -> Self {
         Self {
             close: KeySpec::code(KeyCode::Esc),
-            move_up: KeySpec::plain('k'),
-            move_down: KeySpec::plain('j'),
-            page_up: KeySpec::code_with_modifiers(KeyCode::Char('u'), KeyModifiers::CONTROL),
-            page_down: KeySpec::code_with_modifiers(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            first: KeySpec::plain('g'),
-            last: KeySpec::shifted('g'),
+            move_up: None,
+            move_down: None,
+            page_up: None,
+            page_down: None,
+            first: None,
+            last: None,
         }
     }
 }
@@ -197,10 +230,10 @@ impl Default for HelpKeyBindings {
 impl Default for TreeKeyBindings {
     fn default() -> Self {
         Self {
-            move_up: KeySpec::plain('k'),
-            move_down: KeySpec::plain('j'),
-            half_page_up: KeySpec::code_with_modifiers(KeyCode::Char('u'), KeyModifiers::CONTROL),
-            half_page_down: KeySpec::code_with_modifiers(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            move_up: None,
+            move_down: None,
+            half_page_up: None,
+            half_page_down: None,
             collapse: KeySpec::plain('h'),
             expand: KeySpec::plain('l'),
             toggle_expand: KeySpec::plain(' '),
@@ -210,8 +243,8 @@ impl Default for TreeKeyBindings {
             open_assignee: KeySpec::plain('a'),
             assign_to_me: KeySpec::plain('i'),
             unassign: KeySpec::plain('u'),
-            go_to_end: KeySpec::code_with_modifiers(KeyCode::Char('g'), KeyModifiers::SHIFT),
-            go_to_start_prefix: KeySpec::plain('g'),
+            go_to_end: None,
+            go_to_start_prefix: None,
             focus_filter: KeySpec::plain('/'),
         }
     }
@@ -220,6 +253,7 @@ impl Default for TreeKeyBindings {
 impl Default for KeyBindings {
     fn default() -> Self {
         Self {
+            nav: NavBindings::default(),
             tabs: TabsKeyBindings::default(),
             board: BoardKeyBindings::default(),
             tree: TreeKeyBindings::default(),
@@ -269,6 +303,29 @@ impl KeyBindings {
             return bindings;
         };
 
+        set_keys(&value, "nav", "up", &mut bindings.nav.up);
+        set_keys(&value, "nav", "down", &mut bindings.nav.down);
+        set_keys(&value, "nav", "half_page_up", &mut bindings.nav.half_page_up);
+        set_keys(
+            &value,
+            "nav",
+            "half_page_down",
+            &mut bindings.nav.half_page_down,
+        );
+        set_keys(&value, "nav", "page_up", &mut bindings.nav.page_up);
+        set_keys(&value, "nav", "page_down", &mut bindings.nav.page_down);
+        set_keys(
+            &value,
+            "nav",
+            "goto_start_prefix",
+            &mut bindings.nav.goto_start_prefix,
+        );
+        set_keys(&value, "nav", "goto_end", &mut bindings.nav.goto_end);
+        set_keys(&value, "nav", "home", &mut bindings.nav.home);
+        set_keys(&value, "nav", "end", &mut bindings.nav.end);
+        set_keys(&value, "nav", "arrow_up", &mut bindings.nav.arrow_up);
+        set_keys(&value, "nav", "arrow_down", &mut bindings.nav.arrow_down);
+
         set_key(&value, "global", "quit", &mut bindings.quit);
         set_key(&value, "global", "reload_node", &mut bindings.reload_node);
         set_key(&value, "global", "reload_list", &mut bindings.reload_list);
@@ -295,8 +352,8 @@ impl KeyBindings {
         );
         set_key(&value, "global", "open_help", &mut bindings.open_help);
         set_key(&value, "help", "close", &mut bindings.help.close);
-        set_key(&value, "help", "move_up", &mut bindings.help.move_up);
-        set_key(&value, "help", "move_down", &mut bindings.help.move_down);
+        set_keys_opt(&value, "help", "move_up", &mut bindings.help.move_up);
+        set_keys_opt(&value, "help", "move_down", &mut bindings.help.move_down);
         set_key(&value, "dropdown", "close", &mut bindings.dropdown.close);
         set_key(
             &value,
@@ -311,36 +368,31 @@ impl KeyBindings {
             "toggle_selected",
             &mut bindings.dropdown.toggle_selected,
         );
-        set_key(
-            &value,
-            "dropdown",
-            "move_up",
-            &mut bindings.dropdown.move_up,
-        );
-        set_key(
+        set_keys_opt(&value, "dropdown", "move_up", &mut bindings.dropdown.move_up);
+        set_keys_opt(
             &value,
             "dropdown",
             "move_down",
             &mut bindings.dropdown.move_down,
         );
-        set_key(
+        set_keys_opt(
             &value,
             "dropdown",
             "half_page_up",
             &mut bindings.dropdown.half_page_up,
         );
-        set_key(
+        set_keys_opt(
             &value,
             "dropdown",
             "half_page_down",
             &mut bindings.dropdown.half_page_down,
         );
-        set_key(&value, "dropdown", "first", &mut bindings.dropdown.first);
-        set_key(&value, "dropdown", "last", &mut bindings.dropdown.last);
-        set_key(&value, "help", "page_up", &mut bindings.help.page_up);
-        set_key(&value, "help", "page_down", &mut bindings.help.page_down);
-        set_key(&value, "help", "first", &mut bindings.help.first);
-        set_key(&value, "help", "last", &mut bindings.help.last);
+        set_keys_opt(&value, "dropdown", "first", &mut bindings.dropdown.first);
+        set_keys_opt(&value, "dropdown", "last", &mut bindings.dropdown.last);
+        set_keys_opt(&value, "help", "page_up", &mut bindings.help.page_up);
+        set_keys_opt(&value, "help", "page_down", &mut bindings.help.page_down);
+        set_keys_opt(&value, "help", "first", &mut bindings.help.first);
+        set_keys_opt(&value, "help", "last", &mut bindings.help.last);
         set_key(&value, "tabs", "previous_tab", &mut bindings.tabs.previous);
         set_key(&value, "tabs", "next_tab", &mut bindings.tabs.next);
         set_keys(&value, "board", "move_left", &mut bindings.board.move_left);
@@ -350,21 +402,21 @@ impl KeyBindings {
             "move_right",
             &mut bindings.board.move_right,
         );
-        set_keys(&value, "board", "move_up", &mut bindings.board.move_up);
-        set_keys(&value, "board", "move_down", &mut bindings.board.move_down);
-        set_keys(&value, "board", "page_up", &mut bindings.board.page_up);
-        set_keys(&value, "board", "page_down", &mut bindings.board.page_down);
-        set_keys(&value, "board", "first", &mut bindings.board.first);
-        set_keys(&value, "board", "last", &mut bindings.board.last);
-        set_key(&value, "tree", "move_up", &mut bindings.tree.move_up);
-        set_key(&value, "tree", "move_down", &mut bindings.tree.move_down);
-        set_key(
+        set_keys_opt(&value, "board", "move_up", &mut bindings.board.move_up);
+        set_keys_opt(&value, "board", "move_down", &mut bindings.board.move_down);
+        set_keys_opt(&value, "board", "page_up", &mut bindings.board.page_up);
+        set_keys_opt(&value, "board", "page_down", &mut bindings.board.page_down);
+        set_keys_opt(&value, "board", "first", &mut bindings.board.first);
+        set_keys_opt(&value, "board", "last", &mut bindings.board.last);
+        set_keys_opt(&value, "tree", "move_up", &mut bindings.tree.move_up);
+        set_keys_opt(&value, "tree", "move_down", &mut bindings.tree.move_down);
+        set_keys_opt(
             &value,
             "tree",
             "half_page_up",
             &mut bindings.tree.half_page_up,
         );
-        set_key(
+        set_keys_opt(
             &value,
             "tree",
             "half_page_down",
@@ -415,8 +467,8 @@ impl KeyBindings {
             &mut bindings.tree.assign_to_me,
         );
         set_key(&value, "tree", "unassign", &mut bindings.tree.unassign);
-        set_key(&value, "tree", "go_to_end", &mut bindings.tree.go_to_end);
-        set_key(
+        set_keys_opt(&value, "tree", "go_to_end", &mut bindings.tree.go_to_end);
+        set_keys_opt(
             &value,
             "tree",
             "go_to_start_prefix",
@@ -515,21 +567,27 @@ impl KeyBindings {
             Action::Board(BoardAction::MoveLeft)
         } else if matches_any(&self.board.move_right, key) {
             Action::Board(BoardAction::MoveRight)
-        } else if matches_any(&self.board.move_up, key) {
+        } else if matches_any(resolve(&self.board.move_up, &self.nav.up), key) {
             Action::Board(BoardAction::MoveUp)
-        } else if matches_any(&self.board.move_down, key) {
+        } else if matches_any(resolve(&self.board.move_down, &self.nav.down), key) {
             Action::Board(BoardAction::MoveDown)
-        } else if matches_any(&self.board.page_up, key) {
+        } else if matches_any(resolve(&self.board.page_up, &self.nav.half_page_up), key)
+            || matches_any(&self.nav.page_up, key)
+        {
             Action::Board(BoardAction::HalfPageUp)
-        } else if matches_any(&self.board.page_down, key) {
+        } else if matches_any(resolve(&self.board.page_down, &self.nav.half_page_down), key)
+            || matches_any(&self.nav.page_down, key)
+        {
             Action::Board(BoardAction::HalfPageDown)
         } else if self.board_group.matches(key) {
             Action::ToggleBoardGrouping
-        } else if self.tree.go_to_start_prefix.matches(key) {
+        } else if matches_any(&self.nav.goto_start_prefix, key) {
             Action::Board(BoardAction::GoToStartPrefix)
-        } else if matches_any(&self.board.first, key) {
+        } else if matches_any(resolve(&self.board.first, &self.nav.home), key) {
             Action::Board(BoardAction::GoToStart)
-        } else if matches_any(&self.board.last, key) {
+        } else if matches_any(resolve(&self.board.last, &self.nav.end), key)
+            || matches_any(&self.nav.goto_end, key)
+        {
             Action::Board(BoardAction::GoToEnd)
         } else {
             Action::None
@@ -559,13 +617,17 @@ impl KeyBindings {
     }
 
     pub fn filtered_tree_action_for(&self, key: KeyEvent) -> Option<FilteredTreeAction> {
-        if self.tree.move_up.matches(key) {
+        if matches_any(resolve(&self.tree.move_up, &self.nav.up), key) {
             Some(FilteredTreeAction::Tree(TreeAction::MoveUp))
-        } else if self.tree.move_down.matches(key) {
+        } else if matches_any(resolve(&self.tree.move_down, &self.nav.down), key) {
             Some(FilteredTreeAction::Tree(TreeAction::MoveDown))
-        } else if self.tree.half_page_up.matches(key) || key.code == KeyCode::PageUp {
+        } else if matches_any(resolve(&self.tree.half_page_up, &self.nav.half_page_up), key)
+            || matches_any(&self.nav.page_up, key)
+        {
             Some(FilteredTreeAction::Tree(TreeAction::HalfPageUp))
-        } else if self.tree.half_page_down.matches(key) || key.code == KeyCode::PageDown {
+        } else if matches_any(resolve(&self.tree.half_page_down, &self.nav.half_page_down), key)
+            || matches_any(&self.nav.page_down, key)
+        {
             Some(FilteredTreeAction::Tree(TreeAction::HalfPageDown))
         } else if self.tree.collapse.matches(key) {
             Some(FilteredTreeAction::Tree(TreeAction::Collapse))
@@ -577,11 +639,13 @@ impl KeyBindings {
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             Some(FilteredTreeAction::Tree(TreeAction::CollapseAll))
-        } else if self.tree.go_to_end.matches(key) || key.code == KeyCode::End {
+        } else if matches_any(resolve(&self.tree.go_to_end, &self.nav.goto_end), key)
+            || matches_any(&self.nav.end, key)
+        {
             Some(FilteredTreeAction::Tree(TreeAction::GoToEnd))
-        } else if key.code == KeyCode::Home {
+        } else if matches_any(&self.nav.home, key) {
             Some(FilteredTreeAction::Tree(TreeAction::GoToStart))
-        } else if self.tree.go_to_start_prefix.matches(key) {
+        } else if matches_any(resolve(&self.tree.go_to_start_prefix, &self.nav.goto_start_prefix), key) {
             Some(FilteredTreeAction::Tree(TreeAction::GotoPrefix))
         } else if self.tree.focus_filter.matches(key) {
             Some(FilteredTreeAction::FocusFilter)
@@ -631,17 +695,29 @@ impl KeyBindings {
     pub fn help_dialog_action_for(&self, key: KeyEvent) -> HelpDialogAction {
         if self.open_help.matches(key) || self.help.close.matches(key) || is_escape_key(key) {
             HelpDialogAction::Close
-        } else if self.help.move_up.matches(key) || key.code == KeyCode::Up {
+        } else if matches_any(resolve(&self.help.move_up, &self.nav.up), key)
+            || matches_any(&self.nav.arrow_up, key)
+        {
             HelpDialogAction::Up
-        } else if self.help.move_down.matches(key) || key.code == KeyCode::Down {
+        } else if matches_any(resolve(&self.help.move_down, &self.nav.down), key)
+            || matches_any(&self.nav.arrow_down, key)
+        {
             HelpDialogAction::Down
-        } else if self.help.page_up.matches(key) || matches!(key.code, KeyCode::PageUp) {
+        } else if matches_any(resolve(&self.help.page_up, &self.nav.half_page_up), key)
+            || matches_any(&self.nav.page_up, key)
+        {
             HelpDialogAction::PageUp
-        } else if self.help.page_down.matches(key) || matches!(key.code, KeyCode::PageDown) {
+        } else if matches_any(resolve(&self.help.page_down, &self.nav.half_page_down), key)
+            || matches_any(&self.nav.page_down, key)
+        {
             HelpDialogAction::PageDown
-        } else if self.help.first.matches(key) || matches!(key.code, KeyCode::Home) {
+        } else if matches_any(resolve(&self.help.first, &self.nav.goto_start_prefix), key)
+            || matches_any(&self.nav.home, key)
+        {
             HelpDialogAction::First
-        } else if self.help.last.matches(key) || matches!(key.code, KeyCode::End) {
+        } else if matches_any(resolve(&self.help.last, &self.nav.goto_end), key)
+            || matches_any(&self.nav.end, key)
+        {
             HelpDialogAction::Last
         } else {
             HelpDialogAction::None
@@ -671,18 +747,49 @@ impl KeyBindings {
     }
 
     pub fn board_hint_text(&self) -> String {
+        let move_up = resolved_owned(&self.board.move_up, &self.nav.up);
+        let move_down = resolved_owned(&self.board.move_down, &self.nav.down);
+        let page_up = resolved_owned(&self.board.page_up, &self.board_shared_page_up());
+        let page_down = resolved_owned(&self.board.page_down, &self.board_shared_page_down());
         format!(
             "{} search | {} details | {} reload | {} columns | {} cards | {} page | {}/{} groups | {} help",
             self.tree.focus_filter.label(),
             self.board_details.label(),
             self.reload_list.label(),
-            key_labels(&self.board.move_left, &self.board.move_right),
-            key_labels(&self.board.move_up, &self.board.move_down),
-            key_labels(&self.board.page_up, &self.board.page_down),
+            join_labels(self.board.move_left.iter().chain(&self.board.move_right), "/"),
+            join_labels(move_up.iter().chain(&move_down), "/"),
+            join_labels(page_up.iter().chain(&page_down), "/"),
             self.tree.collapse_all.label(),
             KeySpec::shifted('z').label(),
             self.open_help.label()
         )
+    }
+
+    fn board_shared_page_up(&self) -> Vec<KeySpec> {
+        self.nav
+            .half_page_up
+            .iter()
+            .chain(&self.nav.page_up)
+            .copied()
+            .collect()
+    }
+
+    fn board_shared_page_down(&self) -> Vec<KeySpec> {
+        self.nav
+            .half_page_down
+            .iter()
+            .chain(&self.nav.page_down)
+            .copied()
+            .collect()
+    }
+
+    fn board_shared_last(&self) -> Vec<KeySpec> {
+        self.nav
+            .end
+            .iter()
+            .chain(&self.nav.goto_end)
+            .copied()
+            .collect()
     }
 
     fn leader_shortcut_label(&self, binding: &KeySpec) -> String {
@@ -734,277 +841,343 @@ impl KeyBindings {
         active_tab: &str,
         dropdown_open: bool,
     ) -> Vec<HelpItem> {
-        let mut items = Vec::new();
-
-        if dropdown_open {
-            items.push(self.help_item(
-                HelpScope::Local,
-                format!(
-                    "{} / {}",
-                    self.dropdown.toggle_selected.label(),
-                    "Ctrl+Space"
-                ),
-                "Toggle selection",
-                "Toggle current option (multi-select) or select it (single-select).",
-            ));
-            items.push(self.help_item(
-                HelpScope::Local,
-                "Ctrl+Enter".to_string(),
-                "Do selection",
-                "Select and submit the current option from the search input.",
-            ));
-            items.push(self.help_item(
-                HelpScope::Local,
-                "Ctrl+J / Ctrl+K".to_string(),
-                "Navigate search options",
-                "Move option selection down/up while typing in the search input.",
-            ));
-            items.push(self.help_item(
-                HelpScope::Local,
-                self.dropdown.focus_filter.label(),
-                "Focus search",
-                "Focus the search input to filter options.",
-            ));
-            items.push(self.help_item(
-                HelpScope::Local,
-                "Ctrl+C".to_string(),
-                "Clear search",
-                "Clear the search input text.",
-            ));
-            items.push(self.help_item(
-                HelpScope::Local,
-                "Esc".to_string(),
-                "Clear / Close",
-                "Clear search input focus (first press) and close the dropdown (second press).",
-            ));
-            items.push(self.help_item(
-                HelpScope::Local,
-                "j / k / Down / Up".to_string(),
-                "Move selection",
-                "Move selection down/up when search is not focused.",
-            ));
-            items.push(self.help_item(
-                HelpScope::Local,
-                "gg / G / Home / End".to_string(),
-                "Start / End",
-                "Jump to the first or last option.",
-            ));
-            items.push(self.help_item(
-                HelpScope::Local,
-                "ctrl+u / ctrl+d / PageUp / PageDown".to_string(),
-                "Scroll page",
-                "Page up/down through options.",
-            ));
+        let mut items = if dropdown_open {
+            self.dropdown_help_items()
         } else {
             match screen {
-                Screen::Setup => {
-                    items.push(self.help_item(
-                        HelpScope::Local,
-                        self.setup_next_field.label(),
-                        "Next field",
-                        "Move focus to the next setup field.",
-                    ));
-                    items.push(self.help_item(
-                        HelpScope::Local,
-                        self.setup_previous_field.label(),
-                        "Previous field",
-                        "Move focus to the previous setup field.",
-                    ));
-                    items.push(self.help_item(
-                        HelpScope::Local,
-                        self.setup_submit.label(),
-                        "Load issues",
-                        "Save credentials and load Jira issues.",
-                    ));
-                    items.push(self.help_item(
-                        HelpScope::Local,
-                        self.setup_quit.label(),
-                        "Quit",
-                        "Exit without saving setup data.",
-                    ));
-                }
+                Screen::Setup => self.setup_help_items(),
                 Screen::Main => {
-                    items.push(self.help_item(
+                    let mut items = vec![self.help_item(
                         HelpScope::Local,
                         format!("{}/{}", self.tabs.previous.label(), self.tabs.next.label()),
                         "Switch tabs",
                         "Move between the top-level Jira tabs.",
-                    ));
+                    )];
                     if active_tab == "Board" {
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.focus_filter.label(),
-                            "Search board",
-                            "Focus the board search and narrow visible cards.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.board_details.label(),
-                            "Sprint details",
-                            "Show the active sprint's name, goal, dates, and time remaining.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.board_group.label(),
-                            "Group board",
-                            "Group the board by assignee, epic, stories, or spaces.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            key_labels(&self.board.move_left, &self.board.move_right),
-                            "Move columns",
-                            "Move to the nearest issue in the previous or next board column.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            key_labels(&self.board.move_up, &self.board.move_down),
-                            "Move cards",
-                            "Move to the previous or next issue in the current board column.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            key_list_label(&self.board.page_up)
-                                + " / "
-                                + &key_list_label(&self.board.page_down),
-                            "Page cards",
-                            "Move through board issues by half pages.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            key_list_label(&self.board.first)
-                                + " / "
-                                + &key_list_label(&self.board.last),
-                            "Start / End",
-                            "Jump to the first or last board issue.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.open_assignee.label(),
-                            "Assign",
-                            "Open the assignee selector for the selected board card.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.assign_to_me.label(),
-                            "Assign to me",
-                            "Assign the selected board card to the current Jira user.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.unassign.label(),
-                            "Unassign",
-                            "Clear the selected board card assignee.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.reload_list.label(),
-                            "Reload board",
-                            "Reload the active Jira board.",
-                        ));
+                        items.extend(self.board_help_items());
                     }
                     if active_tab == "List" {
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.focus_filter.label(),
-                            "Search issues",
-                            "Focus the issue filter and narrow the current list.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            format!(
-                                "{}/{}",
-                                self.tree.move_up.label(),
-                                self.tree.move_down.label()
-                            ),
-                            "Move selection",
-                            format!(
-                                "Move selection ({} / {} / PageUp / PageDown for paging, Home / End for edges).",
-                                self.tree.half_page_up.label(),
-                                self.tree.half_page_down.label()
-                            ),
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            "gg / G / Home / End".to_string(),
-                            "Start / End",
-                            "Jump to the first or last visible issue.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            "ctrl+u / ctrl+d / PageUp / PageDown".to_string(),
-                            "Scroll page",
-                            "Move through the issue list by half pages.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            format!(
-                                "{}/{}",
-                                self.tree.collapse.label(),
-                                self.tree.expand.label()
-                            ),
-                            "Collapse / expand",
-                            "Collapse a branch or expand the selected parent row.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.toggle_expand.label(),
-                            "Toggle branch",
-                            "Expand or collapse the selected tree row.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.open_columns.label(),
-                            "Columns",
-                            "Open the column picker for the issue table.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.open_assignee.label(),
-                            "Assign",
-                            "Open the assignee selector for the selected issue.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.assign_to_me.label(),
-                            "Assign to me",
-                            "Assign the selected issue to the current Jira user.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.tree.unassign.label(),
-                            "Unassign",
-                            "Clear the selected issue assignee.",
-                        ));
-                        let yank_label = self.tree.yank_issue_url.label();
-                        let yank_binding = if yank_label.len() == 1 {
-                            format!("{}{}", yank_label.to_lowercase(), yank_label.to_lowercase())
-                        } else {
-                            format!("{} {}", yank_label, yank_label)
-                        };
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            yank_binding,
-                            "Copy issue URL",
-                            "Copy the selected Jira issue URL to the clipboard.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.reload_node.label(),
-                            "Reload node",
-                            "Reload the selected issue's children from Jira.",
-                        ));
-                        items.push(self.help_item(
-                            HelpScope::Local,
-                            self.reload_list.label(),
-                            "Reload list",
-                            "Reload all issues for the active Jira project.",
-                        ));
+                        items.extend(self.list_help_items());
                     }
+                    items
                 }
             }
-        }
+        };
         self.append_global_help_items(&mut items);
 
+        items
+    }
+
+    fn dropdown_help_items(&self) -> Vec<HelpItem> {
+        let mut items = Vec::new();
+        items.push(self.help_item(
+            HelpScope::Local,
+            format!(
+                "{} / {}",
+                self.dropdown.toggle_selected.label(),
+                "Ctrl+Space"
+            ),
+            "Toggle selection",
+            "Toggle current option (multi-select) or select it (single-select).",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            "Ctrl+Enter".to_string(),
+            "Do selection",
+            "Select and submit the current option from the search input.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            "Ctrl+J / Ctrl+K".to_string(),
+            "Navigate search options",
+            "Move option selection down/up while typing in the search input.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.dropdown.focus_filter.label(),
+            "Focus search",
+            "Focus the search input to filter options.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            "Ctrl+C".to_string(),
+            "Clear search",
+            "Clear the search input text.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.dropdown.close.label(),
+            "Clear / Close",
+            "Clear search input focus (first press) and close the dropdown (second press).",
+        ));
+        let move_down = resolve(&self.dropdown.move_down, &self.nav.down);
+        let move_up = resolve(&self.dropdown.move_up, &self.nav.up);
+        items.push(self.help_item(
+            HelpScope::Local,
+            join_labels(
+                move_down
+                    .iter()
+                    .chain(move_up)
+                    .chain(&self.nav.arrow_down)
+                    .chain(&self.nav.arrow_up),
+                " / ",
+            ),
+            "Move selection",
+            "Move selection down/up when search is not focused.",
+        ));
+        let prefix = resolve(&self.dropdown.first, &self.nav.goto_start_prefix);
+        let goto_end = resolve(&self.dropdown.last, &self.nav.goto_end);
+        let prefix_label = prefix
+            .first()
+            .map(|spec| doubled_label(&spec.label()))
+            .unwrap_or_default();
+        items.push(self.help_item(
+            HelpScope::Local,
+            format!(
+                "{prefix_label} / {}",
+                join_labels(goto_end.iter().chain(&self.nav.home).chain(&self.nav.end), " / ")
+            ),
+            "Start / End",
+            "Jump to the first or last option.",
+        ));
+        let half_page_up = resolve(&self.dropdown.half_page_up, &self.nav.half_page_up);
+        let half_page_down = resolve(&self.dropdown.half_page_down, &self.nav.half_page_down);
+        items.push(self.help_item(
+            HelpScope::Local,
+            join_labels(
+                half_page_up
+                    .iter()
+                    .chain(half_page_down)
+                    .chain(&self.nav.page_up)
+                    .chain(&self.nav.page_down),
+                " / ",
+            ),
+            "Scroll page",
+            "Page up/down through options.",
+        ));
+        items
+    }
+
+    fn setup_help_items(&self) -> Vec<HelpItem> {
+        let mut items = Vec::new();
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.setup_next_field.label(),
+            "Next field",
+            "Move focus to the next setup field.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.setup_previous_field.label(),
+            "Previous field",
+            "Move focus to the previous setup field.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.setup_submit.label(),
+            "Load issues",
+            "Save credentials and load Jira issues.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.setup_quit.label(),
+            "Quit",
+            "Exit without saving setup data.",
+        ));
+        items
+    }
+
+    fn board_help_items(&self) -> Vec<HelpItem> {
+        let mut items = Vec::new();
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.focus_filter.label(),
+            "Search board",
+            "Focus the board search and narrow visible cards.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.board_details.label(),
+            "Sprint details",
+            "Show the active sprint's name, goal, dates, and time remaining.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.board_group.label(),
+            "Group board",
+            "Group the board by assignee, epic, stories, or spaces.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            join_labels(self.board.move_left.iter().chain(&self.board.move_right), "/"),
+            "Move columns",
+            "Move to the nearest issue in the previous or next board column.",
+        ));
+        let move_up = resolved_owned(&self.board.move_up, &self.nav.up);
+        let move_down = resolved_owned(&self.board.move_down, &self.nav.down);
+        items.push(self.help_item(
+            HelpScope::Local,
+            join_labels(move_up.iter().chain(&move_down), "/"),
+            "Move cards",
+            "Move to the previous or next issue in the current board column.",
+        ));
+        let page_up = resolved_owned(&self.board.page_up, &self.board_shared_page_up());
+        let page_down = resolved_owned(&self.board.page_down, &self.board_shared_page_down());
+        items.push(self.help_item(
+            HelpScope::Local,
+            join_labels(&page_up, " / ") + " / " + &join_labels(&page_down, " / "),
+            "Page cards",
+            "Move through board issues by half pages.",
+        ));
+        let first = resolved_owned(&self.board.first, &self.nav.home);
+        let last = resolved_owned(&self.board.last, &self.board_shared_last());
+        items.push(self.help_item(
+            HelpScope::Local,
+            join_labels(&first, " / ") + " / " + &join_labels(&last, " / "),
+            "Start / End",
+            "Jump to the first or last board issue.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.open_assignee.label(),
+            "Assign",
+            "Open the assignee selector for the selected board card.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.assign_to_me.label(),
+            "Assign to me",
+            "Assign the selected board card to the current Jira user.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.unassign.label(),
+            "Unassign",
+            "Clear the selected board card assignee.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.reload_list.label(),
+            "Reload board",
+            "Reload the active Jira board.",
+        ));
+        items
+    }
+
+    fn list_help_items(&self) -> Vec<HelpItem> {
+        let mut items = Vec::new();
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.focus_filter.label(),
+            "Search issues",
+            "Focus the issue filter and narrow the current list.",
+        ));
+        let move_up = resolve(&self.tree.move_up, &self.nav.up);
+        let move_down = resolve(&self.tree.move_down, &self.nav.down);
+        let half_page_up = resolve(&self.tree.half_page_up, &self.nav.half_page_up);
+        let half_page_down = resolve(&self.tree.half_page_down, &self.nav.half_page_down);
+        let paging = join_labels(
+            half_page_up
+                .iter()
+                .chain(half_page_down)
+                .chain(&self.nav.page_up)
+                .chain(&self.nav.page_down),
+            " / ",
+        );
+        let edges = join_labels(self.nav.home.iter().chain(&self.nav.end), " / ");
+        items.push(self.help_item(
+            HelpScope::Local,
+            join_labels(move_up.iter().chain(move_down), "/"),
+            "Move selection",
+            format!("Move selection ({paging} for paging, {edges} for edges)."),
+        ));
+        let prefix = resolve(&self.tree.go_to_start_prefix, &self.nav.goto_start_prefix);
+        let goto_end = resolve(&self.tree.go_to_end, &self.nav.goto_end);
+        let prefix_label = prefix
+            .first()
+            .map(|spec| doubled_label(&spec.label()))
+            .unwrap_or_default();
+        items.push(self.help_item(
+            HelpScope::Local,
+            format!(
+                "{prefix_label} / {}",
+                join_labels(goto_end.iter().chain(&self.nav.home).chain(&self.nav.end), " / ")
+            ),
+            "Start / End",
+            "Jump to the first or last visible issue.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            join_labels(
+                half_page_up
+                    .iter()
+                    .chain(half_page_down)
+                    .chain(&self.nav.page_up)
+                    .chain(&self.nav.page_down),
+                " / ",
+            ),
+            "Scroll page",
+            "Move through the issue list by half pages.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            format!(
+                "{}/{}",
+                self.tree.collapse.label(),
+                self.tree.expand.label()
+            ),
+            "Collapse / expand",
+            "Collapse a branch or expand the selected parent row.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.toggle_expand.label(),
+            "Toggle branch",
+            "Expand or collapse the selected tree row.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.open_columns.label(),
+            "Columns",
+            "Open the column picker for the issue table.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.open_assignee.label(),
+            "Assign",
+            "Open the assignee selector for the selected issue.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.assign_to_me.label(),
+            "Assign to me",
+            "Assign the selected issue to the current Jira user.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.tree.unassign.label(),
+            "Unassign",
+            "Clear the selected issue assignee.",
+        ));
+        let yank_binding = doubled_label(&self.tree.yank_issue_url.label());
+        items.push(self.help_item(
+            HelpScope::Local,
+            yank_binding,
+            "Copy issue URL",
+            "Copy the selected Jira issue URL to the clipboard.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.reload_node.label(),
+            "Reload node",
+            "Reload the selected issue's children from Jira.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            self.reload_list.label(),
+            "Reload list",
+            "Reload all issues for the active Jira project.",
+        ));
         items
     }
 
@@ -1108,21 +1281,31 @@ impl KeyBindings {
             DropdownAction::Close
         } else if self.dropdown.focus_filter.matches(key) {
             DropdownAction::FocusFilter
-        } else if self.dropdown.half_page_up.matches(key) || key.code == KeyCode::PageUp {
+        } else if matches_any(resolve(&self.dropdown.half_page_up, &self.nav.half_page_up), key)
+            || matches_any(&self.nav.page_up, key)
+        {
             DropdownAction::HalfPageUp
-        } else if self.dropdown.half_page_down.matches(key) || key.code == KeyCode::PageDown {
+        } else if matches_any(resolve(&self.dropdown.half_page_down, &self.nav.half_page_down), key)
+            || matches_any(&self.nav.page_down, key)
+        {
             DropdownAction::HalfPageDown
-        } else if self.dropdown.last.matches(key) || key.code == KeyCode::End {
+        } else if matches_any(resolve(&self.dropdown.last, &self.nav.goto_end), key)
+            || matches_any(&self.nav.end, key)
+        {
             DropdownAction::GoToEnd
-        } else if key.code == KeyCode::Home {
+        } else if matches_any(&self.nav.home, key) {
             DropdownAction::GoToStart
-        } else if self.dropdown.first.matches(key) {
+        } else if matches_any(resolve(&self.dropdown.first, &self.nav.goto_start_prefix), key) {
             DropdownAction::GotoPrefix
         } else if self.dropdown.submit.matches(key) || self.dropdown.toggle_selected.matches(key) {
             DropdownAction::ToggleSelected
-        } else if self.dropdown.move_up.matches(key) || key.code == KeyCode::Up {
+        } else if matches_any(resolve(&self.dropdown.move_up, &self.nav.up), key)
+            || matches_any(&self.nav.arrow_up, key)
+        {
             DropdownAction::MoveUp
-        } else if self.dropdown.move_down.matches(key) || key.code == KeyCode::Down {
+        } else if matches_any(resolve(&self.dropdown.move_down, &self.nav.down), key)
+            || matches_any(&self.nav.arrow_down, key)
+        {
             DropdownAction::MoveDown
         } else {
             DropdownAction::None
@@ -1382,19 +1565,55 @@ fn set_keys(value: &toml::Table, section: &str, key: &str, destination: &mut Vec
     }
 }
 
+fn set_keys_opt(
+    value: &toml::Table,
+    section: &str,
+    key: &str,
+    destination: &mut Option<Vec<KeySpec>>,
+) {
+    let mut parsed = Vec::new();
+    set_keys(value, section, key, &mut parsed);
+    if !parsed.is_empty() {
+        *destination = Some(parsed);
+    }
+}
+
+fn resolve<'a>(ovr: &'a Option<Vec<KeySpec>>, shared: &'a [KeySpec]) -> &'a [KeySpec] {
+    match ovr {
+        Some(keys) if !keys.is_empty() => keys,
+        _ => shared,
+    }
+}
+
+fn resolved_owned(ovr: &Option<Vec<KeySpec>>, shared: &[KeySpec]) -> Vec<KeySpec> {
+    match ovr {
+        Some(keys) if !keys.is_empty() => keys.clone(),
+        _ => shared.to_vec(),
+    }
+}
+
 fn matches_any(bindings: &[KeySpec], key: KeyEvent) -> bool {
     bindings.iter().any(|binding| binding.matches(key))
 }
 
-fn key_labels(primary: &[KeySpec], secondary: &[KeySpec]) -> String {
+fn doubled_label(label: &str) -> String {
+    if label.chars().count() == 1 {
+        let lower = label.to_lowercase();
+        format!("{lower}{lower}")
+    } else {
+        format!("{label} {label}")
+    }
+}
+
+fn join_labels<'a>(bindings: impl IntoIterator<Item = &'a KeySpec>, sep: &str) -> String {
     let mut labels = Vec::new();
-    for binding in primary.iter().chain(secondary) {
+    for binding in bindings {
         let label = binding.label();
         if !labels.contains(&label) {
             labels.push(label);
         }
     }
-    labels.join("/")
+    labels.join(sep)
 }
 
 fn is_ctrl_q(key: KeyEvent) -> bool {
@@ -1403,17 +1622,6 @@ fn is_ctrl_q(key: KeyEvent) -> bool {
 }
 fn control_code_for(key: char) -> char {
     ((key as u8) & 0x1f) as char
-}
-
-fn key_list_label(bindings: &[KeySpec]) -> String {
-    let mut labels = Vec::new();
-    for binding in bindings {
-        let label = binding.label();
-        if !labels.contains(&label) {
-            labels.push(label);
-        }
-    }
-    labels.join(" / ")
 }
 
 fn set_key(value: &toml::Table, section: &str, key: &str, destination: &mut KeySpec) {

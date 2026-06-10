@@ -741,7 +741,6 @@ fn board_grouping_by_assignee_shows_assignee_swimlanes() {
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains("group: Assignee"));
     assert!(screen.contains("Marlo Vlietstra"));
-    assert!(screen.contains("") || screen.contains("v"));
     assert!(screen.contains("Unassigned"));
 }
 
@@ -1227,10 +1226,17 @@ fn code_column_header_spacing_is_conditional() {
     terminal
         .draw(|frame| draw(frame, &app_no_exp, &KeyBindings::default()))
         .expect("draw");
-    let (screen_no_exp, _) = rendered_text(&terminal);
-    let chars_no_exp: Vec<char> = screen_no_exp.chars().collect();
-    let line_2_no_exp: String = chars_no_exp[320..480].iter().collect();
-    assert!(line_2_no_exp.contains("Work "));
+    let buffer_no_exp = terminal.backend().buffer();
+    let rows_no_exp = buffer_no_exp
+        .content()
+        .chunks(buffer_no_exp.area().width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+    let header_no_exp = rows_no_exp
+        .iter()
+        .find(|row| row.contains("Work"))
+        .expect("work column header row");
+    assert!(header_no_exp.contains("Work "));
 
     let app_has_exp = App::with_issues(vec![
         issue("KAN-2", "Epic 1", "Epic", None),
@@ -1239,10 +1245,17 @@ fn code_column_header_spacing_is_conditional() {
     terminal
         .draw(|frame| draw(frame, &app_has_exp, &KeyBindings::default()))
         .expect("draw");
-    let (screen_has_exp, _) = rendered_text(&terminal);
-    let chars_has_exp: Vec<char> = screen_has_exp.chars().collect();
-    let line_2_has_exp: String = chars_has_exp[320..480].iter().collect();
-    assert!(line_2_has_exp.contains("  Work "));
+    let buffer_has_exp = terminal.backend().buffer();
+    let rows_has_exp = buffer_has_exp
+        .content()
+        .chunks(buffer_has_exp.area().width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+    let header_has_exp = rows_has_exp
+        .iter()
+        .find(|row| row.contains("Work"))
+        .expect("work column header row");
+    assert!(header_has_exp.contains("  Work "));
 }
 
 #[test]

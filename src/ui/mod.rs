@@ -16,13 +16,10 @@ mod theme_picker;
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::Style,
-    text::Line,
-    widgets::Paragraph,
+    layout::{Constraint, Direction, Layout, Rect},
 };
 
-use crate::{App, KeyBindings, Screen, components::jira::issue_list};
+use crate::{App, ApplicationTab, KeyBindings, Screen, components::jira::issue_list};
 
 pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
     // At launch with stored credentials, show only the animated splash logo
@@ -70,16 +67,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
 }
 fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
     match app.active_tab() {
-        "List" => issue_list::render(frame, area, app, keybindings),
-        "Board" => board::render(frame, area, app, keybindings),
-        "Timeline" | "Filters" => logo::render(frame, area, app.anim_elapsed(), app.theme()),
-        tab => render_empty_tab(frame, area, tab, app.theme()),
+        ApplicationTab::List => issue_list::render(frame, area, app, keybindings),
+        ApplicationTab::Board => board::render(frame, area, app, keybindings),
+        ApplicationTab::Timeline | ApplicationTab::Filters => {
+            logo::render(frame, area, app.anim_elapsed(), app.theme())
+        }
     }
-}
-
-fn render_empty_tab(frame: &mut Frame<'_>, area: Rect, tab: &str, theme: &theme::Theme) {
-    let body = Paragraph::new(Line::from(tab))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(theme.muted_fg()));
-    frame.render_widget(body, area);
 }

@@ -202,7 +202,6 @@ fn put(grid: &mut [Vec<CellData>], r: usize, c: usize, cell: CellData) {
     }
 }
 
-
 /// Stamps a letter with genuine sub-cell vertical motion: the block face glides
 /// down by `1 - amount` cells using eighth-block characters (foreground/
 /// background swapping handles partial cells either side of a boundary), while a

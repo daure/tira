@@ -1,14 +1,15 @@
 pub mod app;
 pub mod components;
 pub mod config;
+pub mod domain;
 pub mod keymap;
 pub mod services;
 pub mod tui;
 pub mod ui;
 
 pub use app::{
-    Action, App, AppEffect, AppEvent, BoardAction, BoardGrouping, BoardState, CredentialField,
-    CredentialForm, JiraLoadPurpose, JiraProjectLoadResult, Screen, SetupAction,
+    Action, App, AppEffect, AppEvent, ApplicationTab, BoardAction, BoardGrouping, BoardState,
+    CredentialField, CredentialForm, JiraLoadPurpose, JiraProjectLoadResult, Screen, SetupAction,
 };
 pub use components::{
     generic::{

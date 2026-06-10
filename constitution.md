@@ -8,9 +8,9 @@ Every keybinding must be configurable.
 
 No feature may depend on a hard-coded key as its only path. Built-in defaults are allowed, but they must flow through the same keybinding system as user overrides. Input handling should resolve keys into named actions, and application code should depend on those actions rather than terminal key literals. The help action is named `open_help`; its built-in default binding is `?`.
 
-Keybindings live in `~/.tira/keybindings.toml`.
+Keybindings live in `~/.tira/keybindings.toml`. Common navigation keys are defined once in a shared `[nav]` section rather than repeated per context; per-context sections may override them.
 
-The keyboard help dialog (bound to `open_help`) reflectively displays these keybindings. To keep keybinding configuration decoupled from dynamic UI widgets, context-based help items are centralized and managed in `src/keymap.rs::help_items`. When adding a configurable keybinding, its help text must be manually added to that function.
+The keyboard help dialog (bound to `open_help`) reflectively displays these keybindings. To keep keybinding configuration decoupled from dynamic UI widgets, context-based help items are centralized and managed in `src/keymap.rs::help_items`. When adding a configurable keybinding, its help text must be manually added to that function. Help text must render from resolved bindings via `KeySpec::label()`/`join_labels`; literal navigation key strings (such as `"gg / G / Home / End"`) are prohibited.
 ## 2. Color and Style Are Theme Data
 
 All colors must be reconfigurable.

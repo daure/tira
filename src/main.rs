@@ -26,9 +26,8 @@ fn main() -> io::Result<()> {
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     keybindings: &KeyBindings,
-    app: App,
+    mut app: App,
 ) -> io::Result<()> {
-    let mut app = app;
     let (event_tx, event_rx) = mpsc::channel();
     spawn_effects(&mut app, &event_tx);
     let mut last_tick = Instant::now();

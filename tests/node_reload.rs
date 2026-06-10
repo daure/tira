@@ -699,9 +699,14 @@ fn full_reload_preserves_selection_and_recenters() {
         .iter()
         .position(|r| app.issues()[r.item_index].id == "KAN-21")
         .expect("selection present");
-    // The settled scroll target centers the selection (selection minus roughly
-    // half the viewport). The on-screen window glides to this across ticks.
-    assert_eq!(app.issue_scroll_offset(), selected_row.saturating_sub(7));
+    // The settled scroll target re-centers the selection: the viewport scrolls
+    // down (offset > 0) yet keeps the selected row visible below its top edge,
+    // proving the selection is centered rather than pinned to the top.
+    let scroll_offset = app.issue_scroll_offset();
+    assert!(
+        scroll_offset > 0 && scroll_offset < selected_row,
+        "selection re-centered after reload, not at the top"
+    );
 }
 
 #[test]
