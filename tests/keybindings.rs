@@ -945,14 +945,14 @@ fn help_items_use_configured_leader_bindings() {
 
     let items = bindings.help_items(Screen::Main, "List", false);
 
-    assert!(items.iter().any(|item| item.binding == "Ctrl+g o"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+g m"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+g n"));
+    assert!(items.iter().any(|item| item.binding == "⌃g o"));
+    assert!(items.iter().any(|item| item.binding == "⌃g m"));
+    assert!(items.iter().any(|item| item.binding == "⌃g n"));
     assert!(items.iter().any(|item| item.binding == "r"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+g b"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+g l"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+g t"));
-    assert!(items.iter().any(|item| item.binding == "Ctrl+g f"));
+    assert!(items.iter().any(|item| item.binding == "⌃g b"));
+    assert!(items.iter().any(|item| item.binding == "⌃g l"));
+    assert!(items.iter().any(|item| item.binding == "⌃g t"));
+    assert!(items.iter().any(|item| item.binding == "⌃g f"));
 }
 
 #[test]
@@ -1006,7 +1006,7 @@ fn board_help_uses_custom_navigation_labels() {
     assert!(
         board_items
             .iter()
-            .any(|item| item.binding == "Ctrl+b / Ctrl+f")
+            .any(|item| item.binding == "⌃b / ⌃f")
     );
 }
 

@@ -8,6 +8,15 @@ use crate::services::jira::{CommandLogEntry, IssueSummary, JiraError, JiraLoadRe
 /// the end, so a large project pages in lazily instead of eagerly up front.
 const ROOT_PREFETCH_LOOKAHEAD: usize = 30;
 
+/// Characters required in the search box before a server search fires. Below
+/// this the list falls back to the browse view rather than searching for one or
+/// two stray characters.
+const SEARCH_MIN_CHARS: usize = 2;
+
+/// Idle time after the last keystroke before the debounced search fires, so
+/// typing "DPP-1234" issues one query instead of one per character.
+const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
+
 impl App {
     /// Queues the next page of root issues if one is pending and no root-page
     /// load is already in flight. Browsing only. Fetches up to
@@ -327,6 +336,34 @@ impl App {
                     logs: Vec::new(),
                 },
             );
+        }
+    }
+
+    /// Records a filter change for debounced searching. Terms shorter than
+    /// `SEARCH_MIN_CHARS` cancel any pending search and restore the browse view
+    /// so the list never shows results that don't match the box. Longer terms
+    /// (re)start the debounce window; the search fires from `tick` once typing
+    /// pauses for `SEARCH_DEBOUNCE`.
+    pub(crate) fn queue_search(&mut self, term: String) {
+        if term.trim().chars().count() < SEARCH_MIN_CHARS {
+            self.pending_search = None;
+            self.restore_browse_view();
+            return;
+        }
+        self.pending_search = Some((term, SEARCH_DEBOUNCE));
+    }
+
+    /// Counts down the pending search's debounce window and fires it once the
+    /// window elapses. Called every `tick`; a no-op when no search is pending.
+    pub(crate) fn advance_pending_search(&mut self, dt: std::time::Duration) {
+        let Some((_, remaining)) = self.pending_search.as_mut() else {
+            return;
+        };
+        *remaining = remaining.saturating_sub(dt);
+        if remaining.is_zero()
+            && let Some((term, _)) = self.pending_search.take()
+        {
+            self.run_search(term);
         }
     }
 

@@ -104,7 +104,14 @@ impl App {
         if self.active_tab() != ApplicationTab::List {
             return;
         }
-        self.handle_list_mouse(point, inner, scroll_delta, is_left_click, keybindings);
+        self.handle_list_mouse(
+            point,
+            inner,
+            scroll_delta,
+            horizontal_delta,
+            is_left_click,
+            keybindings,
+        );
     }
 
     fn handle_board_mouse(
@@ -153,6 +160,7 @@ impl App {
         point: (u16, u16),
         inner: Rect,
         scroll_delta: Option<isize>,
+        horizontal_delta: Option<isize>,
         is_left_click: bool,
         keybindings: &KeyBindings,
     ) {
@@ -205,6 +213,14 @@ impl App {
             // Wheeling toward the bottom lazily pulls the next page; the wheel
             // moves the viewport, not the selection, so pass the real height.
             self.maybe_prefetch_more_roots(viewport_height);
+            return;
+        }
+        if let Some(delta) = horizontal_delta {
+            // Shift/horizontal wheel pans the table; only the Table view has
+            // scrollable columns.
+            if matches!(self.filtered_tree_view_mode(), FilteredTreeViewMode::Table) {
+                self.scroll_table_horizontal(delta as i32);
+            }
             return;
         }
         if !is_left_click {

@@ -26,7 +26,7 @@ use filter::board_issue_matches_filter;
 use heading::sticky_headings;
 use lanes::{RenderedBoard, generate_rendered_board};
 use layout::ColumnLayout;
-use text::slice_line;
+use crate::ui::layout::slice_line;
 use toolbar::{details_trigger_text, render_details_trigger, render_filter, render_group_trigger};
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {

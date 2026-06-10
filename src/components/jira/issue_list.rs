@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     App, JiraIssueColumn, KeyBindings, TreeRow,
@@ -23,6 +24,32 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .areas(area);
+
+    render_filter(frame, filter_area, app, keybindings);
+
+    let view_mode = app.filtered_tree_view_mode();
+    let table = (view_mode == FilteredTreeViewMode::Table)
+        .then(|| table_layout(app))
+        .flatten();
+    // content_main loses the gap column and the vertical-scrollbar column.
+    let columns_viewport = content_area.width.saturating_sub(2);
+    let h_scrolling = table
+        .as_ref()
+        .is_some_and(|layout| layout.strip_width > columns_viewport);
+
+    // A full-width bottom row carries the horizontal scrollbar; the vertical
+    // scrollbar then stops one row short and sits on top of it, matching the
+    // board.
+    let (body_area, hbar_area) = if h_scrolling && content_area.height > 1 {
+        let [body, bar] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .areas(content_area);
+        (body, Some(bar))
+    } else {
+        (content_area, None)
+    };
+
     let [content_main, _, scrollbar_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -30,20 +57,27 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
             Constraint::Length(1),
             Constraint::Length(1),
         ])
-        .areas(content_area);
+        .areas(body_area);
 
-    render_filter(frame, filter_area, app, keybindings);
+    let h_offset = match view_mode {
+        FilteredTreeViewMode::List => {
+            render_filtered_tree_list(frame, content_main, app);
+            None
+        }
+        FilteredTreeViewMode::Table => match &table {
+            None => {
+                render_empty_list(frame, content_main, app);
+                None
+            }
+            Some(layout) => render_table(frame, content_main, app, layout, h_scrolling),
+        },
+    };
 
-    match app.filtered_tree_view_mode() {
-        FilteredTreeViewMode::List => render_filtered_tree_list(frame, content_main, app),
-        FilteredTreeViewMode::Table => render_filtered_tree_table(frame, content_main, app),
-    }
-
-    let scrollbar_viewport_height = match app.filtered_tree_view_mode() {
+    let scrollbar_viewport_height = match view_mode {
         FilteredTreeViewMode::List => content_main.height,
         FilteredTreeViewMode::Table => content_main.height.saturating_sub(1),
     };
-    let scrollbar_render_area = match app.filtered_tree_view_mode() {
+    let scrollbar_render_area = match view_mode {
         FilteredTreeViewMode::List => scrollbar_area,
         FilteredTreeViewMode::Table => Rect {
             x: scrollbar_area.x,
@@ -53,8 +87,178 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         },
     };
     scrollbar::render(frame, scrollbar_render_area, scrollbar_viewport_height, app);
+
+    if let (Some(bar), Some(offset), Some(layout)) = (hbar_area, h_offset, &table) {
+        let viewport = content_main.width as usize;
+        scrollbar::render_range_horizontal(
+            frame,
+            bar,
+            layout.strip_width as usize,
+            offset as usize..offset as usize + viewport,
+            app.theme(),
+        );
+    }
+
     render_column_dropdown(frame, area, app);
 }
+
+/// Rows and natural per-column widths for the issue table, plus the total strip
+/// width that decides whether horizontal scrolling is needed. `None` when there
+/// are no rows to show.
+struct TableLayout {
+    rows: Vec<TreeRow>,
+    widths: Vec<u16>,
+    strip_width: u16,
+    has_expandable: bool,
+}
+
+fn table_layout(app: &App) -> Option<TableLayout> {
+    let rows = app.visible_issue_rows();
+    if rows.is_empty() {
+        return None;
+    }
+    let has_expandable = rows.iter().any(|row| row.expandable);
+    let columns = app.visible_issue_columns();
+    let tree_prefix_width = if has_expandable {
+        rows.iter().map(|row| row.depth * 2 + 2).max().unwrap_or(2) as u16
+    } else {
+        0
+    };
+    let widths = compute_column_widths(app, &rows, columns, tree_prefix_width);
+    let spacing = columns.len().saturating_sub(1) as u16;
+    let strip_width = widths.iter().sum::<u16>() + spacing;
+    Some(TableLayout {
+        rows,
+        widths,
+        strip_width,
+        has_expandable,
+    })
+}
+
+/// Renders the issue table into `area`. When `scrolling`, composes full-width
+/// rows and slices them to the animated horizontal offset (returned for the
+/// scrollbar); otherwise lays the columns out with ratatui's Table so the
+/// summary fills the leftover width.
+fn render_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    layout: &TableLayout,
+    scrolling: bool,
+) -> Option<u16> {
+    let columns = app.visible_issue_columns();
+
+    if scrolling {
+        let content_width = area.width;
+        let max_offset = layout.strip_width.saturating_sub(content_width);
+        let h_offset = app.resolve_table_h_offset(max_offset);
+
+        // The summary column renders at its full natural width here (no Fill);
+        // its own width bounds truncation so the strip matches `strip_width`.
+        let description_width = columns
+            .iter()
+            .zip(layout.widths.iter())
+            .find_map(|(column, width)| {
+                matches!(column, JiraIssueColumn::Summary).then_some(*width as usize)
+            })
+            .unwrap_or(0);
+
+        let header_style = Style::default()
+            .fg(app.theme().muted_fg())
+            .add_modifier(Modifier::BOLD);
+
+        // The first column (Work) stays pinned at the left edge while the rest
+        // scroll; `sticky_width` covers it plus the trailing column gap.
+        let sticky_width =
+            (layout.widths.first().copied().unwrap_or(0) + 1).min(content_width);
+
+        let header_cells = header_cell_spans(columns, layout.has_expandable);
+        let header_sticky = header_cells.first().cloned().unwrap_or_default();
+        let mut lines = vec![compose_strip_line(header_cells, &layout.widths, header_style)];
+        let mut sticky_lines = vec![padded_cell(header_sticky, sticky_width as usize, header_style)];
+
+        for row_index in app.visible_issue_range(area.height.saturating_sub(1) as usize) {
+            let row = &layout.rows[row_index];
+            let row_style = row_table_style(app, row, row_index);
+            let cells = columns
+                .iter()
+                .enumerate()
+                .map(|(column_index, column)| {
+                    column_cell_spans(
+                        app,
+                        row,
+                        column,
+                        column_index,
+                        description_width,
+                        layout.has_expandable,
+                        row_style,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let sticky = cells.first().cloned().unwrap_or_default();
+            lines.push(compose_strip_line(cells, &layout.widths, row_style));
+            sticky_lines.push(padded_cell(sticky, sticky_width as usize, row_style));
+        }
+
+        let sliced = lines
+            .into_iter()
+            .map(|line| layout::slice_line(line, h_offset as usize, content_width as usize))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(sliced), area);
+
+        // Overlay the pinned Work column on top of the scrolled strip.
+        if sticky_width > 0 {
+            let sticky_area = Rect {
+                width: sticky_width,
+                ..area
+            };
+            frame.render_widget(Paragraph::new(sticky_lines), sticky_area);
+        }
+        return Some(h_offset);
+    }
+
+    // Fits the viewport: keep the animated offset at rest so returning to a wide
+    // enough viewport doesn't leave the strip panned.
+    app.resolve_table_h_offset(0);
+    let spacing = columns.len().saturating_sub(1) as u16;
+    let fixed_width = columns
+        .iter()
+        .zip(layout.widths.iter())
+        .filter_map(|(column, width)| {
+            (!matches!(column, JiraIssueColumn::Summary)).then_some(*width)
+        })
+        .sum::<u16>();
+    let description_width = area.width.saturating_sub(fixed_width + spacing) as usize;
+    let table_rows = app
+        .visible_issue_range(area.height.saturating_sub(1) as usize)
+        .map(|row_index| {
+            build_table_row(
+                app,
+                &layout.rows,
+                columns,
+                row_index,
+                description_width,
+                layout.has_expandable,
+            )
+        });
+    let header = build_header(app, columns, layout.has_expandable);
+    let widths = columns
+        .iter()
+        .zip(layout.widths.iter())
+        .map(|(column, width)| match column {
+            JiraIssueColumn::Summary => Constraint::Fill(1),
+            _ => Constraint::Length(*width),
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Table::new(table_rows, widths)
+            .header(header)
+            .column_spacing(1),
+        area,
+    );
+    None
+}
+
 
 fn render_filtered_tree_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let rows = app.visible_issue_rows();
@@ -88,60 +292,71 @@ fn render_filtered_tree_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(List::new(items), area);
 }
 
-fn render_filtered_tree_table(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let rows = app.visible_issue_rows();
-    if rows.is_empty() {
-        render_empty_list(frame, area, app);
-        return;
+/// Assembles per-column span groups into one full-width line: each column is
+/// padded with `base_style` blanks to its width, joined by a single-cell gap so
+/// columns align exactly as the non-scrolling Table lays them out.
+fn compose_strip_line<'a>(
+    cells: Vec<Vec<Span<'a>>>,
+    column_widths: &[u16],
+    base_style: Style,
+) -> Line<'a> {
+    let mut spans = Vec::new();
+    for (index, (cell, width)) in cells.into_iter().zip(column_widths.iter()).enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ", base_style));
+        }
+        let mut used = 0usize;
+        for mut span in cell {
+            used += span.content.width();
+            // Layer the row/header style under each span so the selection
+            // background (and header colour) covers cells whose own style only
+            // sets a foreground — e.g. the priority icon.
+            span.style = base_style.patch(span.style);
+            spans.push(span);
+        }
+        let pad = (*width as usize).saturating_sub(used);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), base_style));
+        }
     }
+    Line::from(spans)
+}
 
-    let has_expandable = rows.iter().any(|row| row.expandable);
-    let columns = app.visible_issue_columns();
-    let tree_prefix_width = if has_expandable {
-        rows.iter().map(|row| row.depth * 2 + 2).max().unwrap_or(2) as u16
-    } else {
-        0
-    };
+/// Pads a single column's spans with `base_style` blanks to exactly `width`
+/// cells (slicing if it somehow overruns), used to render the pinned column.
+fn padded_cell(spans: Vec<Span<'_>>, width: usize, base_style: Style) -> Line<'_> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for mut span in spans {
+        used += span.content.width();
+        span.style = base_style.patch(span.style);
+        out.push(span);
+    }
+    if used > width {
+        return layout::slice_line(Line::from(out), 0, width);
+    }
+    if used < width {
+        out.push(Span::styled(" ".repeat(width - used), base_style));
+    }
+    Line::from(out)
+}
 
-    let column_widths = compute_column_widths(app, &rows, columns, tree_prefix_width);
-    let fixed_width = columns
+/// Header label spans per column, mirroring `build_header`'s first-column
+/// indent for the tree controls.
+fn header_cell_spans(columns: &[JiraIssueColumn], has_expandable: bool) -> Vec<Vec<Span<'static>>> {
+    columns
         .iter()
-        .zip(column_widths.iter())
-        .filter_map(|(column, width)| {
-            (!matches!(column, JiraIssueColumn::Summary)).then_some(*width)
+        .enumerate()
+        .map(|(index, column)| {
+            let label = column.header_label();
+            let text = if index == 0 && has_expandable {
+                format!("  {label}")
+            } else {
+                label.to_owned()
+            };
+            vec![Span::raw(text)]
         })
-        .sum::<u16>();
-    let spacing = columns.len().saturating_sub(1) as u16;
-    let description_width = area.width.saturating_sub(fixed_width + spacing) as usize;
-
-    let table_rows = app
-        .visible_issue_range(area.height.saturating_sub(1) as usize)
-        .map(|row_index| {
-            build_table_row(
-                app,
-                &rows,
-                columns,
-                row_index,
-                description_width,
-                has_expandable,
-            )
-        });
-
-    let header = build_header(app, columns, has_expandable);
-    let widths = columns
-        .iter()
-        .zip(column_widths.iter())
-        .map(|(column, width)| match column {
-            JiraIssueColumn::Summary => Constraint::Fill(1),
-            _ => Constraint::Length(*width),
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Table::new(table_rows, widths)
-            .header(header)
-            .column_spacing(1),
-        area,
-    );
+        .collect()
 }
 
 fn compute_column_widths(
@@ -184,11 +399,19 @@ fn compute_column_widths(
                                 .map_or(0, |value| field_display_width(id, value))
                     })
                 }
-                JiraIssueColumn::Summary => 0,
+                JiraIssueColumn::Summary => layout::max_column_width(rows, "Summary", |row| {
+                    prefix + app.issues()[row.item_index].label.chars().count()
+                })
+                .min(SUMMARY_MAX_WIDTH),
             }
         })
         .collect::<Vec<_>>()
 }
+
+/// Upper bound (in cells) on the summary column's natural width, so one long
+/// summary can't blow the horizontal strip out to an unusable width. Longer
+/// summaries are truncated with an ellipsis when the table scrolls.
+const SUMMARY_MAX_WIDTH: u16 = 60;
 
 fn build_table_row<'a>(
     app: &'a App,
@@ -199,62 +422,74 @@ fn build_table_row<'a>(
     has_expandable: bool,
 ) -> Row<'a> {
     let row = &rows[row_index];
-    let item = &app.issues()[row.item_index];
-    let row_style = style::selected_row_style(app.theme(), row_index == app.selected_issue_index());
-    let row_style = if row.reloading {
-        row_style.add_modifier(Modifier::DIM)
-    } else {
-        row_style
-    };
+    let row_style = row_table_style(app, row, row_index);
     let cells = columns
         .iter()
         .enumerate()
         .map(|(column_index, column)| {
-            let is_first = column_index == 0;
-            let spans = match column {
-                JiraIssueColumn::IssueKey => style::code_cell_spans(
-                    app.theme(),
-                    item,
-                    app.highlight_term(),
-                    row_style,
-                ),
-                JiraIssueColumn::Summary => {
-                    let truncated =
-                        layout::truncate_with_ellipsis(&item.label, description_width);
-                    style::highlighted_spans_owned(
-                        app.theme(),
-                        &truncated,
-                        app.highlight_term(),
-                        row_style,
-                    )
-                }
-                JiraIssueColumn::IssueType => style::highlighted_spans(
-                    app.theme(),
-                    &item.kind,
-                    app.highlight_term(),
-                    row_style,
-                ),
-                JiraIssueColumn::Status => style::highlighted_spans(
-                    app.theme(),
-                    &item.status,
-                    app.highlight_term(),
-                    row_style,
-                ),
-                JiraIssueColumn::Field { id, .. } => item
-                    .field_values
-                    .get(id)
-                    .map_or_else(Vec::new, |value| field_spans(app, id, value, row_style)),
-            };
-            Cell::from(Line::from(with_tree_prefix(
-                app.theme(),
-                spans,
+            Cell::from(Line::from(column_cell_spans(
+                app,
                 row,
-                is_first && has_expandable,
-                app.spinner_glyph(),
+                column,
+                column_index,
+                description_width,
+                has_expandable,
+                row_style,
             )))
         })
         .collect::<Vec<_>>();
     Row::new(cells).style(row_style)
+}
+
+/// The base style for a table row: selection highlight plus a dim modifier for
+/// rows under a subtree being reloaded.
+fn row_table_style(app: &App, row: &TreeRow, row_index: usize) -> Style {
+    let row_style = style::selected_row_style(app.theme(), row_index == app.selected_issue_index());
+    if row.reloading {
+        row_style.add_modifier(Modifier::DIM)
+    } else {
+        row_style
+    }
+}
+
+/// Spans for one column's cell, including the tree-control prefix on the first
+/// column. `description_width` bounds the (truncated) summary column.
+fn column_cell_spans<'a>(
+    app: &'a App,
+    row: &'a TreeRow,
+    column: &JiraIssueColumn,
+    column_index: usize,
+    description_width: usize,
+    has_expandable: bool,
+    row_style: Style,
+) -> Vec<Span<'a>> {
+    let item = &app.issues()[row.item_index];
+    let spans = match column {
+        JiraIssueColumn::IssueKey => {
+            style::code_cell_spans(app.theme(), item, app.highlight_term(), row_style)
+        }
+        JiraIssueColumn::Summary => {
+            let truncated = layout::truncate_with_ellipsis(&item.label, description_width);
+            style::highlighted_spans_owned(app.theme(), &truncated, app.highlight_term(), row_style)
+        }
+        JiraIssueColumn::IssueType => {
+            style::highlighted_spans(app.theme(), &item.kind, app.highlight_term(), row_style)
+        }
+        JiraIssueColumn::Status => {
+            style::highlighted_spans(app.theme(), &item.status, app.highlight_term(), row_style)
+        }
+        JiraIssueColumn::Field { id, .. } => item
+            .field_values
+            .get(id)
+            .map_or_else(Vec::new, |value| field_spans(app, id, value, row_style)),
+    };
+    with_tree_prefix(
+        app.theme(),
+        spans,
+        row,
+        column_index == 0 && has_expandable,
+        app.spinner_glyph(),
+    )
 }
 
 fn build_header(app: &App, columns: &[JiraIssueColumn], has_expandable: bool) -> Row<'static> {

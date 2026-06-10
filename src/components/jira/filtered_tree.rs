@@ -8,6 +8,7 @@ use crate::components::generic::{
     filtered_tree::{
         FilteredTreeAction, FilteredTreeEvent, FilteredTreeState, FilteredTreeViewMode,
     },
+    scroll_animator::ScrollAnimator,
     tree::{TreeItem, TreeRow},
 };
 
@@ -127,6 +128,9 @@ pub struct JiraFilteredTreeState {
     visible_columns: Vec<JiraIssueColumn>,
     available_columns: Vec<JiraIssueColumn>,
     pending_yank: bool,
+    /// Glides the table's horizontal scroll offset (in cells) toward the
+    /// user-driven target so columns wider than the viewport pan smoothly.
+    h_scroll: ScrollAnimator,
 }
 
 impl JiraFilteredTreeState {
@@ -144,6 +148,7 @@ impl JiraFilteredTreeState {
             visible_columns: default_columns,
             available_columns,
             pending_yank: false,
+            h_scroll: ScrollAnimator::new(),
         }
     }
 
@@ -227,6 +232,7 @@ impl JiraFilteredTreeState {
 
     pub fn tick(&mut self, dt: std::time::Duration) {
         self.filtered_tree.tick(dt);
+        self.h_scroll.tick(dt);
         if let Some(dropdown) = &mut self.column_dropdown {
             dropdown.tick(dt);
         }
@@ -234,6 +240,7 @@ impl JiraFilteredTreeState {
 
     pub fn is_animating(&self) -> bool {
         self.filtered_tree.is_animating()
+            || self.h_scroll.is_animating()
             || self
                 .column_dropdown
                 .as_ref()
@@ -287,6 +294,23 @@ impl JiraFilteredTreeState {
 
     pub fn scroll_viewport(&mut self, delta: isize, height: usize) {
         self.filtered_tree.scroll_viewport(delta, height);
+    }
+
+    /// Pans the table horizontally by `delta` cells (e.g. shift-wheel). The
+    /// target is clamped to the strip width during rendering, so this only
+    /// needs to keep it non-negative.
+    pub fn scroll_table_horizontal(&self, delta: i32) {
+        let next = (self.h_scroll.target() + f64::from(delta)).max(0.0);
+        self.h_scroll.set_target(next);
+    }
+
+    /// Resolves this frame's horizontal offset (in cells): clamps the target to
+    /// `max_offset`, advances the glide, and returns the animated offset to
+    /// slice rows at. Must run once per frame before reading the result.
+    pub fn resolve_table_h_offset(&self, max_offset: u16) -> u16 {
+        let clamped = self.h_scroll.target().clamp(0.0, f64::from(max_offset));
+        self.h_scroll.set_target(clamped);
+        (self.h_scroll.current().round().max(0.0) as u16).min(max_offset)
     }
 
     pub fn filter(&self) -> &str {

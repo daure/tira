@@ -599,6 +599,8 @@ impl KeyBindings {
             Action::Tabs(TabAction::Previous)
         } else if self.tabs.next.matches(key) {
             Action::Tabs(TabAction::Next)
+        } else if let Some(delta) = list_horizontal_scroll_delta(key) {
+            Action::ScrollListHorizontal(delta)
         } else if self.tree.open_columns.matches(key) {
             Action::JiraFilteredTree(JiraFilteredTreeAction::OpenColumns)
         } else if self.tree.open_assignee.matches(key) {
@@ -875,20 +877,20 @@ impl KeyBindings {
             format!(
                 "{} / {}",
                 self.dropdown.toggle_selected.label(),
-                "Ctrl+Space"
+                "⌃Space"
             ),
             "Toggle selection",
             "Toggle current option (multi-select) or select it (single-select).",
         ));
         items.push(self.help_item(
             HelpScope::Local,
-            "Ctrl+Enter".to_string(),
+            "⌃Enter".to_string(),
             "Do selection",
             "Select and submit the current option from the search input.",
         ));
         items.push(self.help_item(
             HelpScope::Local,
-            "Ctrl+J / Ctrl+K".to_string(),
+            "⌃J / ⌃K".to_string(),
             "Navigate search options",
             "Move option selection down/up while typing in the search input.",
         ));
@@ -900,7 +902,7 @@ impl KeyBindings {
         ));
         items.push(self.help_item(
             HelpScope::Local,
-            "Ctrl+C".to_string(),
+            "⌃C".to_string(),
             "Clear search",
             "Clear the search input text.",
         ));
@@ -1128,6 +1130,12 @@ impl KeyBindings {
             ),
             "Collapse / expand",
             "Collapse a branch or expand the selected parent row.",
+        ));
+        items.push(self.help_item(
+            HelpScope::Local,
+            String::from("⇧h/⇧l or ⇧←/⇧→"),
+            "Scroll columns",
+            "Pan the table left or right when columns overflow the width.",
         ));
         items.push(self.help_item(
             HelpScope::Local,
@@ -1504,7 +1512,7 @@ impl KeySpec {
             KeyCode::Esc => String::from("Esc"),
             KeyCode::Enter => String::from("Enter"),
             KeyCode::Tab => String::from("Tab"),
-            KeyCode::BackTab => String::from("Shift+Tab"),
+            KeyCode::BackTab => String::from("⇧Tab"),
             KeyCode::Backspace => String::from("Backspace"),
             KeyCode::Delete => String::from("Delete"),
             KeyCode::Left => String::from("Left"),
@@ -1517,13 +1525,13 @@ impl KeySpec {
         };
 
         if self.modifiers.contains(KeyModifiers::CONTROL) {
-            format!("Ctrl+{key}")
+            format!("⌃{key}")
         } else if self.modifiers.contains(KeyModifiers::ALT) {
-            format!("Alt+{key}")
+            format!("⌥{key}")
         } else if self.modifiers.contains(KeyModifiers::SHIFT)
             && !matches!(self.code, KeyCode::BackTab)
         {
-            format!("Shift+{key}")
+            format!("⇧{key}")
         } else {
             key
         }
@@ -1594,6 +1602,23 @@ fn resolved_owned(ovr: &Option<Vec<KeySpec>>, shared: &[KeySpec]) -> Vec<KeySpec
 
 fn matches_any(bindings: &[KeySpec], key: KeyEvent) -> bool {
     bindings.iter().any(|binding| binding.matches(key))
+}
+
+/// Cells panned per keypress when scrolling the issue table horizontally.
+const LIST_H_SCROLL_STEP: i32 = 12;
+
+/// Maps the table's horizontal-pan keys (Shift+H/Shift+L and Shift+Left/
+/// Shift+Right) to a signed cell delta, or `None` for any other key. Plain
+/// `h`/`l` are left alone for tree collapse/expand.
+fn list_horizontal_scroll_delta(key: KeyEvent) -> Option<i32> {
+    if !key.modifiers.contains(KeyModifiers::SHIFT) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('H') | KeyCode::Left => Some(-LIST_H_SCROLL_STEP),
+        KeyCode::Char('L') | KeyCode::Right => Some(LIST_H_SCROLL_STEP),
+        _ => None,
+    }
 }
 
 fn doubled_label(label: &str) -> String {

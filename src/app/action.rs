@@ -7,6 +7,8 @@ use crate::components::{
 pub enum Action {
     Tabs(TabAction),
     JiraFilteredTree(JiraFilteredTreeAction),
+    /// Pan the issue table horizontally by N cells (negative = left).
+    ScrollListHorizontal(i32),
     ReloadList,
     ReloadBoard,
     ReloadNode,

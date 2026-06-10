@@ -659,6 +659,7 @@ fn typing_filter_runs_server_search_and_shows_flat_results() {
     for ch in "cat".chars() {
         app.handle_key(key(ch), &bindings);
     }
+    app.tick(std::time::Duration::from_millis(400));
 
     let effects = app.take_effects();
     let (request_id, term) = effects
@@ -697,6 +698,103 @@ fn typing_filter_runs_server_search_and_shows_flat_results() {
 }
 
 #[test]
+fn typing_does_not_search_until_debounce_elapses() {
+    let bindings = KeyBindings::default();
+    let mut app = loaded_app(
+        vec![issue_with_children("KAN-1", "Checkout", "Task", false)],
+        None,
+    );
+
+    app.handle_key(key('/'), &bindings);
+    for ch in "cat".chars() {
+        app.handle_key(key(ch), &bindings);
+    }
+
+    // No keystroke fires a search on its own; the request waits for the pause.
+    assert!(
+        app.take_effects()
+            .iter()
+            .all(|effect| !matches!(effect, AppEffect::SearchIssues { .. })),
+        "search must not fire before the debounce window elapses"
+    );
+
+    app.tick(std::time::Duration::from_millis(400));
+
+    let searches = app
+        .take_effects()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            AppEffect::SearchIssues { term, .. } => Some(term),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        searches,
+        vec![String::from("cat")],
+        "one search fires for the final term after the pause"
+    );
+}
+
+#[test]
+fn single_character_filter_does_not_search() {
+    let bindings = KeyBindings::default();
+    let mut app = loaded_app(
+        vec![issue_with_children("KAN-1", "Checkout", "Task", false)],
+        None,
+    );
+
+    app.handle_key(key('/'), &bindings);
+    app.handle_key(key('c'), &bindings);
+    app.tick(std::time::Duration::from_millis(400));
+
+    assert!(
+        app.take_effects()
+            .iter()
+            .all(|effect| !matches!(effect, AppEffect::SearchIssues { .. })),
+        "a one-character term stays below the search threshold"
+    );
+}
+
+#[test]
+fn dropping_below_minimum_abandons_in_flight_search() {
+    let bindings = KeyBindings::default();
+    let mut app = loaded_app(
+        vec![issue_with_children("KAN-1", "Root", "Task", false)],
+        None,
+    );
+
+    // Enter the search view with a two-character term.
+    app.handle_key(key('/'), &bindings);
+    app.handle_key(key('c'), &bindings);
+    app.handle_key(key('a'), &bindings);
+    app.tick(std::time::Duration::from_millis(400));
+    app.take_effects();
+
+    // Backspace below the minimum: the browse view reloads and no further
+    // search is queued.
+    app.handle_key(
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        &bindings,
+    );
+    let effects = app.take_effects();
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, AppEffect::LoadJiraProject { .. })),
+        "dropping below the minimum reloads the browse view"
+    );
+
+    // A trailing tick must not resurrect a search from the abandoned term.
+    app.tick(std::time::Duration::from_millis(400));
+    assert!(
+        app.take_effects()
+            .iter()
+            .all(|effect| !matches!(effect, AppEffect::SearchIssues { .. })),
+        "no search fires once the term drops below the minimum"
+    );
+}
+
+#[test]
 fn only_latest_search_result_is_applied() {
     let bindings = KeyBindings::default();
     let mut app = loaded_app(
@@ -708,9 +806,12 @@ fn only_latest_search_result_is_applied() {
     app.handle_key(key('a'), &bindings);
     app.handle_key(key('b'), &bindings);
     app.handle_key(key('c'), &bindings);
+    // Typing resets the debounce on each keystroke; only after a pause does the
+    // single search for the final term fire.
+    app.tick(std::time::Duration::from_millis(400));
 
-    // The most recent keystroke produced the latest search effect; only this
-    // request's result should be applied.
+    // The debounced keystrokes produced one search effect; only its request's
+    // result should be applied.
     let latest_id = app
         .take_effects()
         .iter()
@@ -760,9 +861,12 @@ fn clearing_filter_restores_browse_view() {
 
     app.handle_key(key('/'), &bindings);
     app.handle_key(key('a'), &bindings);
+    app.handle_key(key('b'), &bindings);
+    app.tick(std::time::Duration::from_millis(400));
     app.take_effects();
 
-    // Clear the query with backspace; this should queue a browse reload.
+    // Backspace below the two-character minimum; the list must abandon the
+    // search and reload the browse view.
     app.handle_key(
         KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
         &bindings,
@@ -773,7 +877,7 @@ fn clearing_filter_restores_browse_view() {
         .into_iter()
         .filter(|effect| matches!(effect, AppEffect::LoadJiraProject { .. }))
         .count();
-    assert_eq!(reloads, 1, "clearing the filter reloads the browse view");
+    assert_eq!(reloads, 1, "dropping below the minimum reloads the browse view");
 }
 
 #[test]
@@ -791,6 +895,7 @@ fn highlight_term_follows_displayed_results_not_live_input() {
     app.handle_key(key('/'), &bindings);
     app.handle_key(key('a'), &bindings);
     app.handle_key(key('b'), &bindings);
+    app.tick(std::time::Duration::from_millis(400));
     let (request_id, term) = app
         .take_effects()
         .iter()
@@ -851,13 +956,15 @@ fn child_load_in_flight_when_search_starts_does_not_corrupt_flat_results() {
     // Switch to search before the children come back.
     app.handle_key(key('/'), &bindings);
     app.handle_key(key('x'), &bindings);
+    app.handle_key(key('y'), &bindings);
+    app.tick(std::time::Duration::from_millis(400));
     let search_request = app
         .take_effects()
         .into_iter()
         .find_map(|effect| match effect {
             AppEffect::SearchIssues {
                 request_id, term, ..
-            } if term == "x" => Some(request_id),
+            } if term == "xy" => Some(request_id),
             _ => None,
         })
         .expect("expected search effect");
@@ -885,7 +992,7 @@ fn child_load_in_flight_when_search_starts_does_not_corrupt_flat_results() {
     // The search result lands cleanly as a flat list.
     app.handle_event(AppEvent::SearchLoaded {
         request_id: search_request,
-        term: String::from("x"),
+        term: String::from("xy"),
         result: JiraLoadResult {
             issues: Ok(vec![issue("KAN-9", "x match", "Task", None)]),
             next_page_token: None,

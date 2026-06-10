@@ -45,6 +45,90 @@ fn list_render_shows_filtered_tree_as_table_with_columns() {
 }
 
 #[test]
+fn narrow_table_scrolls_horizontally_with_animation() {
+    // A terminal too narrow for the columns forces the scrollable strip path.
+    let backend = TestBackend::new(40, 8);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::with_issues(vec![issue(
+        "KAN-1",
+        "A deliberately very long summary that overflows the narrow viewport width",
+        "Task",
+        None,
+    )]);
+
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
+    let (before, _) = rendered_text(&terminal);
+    assert!(
+        before.contains("KAN-1") && before.contains("deliberately"),
+        "the work key and summary start are visible before scrolling"
+    );
+
+    // Pan to the far right and let the glide settle, then redraw.
+    app.scroll_table_horizontal(1000);
+    app.tick(std::time::Duration::from_secs(2));
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
+    let (after, _) = rendered_text(&terminal);
+
+    assert!(
+        !after.contains("deliberately"),
+        "scrolling right pans the summary out of view"
+    );
+    assert!(
+        after.contains("KAN-1"),
+        "the work column stays pinned while the rest scrolls"
+    );
+}
+
+#[test]
+fn shift_h_and_l_pan_the_table_horizontally() {
+    let backend = TestBackend::new(40, 8);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![issue(
+        "KAN-1",
+        "A deliberately very long summary that overflows the narrow viewport width",
+        "Task",
+        None,
+    )]);
+
+    let shift = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    assert!(rendered_text(&terminal).0.contains("deliberately"));
+
+    // Shift+L pans right until the summary scrolls off (Work stays pinned).
+    for _ in 0..20 {
+        app.handle_key(shift('L'), &bindings);
+    }
+    app.tick(std::time::Duration::from_secs(2));
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    let scrolled = rendered_text(&terminal).0;
+    assert!(!scrolled.contains("deliberately"), "Shift+L pans right");
+    assert!(scrolled.contains("KAN-1"), "the work column stays pinned");
+
+    // Shift+H pans back left to the start.
+    for _ in 0..20 {
+        app.handle_key(shift('H'), &bindings);
+    }
+    app.tick(std::time::Duration::from_secs(2));
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+    assert!(
+        rendered_text(&terminal).0.contains("deliberately"),
+        "Shift+H pans the table back left"
+    );
+}
+
+#[test]
 fn quick_actions_menu_uses_current_name() {
     let backend = TestBackend::new(100, 12);
     let mut terminal = Terminal::new(backend).expect("test terminal");

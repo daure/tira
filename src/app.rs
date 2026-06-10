@@ -158,6 +158,10 @@ pub struct App {
     /// `Initial` project load resolves. While set, the UI shows only the
     /// animated splash logo instead of the main view.
     awaiting_initial_load: bool,
+    /// A search term waiting out its debounce window, with the time left before
+    /// it fires. Reset on each keystroke so only a pause in typing triggers the
+    /// server search; `None` when no search is pending.
+    pending_search: Option<(String, std::time::Duration)>,
 }
 
 impl Default for App {
@@ -214,6 +218,7 @@ impl App {
             command_log_view: CommandLogView::default(),
             anim_clock: std::time::Duration::ZERO,
             awaiting_initial_load: false,
+            pending_search: None,
         }
     }
 
@@ -315,6 +320,7 @@ impl App {
 
     pub fn tick(&mut self, dt: std::time::Duration) {
         self.anim_clock += dt;
+        self.advance_pending_search(dt);
         self.filtered_tree.tick(dt);
         if let Some(overlay) = &mut self.overlay {
             overlay.tick(dt);
@@ -364,6 +370,7 @@ impl App {
             || self.notifications.iter().any(Notification::is_animating)
             || self.board.v_scroll.is_animating()
             || self.board.h_scroll.is_animating()
+            || self.pending_search.is_some()
             || self.is_loading()
             || matches!(self.active_tab(), ApplicationTab::Timeline | ApplicationTab::Filters)
     }
@@ -509,6 +516,18 @@ impl App {
         self.filtered_tree.visible_columns()
     }
 
+    /// Pans the issue table horizontally by `delta` cells (shift/horizontal
+    /// wheel). No-op effect until the next render advances the glide.
+    pub fn scroll_table_horizontal(&self, delta: i32) {
+        self.filtered_tree.scroll_table_horizontal(delta);
+    }
+
+    /// Resolves the table's animated horizontal offset for this frame, clamped
+    /// to `max_offset` cells. Called once per render before slicing rows.
+    pub fn resolve_table_h_offset(&self, max_offset: u16) -> u16 {
+        self.filtered_tree.resolve_table_h_offset(max_offset)
+    }
+
     pub fn column_dropdown(
         &self,
     ) -> Option<
@@ -639,6 +658,11 @@ impl App {
         match action {
             Action::Tabs(action) => self.dispatch_tabs(action),
             Action::JiraFilteredTree(action) => self.dispatch_jira_filtered_tree(action),
+            Action::ScrollListHorizontal(delta) => {
+                if self.filtered_tree.view_mode() == FilteredTreeViewMode::Table {
+                    self.scroll_table_horizontal(delta);
+                }
+            }
             Action::Board(BoardAction::GoToStartPrefix) => {
                 if self.board_go_to_start_pending {
                     let search = self.board_filter.value().to_owned();
@@ -737,7 +761,7 @@ impl App {
                 .push(Notification::error("Issue URL not copied", message)),
             JiraFilteredTreeEvent::ColumnsChanged(_) => self.reload_current_view_fields(),
             JiraFilteredTreeEvent::LoadChildren(parent_key) => self.request_children(parent_key),
-            JiraFilteredTreeEvent::FilterChanged(term) => self.run_search(term),
+            JiraFilteredTreeEvent::FilterChanged(term) => self.queue_search(term),
             JiraFilteredTreeEvent::FilterCleared => self.restore_browse_view(),
         }
     }
