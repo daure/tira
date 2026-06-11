@@ -101,6 +101,10 @@ impl App {
             self.handle_board_mouse(point, inner, scroll_delta, horizontal_delta);
             return;
         }
+        if self.active_tab() == ApplicationTab::Timeline {
+            self.handle_timeline_mouse(point, inner, scroll_delta, horizontal_delta);
+            return;
+        }
         if self.active_tab() != ApplicationTab::List {
             return;
         }
@@ -152,6 +156,25 @@ impl App {
         if let Some(delta) = horizontal_delta {
             // Shift/horizontal wheel pans the columns one cell per notch.
             self.board.scroll_viewport_horizontal(delta as i32);
+        }
+    }
+
+    /// Wheel-scrolls the timeline rows (and shift/horizontal wheel pans the date
+    /// axis), mirroring the List tab. The viewport height drops the toolbar and
+    /// the two header rows; `scroll_viewport` clamps to the row count.
+    fn handle_timeline_mouse(
+        &mut self,
+        _point: (u16, u16),
+        inner: Rect,
+        scroll_delta: Option<isize>,
+        horizontal_delta: Option<isize>,
+    ) {
+        let viewport_height = inner.height.saturating_sub(3) as usize;
+        if let Some(delta) = scroll_delta {
+            self.timeline.scroll_viewport(delta, viewport_height);
+        }
+        if let Some(delta) = horizontal_delta {
+            self.timeline.scroll_h(delta as i32 * TIMELINE_WHEEL_SCROLL_STEP);
         }
     }
 

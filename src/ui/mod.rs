@@ -13,6 +13,7 @@ mod setup;
 pub(crate) mod style;
 pub mod theme;
 mod theme_picker;
+mod timeline;
 
 use ratatui::{
     Frame,
@@ -69,6 +70,6 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBi
     match app.active_tab() {
         ApplicationTab::List => issue_list::render(frame, area, app, keybindings),
         ApplicationTab::Board => board::render(frame, area, app, keybindings),
-        ApplicationTab::Timeline => {}
+        ApplicationTab::Timeline => timeline::render(frame, area, app, keybindings),
     }
 }

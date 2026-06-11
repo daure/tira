@@ -107,6 +107,9 @@ impl App {
             Screen::Main if self.active_tab() == ApplicationTab::Board && self.board_filter.is_focused() => {
                 self.dispatch_board_filter(keybindings.filter_action_for(key));
             }
+            Screen::Main if self.active_tab() == ApplicationTab::Timeline => {
+                self.dispatch(keybindings.timeline_action_for(key));
+            }
             Screen::Main if self.filtered_tree.is_filter_focused() => {
                 let action = keybindings.filter_action_for(key);
                 if action == FilterAction::MoveSelectionUp {

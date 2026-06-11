@@ -1,5 +1,5 @@
 use crate::components::{
-    generic::{dropdown::DropdownAction, tabs::TabAction},
+    generic::{dropdown::DropdownAction, tabs::TabAction, tree::TreeAction},
     jira::filtered_tree::JiraFilteredTreeAction,
 };
 
@@ -41,6 +41,7 @@ pub enum Action {
     GoToBoard,
     GoToList,
     GoToTimeline,
+    Timeline(TimelineAction),
     OpenHelp,
     CloseHelp,
     Quit,
@@ -61,4 +62,13 @@ pub enum BoardAction {
     ToggleCollapse,
     CollapseAllGroups,
     ExpandAllGroups,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineAction {
+    /// A row-tree action (navigation, expand/collapse) routed to the timeline's
+    /// backing tree — the same actions the List view uses.
+    Tree(TreeAction),
+    ScrollLeft,
+    ScrollRight,
 }

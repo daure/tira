@@ -14,6 +14,7 @@ pub use crate::domain::models::*;
 pub use query::{CHILD_PAGE_SIZE, ChildrenBatch, ROOT_PAGE_SIZE};
 
 use greenhopper::board_data_from_greenhopper;
+use greenhopper::timeline_epics_from_greenhopper;
 use protocol::{
     AssignIssuePayload, AssignableUser, BoardDetails, BoardSearchResponse, FieldDetails,
     ParentProbeResponse, ProjectSearchResponse, SearchResponse,
@@ -59,6 +60,12 @@ pub struct JiraUsersResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardLoadResult {
     pub board: Result<BoardData, JiraError>,
+    pub logs: Vec<CommandLogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineLoadResult {
+    pub timeline: Result<TimelineData, JiraError>,
     pub logs: Vec<CommandLogEntry>,
 }
 
@@ -515,6 +522,71 @@ pub fn load_project_board(credentials: &JiraCredentials) -> BoardLoadResult {
     }
 }
 
+/// Loads the project's first board, then the timeline behind it: epics with
+/// child counts (greenhopper backlog) joined to dated sprints (agile sprint
+/// endpoint). Sprint dates are best-effort — if that fetch fails the epics and
+/// their progress still render, just without axis bars.
+pub fn load_project_timeline(credentials: &JiraCredentials) -> TimelineLoadResult {
+    let board_search = load_project_boards(credentials);
+    let mut logs = vec![board_search.log];
+
+    let board = match board_search.board {
+        Ok(board) => board,
+        Err(error) => {
+            return TimelineLoadResult {
+                timeline: Err(error),
+                logs,
+            };
+        }
+    };
+
+    // Fetch the (large) backlog epics and the sprint history concurrently —
+    // both only need the board id, so there's no reason to serialize them.
+    let (epics_load, (sprints, sprint_logs)) = std::thread::scope(|scope| {
+        let epics = scope.spawn(|| load_greenhopper_timeline_epics(credentials, board.id));
+        let sprints = scope.spawn(|| load_board_sprints(credentials, board.id));
+        (
+            epics.join().unwrap_or_else(|_| TimelineEpicsLoad {
+                epics: Err(JiraError(String::from(
+                    "Jira timeline worker thread panicked",
+                ))),
+                log: failed_log(
+                    current_time_string(),
+                    "GET",
+                    "/xboard/plan/backlog/data.json",
+                ),
+            }),
+            sprints.join().unwrap_or_else(|_| {
+                (
+                    Err(JiraError(String::from(
+                        "Jira sprints worker thread panicked",
+                    ))),
+                    Vec::new(),
+                )
+            }),
+        )
+    });
+    logs.push(epics_load.log);
+    logs.extend(sprint_logs);
+    let epics = match epics_load.epics {
+        Ok(epics) => epics,
+        Err(error) => {
+            return TimelineLoadResult {
+                timeline: Err(error),
+                logs,
+            };
+        }
+    };
+
+    TimelineLoadResult {
+        timeline: Ok(TimelineData {
+            epics,
+            sprints: sprints.unwrap_or_default(),
+        }),
+        logs,
+    }
+}
+
 struct BoardSearchLoad {
     board: Result<BoardDetails, JiraError>,
     log: CommandLogEntry,
@@ -522,6 +594,11 @@ struct BoardSearchLoad {
 
 struct BoardDataLoad {
     board: Result<BoardData, JiraError>,
+    log: CommandLogEntry,
+}
+
+struct TimelineEpicsLoad {
+    epics: Result<Vec<TimelineEpic>, JiraError>,
     log: CommandLogEntry,
 }
 
@@ -628,6 +705,181 @@ fn load_greenhopper_board_data(
             log: transport_error_log(timestamp, method, path, duration_ms),
         },
     }
+}
+
+/// Fetches the greenhopper backlog data for a board and maps it into timeline
+/// epics. Uses the backlog endpoint (not `work/allData`) because only the
+/// backlog payload carries `epicData` with rolled-up child counts.
+fn load_greenhopper_timeline_epics(
+    credentials: &JiraCredentials,
+    board_id: u64,
+) -> TimelineEpicsLoad {
+    let site = credentials.site.trim().trim_end_matches('/');
+    let rapid_view_id = board_id.to_string();
+    let query = [("rapidViewId", rapid_view_id.as_str())];
+    let method = "GET";
+    let timestamp = current_time_string();
+    let url = match Url::parse_with_params(
+        &format!("{site}/rest/greenhopper/1.0/xboard/plan/backlog/data.json"),
+        &query,
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return TimelineEpicsLoad {
+                epics: Err(JiraError(format!("Invalid Jira site URL: {error}"))),
+                log: failed_log(timestamp, method, "/xboard/plan/backlog/data.json"),
+            };
+        }
+    };
+    let started_at = Instant::now();
+    let response = reqwest::blocking::Client::new()
+        .get(url.clone())
+        .basic_auth(credentials.email.trim(), Some(credentials.api_key.trim()))
+        .send();
+    let duration_ms = started_at.elapsed().as_millis();
+    let path = log_path(&url);
+
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let log = response_log(timestamp, method, path, status, duration_ms);
+            if !status.is_success() {
+                return TimelineEpicsLoad {
+                    epics: Err(JiraError(format!("Jira returned HTTP {status}"))),
+                    log,
+                };
+            }
+
+            let epics = response
+                .json::<serde_json::Value>()
+                .map_err(|error| {
+                    JiraError(format!("Jira timeline data could not be read: {error}"))
+                })
+                .map(|payload| timeline_epics_from_greenhopper(&payload));
+            TimelineEpicsLoad { epics, log }
+        }
+        Err(error) => TimelineEpicsLoad {
+            epics: Err(JiraError(format!("Jira timeline request failed: {error}"))),
+            log: transport_error_log(timestamp, method, path, duration_ms),
+        },
+    }
+}
+
+/// Maximum number of agile sprint pages to fetch (50 sprints each). Caps the
+/// request count for boards with long histories; recent sprints sit on the last
+/// pages, so paging continues until `isLast`.
+const SPRINT_PAGE_CAP: u32 = 12;
+const SPRINT_PAGE_SIZE: u32 = 50;
+
+/// Loads every dated sprint for a board from the agile sprint endpoint, paging
+/// until `isLast` or the page cap. The endpoint returns oldest-first; the UI
+/// windows to the relevant range. Best-effort: a failed page returns whatever
+/// was gathered so far alongside the error log.
+fn load_board_sprints(
+    credentials: &JiraCredentials,
+    board_id: u64,
+) -> (Result<Vec<TimelineSprint>, JiraError>, Vec<CommandLogEntry>) {
+    let site = credentials.site.trim().trim_end_matches('/');
+    let method = "GET";
+    let mut sprints = Vec::new();
+    let mut logs = Vec::new();
+    let mut start_at: u32 = 0;
+
+    for _ in 0..SPRINT_PAGE_CAP {
+        let start_at_str = start_at.to_string();
+        let max_results = SPRINT_PAGE_SIZE.to_string();
+        let query = [
+            ("startAt", start_at_str.as_str()),
+            ("maxResults", max_results.as_str()),
+        ];
+        let timestamp = current_time_string();
+        let endpoint = format!("{site}/rest/agile/1.0/board/{board_id}/sprint");
+        let url = match Url::parse_with_params(&endpoint, &query) {
+            Ok(url) => url,
+            Err(error) => {
+                logs.push(failed_log(timestamp, method, "/board/sprint"));
+                return (
+                    Err(JiraError(format!("Invalid Jira site URL: {error}"))),
+                    logs,
+                );
+            }
+        };
+        let started_at = Instant::now();
+        let response = reqwest::blocking::Client::new()
+            .get(url.clone())
+            .basic_auth(credentials.email.trim(), Some(credentials.api_key.trim()))
+            .send();
+        let duration_ms = started_at.elapsed().as_millis();
+        let path = log_path(&url);
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                logs.push(transport_error_log(timestamp, method, path, duration_ms));
+                return (
+                    Err(JiraError(format!("Jira sprints request failed: {error}"))),
+                    logs,
+                );
+            }
+        };
+        let status = response.status();
+        logs.push(response_log(timestamp, method, path, status, duration_ms));
+        if !status.is_success() {
+            return (Err(JiraError(format!("Jira returned HTTP {status}"))), logs);
+        }
+
+        let page = match response.json::<serde_json::Value>() {
+            Ok(page) => page,
+            Err(error) => {
+                return (
+                    Err(JiraError(format!("Jira sprints could not be read: {error}"))),
+                    logs,
+                );
+            }
+        };
+        if let Some(values) = page.get("values").and_then(serde_json::Value::as_array) {
+            sprints.extend(values.iter().filter_map(timeline_sprint_from_agile));
+        }
+        let is_last = page
+            .get("isLast")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if is_last {
+            break;
+        }
+        start_at += SPRINT_PAGE_SIZE;
+    }
+
+    (Ok(sprints), logs)
+}
+
+/// Maps one agile sprint JSON object into a `TimelineSprint`, dropping sprints
+/// without a usable id. Start/end dates are parsed to day-numbers; an undated
+/// (e.g. future) sprint keeps `None` endpoints and is left off the axis.
+fn timeline_sprint_from_agile(value: &serde_json::Value) -> Option<TimelineSprint> {
+    let id = value.get("id").and_then(serde_json::Value::as_i64)?;
+    let state = match value.get("state").and_then(serde_json::Value::as_str) {
+        Some(state) if state.eq_ignore_ascii_case("active") => SprintState::Active,
+        Some(state) if state.eq_ignore_ascii_case("closed") => SprintState::Closed,
+        _ => SprintState::Future,
+    };
+    let day = |field: &str| {
+        value
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::domain::date::iso_to_days)
+    };
+    Some(TimelineSprint {
+        id,
+        name: value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| String::from("Sprint")),
+        state,
+        start_day: day("startDate"),
+        end_day: day("endDate").or_else(|| day("completeDate")),
+    })
 }
 
 struct AssignableLoad {

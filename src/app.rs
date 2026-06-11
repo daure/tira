@@ -32,6 +32,10 @@ pub fn app_tabs() -> [&'static str; 3] {
     ApplicationTab::all().map(|tab| tab.title())
 }
 const DEFAULT_TAB_INDEX: usize = 1;
+/// Cells the timeline scrolls horizontally per scroll-key press.
+const TIMELINE_SCROLL_STEP: i32 = 8;
+/// Cells the timeline pans horizontally per horizontal-wheel notch.
+pub(crate) const TIMELINE_WHEEL_SCROLL_STEP: i32 = 4;
 
 mod action;
 mod board;
@@ -46,10 +50,12 @@ mod modal;
 mod mouse;
 mod setup;
 mod tab;
+mod timeline;
 
-pub use action::{Action, BoardAction};
+pub use action::{Action, BoardAction, TimelineAction};
 pub use tab::ApplicationTab;
 pub use board::{BoardGrouping, BoardState, board_issue_column};
+pub use timeline::TimelineState;
 pub(crate) use board::{
     board_assignee_value_matches, board_empty_cell_key, board_group_key, board_grouped_lanes,
     board_issue_matches_search, board_value_matches, normalize_board_user_fields,
@@ -92,6 +98,7 @@ pub struct App {
     setup: CredentialForm,
     filtered_tree: JiraFilteredTreeState,
     board: BoardState,
+    timeline: TimelineState,
     board_go_to_start_pending: bool,
     board_grouping: BoardGrouping,
     credentials: Option<JiraCredentials>,
@@ -185,6 +192,7 @@ impl App {
             setup: CredentialForm::default(),
             filtered_tree,
             board,
+            timeline: TimelineState::default(),
             board_go_to_start_pending: false,
             board_grouping: BoardGrouping::None,
             board_filter: crate::FilterState::default(),
@@ -331,6 +339,8 @@ impl App {
         }
         self.board.v_scroll.tick(dt);
         self.board.h_scroll.tick(dt);
+        self.timeline.tick(dt);
+        self.timeline.tick_tree(dt);
         for notification in &mut self.notifications {
             notification.tick(dt);
         }
@@ -362,6 +372,7 @@ impl App {
         self.active_load_request_id.is_some()
             || self.search_request_id.is_some()
             || self.pending_roots_request_id.is_some()
+            || self.timeline.is_loading()
             || self.filtered_tree.any_loading()
     }
 
@@ -371,6 +382,7 @@ impl App {
             || self.notifications.iter().any(Notification::is_animating)
             || self.board.v_scroll.is_animating()
             || self.board.h_scroll.is_animating()
+            || self.timeline.is_animating()
             || self.pending_search.is_some()
             || self.is_loading()
     }
@@ -404,6 +416,10 @@ impl App {
 
     pub fn board(&self) -> &BoardState {
         &self.board
+    }
+
+    pub fn timeline(&self) -> &TimelineState {
+        &self.timeline
     }
 
     pub fn selected_board_issue_key(&self) -> Option<&str> {
@@ -703,6 +719,7 @@ impl App {
             Action::GoToBoard => self.select_tab(ApplicationTab::Board),
             Action::GoToList => self.select_tab(ApplicationTab::List),
             Action::GoToTimeline => self.select_tab(ApplicationTab::Timeline),
+            Action::Timeline(action) => self.dispatch_timeline(action),
             Action::OpenHelp => self.open_dialog(DialogKind::Help),
             Action::CloseHelp => self.close_dialog(DialogKind::Help),
             Action::QuickSwitcher(action) => self.dispatch_quick_switcher(action),
@@ -731,6 +748,7 @@ impl App {
         self.tabs.dispatch(action, &app_tabs());
         self.filtered_tree.clear_transient_input();
         self.close_overlays();
+        self.ensure_timeline_loaded();
     }
 
     fn dispatch_jira_filtered_tree(&mut self, action: JiraFilteredTreeAction) {
@@ -843,6 +861,36 @@ impl App {
             assignee,
             credentials,
         });
+    }
+
+    fn dispatch_timeline(&mut self, action: TimelineAction) {
+        match action {
+            TimelineAction::Tree(action) => self.timeline.dispatch_tree(action),
+            TimelineAction::ScrollLeft => self.timeline.scroll_h(-TIMELINE_SCROLL_STEP),
+            TimelineAction::ScrollRight => self.timeline.scroll_h(TIMELINE_SCROLL_STEP),
+        }
+    }
+
+    /// Loads the Timeline tab's data the first time it becomes active. A no-op
+    /// once a load has resolved or is already in flight, and when no credentials
+    /// are configured.
+    pub(crate) fn ensure_timeline_loaded(&mut self) {
+        if self.active_tab() != ApplicationTab::Timeline
+            || self.timeline.is_loaded()
+            || self.timeline.is_loading()
+        {
+            return;
+        }
+        let Some(credentials) = self.credentials.clone() else {
+            return;
+        };
+        let request_id = self.next_request_id();
+        self.timeline.begin_load(request_id);
+        self.pending_effects
+            .push(AppEffect::LoadTimeline {
+                request_id,
+                credentials,
+            });
     }
 }
 

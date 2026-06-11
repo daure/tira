@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::models::{
     BoardColumnSummary, BoardData, BoardSwimlaneSummary, IssueSummary, JiraError, SprintSummary,
+    TimelineEpic, TimelineEpicStats, TimelineIssue,
 };
 
 pub(super) fn board_data_from_greenhopper(
@@ -51,6 +52,107 @@ pub(super) fn board_data_from_greenhopper(
         issues,
         sprint: board_sprint_from_value(&payload),
     })
+}
+
+/// Builds the Timeline tab's epics from the greenhopper backlog payload
+/// (`/xboard/plan/backlog/data.json`): every epic with its rolled-up child
+/// counts and its child issues with the sprints they sit in. Sprint *dates*
+/// come separately from the agile sprint endpoint and are joined in the
+/// service, so this only reads the epic/issue structure. A missing `epicData`
+/// section degrades to an empty list.
+pub(super) fn timeline_epics_from_greenhopper(payload: &serde_json::Value) -> Vec<TimelineEpic> {
+    let children_by_epic = timeline_children_by_epic(payload);
+    payload
+        .pointer("/epicData/epics")
+        .and_then(serde_json::Value::as_array)
+        .map(|epics| {
+            epics
+                .iter()
+                .map(|epic| timeline_epic_from_value(epic, &children_by_epic))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Groups the backlog issues under their epic (Jira's modern `parentKey`). Each
+/// issue keeps the sprint ids it belongs to so the timeline can bucket it into
+/// columns.
+fn timeline_children_by_epic(
+    payload: &serde_json::Value,
+) -> BTreeMap<String, Vec<TimelineIssue>> {
+    let mut grouped: BTreeMap<String, Vec<TimelineIssue>> = BTreeMap::new();
+    let Some(issues) = payload.get("issues").and_then(serde_json::Value::as_array) else {
+        return grouped;
+    };
+    for issue in issues {
+        let Some(parent) = text_property(issue, &["parentKey"]) else {
+            continue;
+        };
+        let Some(key) = text_property(issue, &["key", "issueKey"]) else {
+            continue;
+        };
+        grouped.entry(parent).or_default().push(TimelineIssue {
+            key,
+            summary: text_property(issue, &["summary"]).unwrap_or_default(),
+            status: text_property(issue, &["statusName", "status"]).unwrap_or_default(),
+            issue_type: text_property(issue, &["typeName", "issueType"])
+                .unwrap_or_else(|| String::from("Issue")),
+            done: issue.get("done").and_then(serde_json::Value::as_bool) == Some(true),
+            sprint_ids: timeline_sprint_ids(issue),
+        });
+    }
+    grouped
+}
+
+fn timeline_sprint_ids(issue: &serde_json::Value) -> Vec<i64> {
+    issue
+        .get("sprintIds")
+        .and_then(serde_json::Value::as_array)
+        .map(|ids| ids.iter().filter_map(serde_json::Value::as_i64).collect())
+        .unwrap_or_default()
+}
+
+fn timeline_epic_from_value(
+    epic: &serde_json::Value,
+    children_by_epic: &BTreeMap<String, Vec<TimelineIssue>>,
+) -> TimelineEpic {
+    let key = text_property(epic, &["key", "epicKey"]).unwrap_or_default();
+    let counts = epic.pointer("/epicStats/childrenIssueCount");
+    let count = |field: &str| {
+        counts
+            .and_then(|counts| counts.get(field))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32
+    };
+    let stats = TimelineEpicStats {
+        to_do: count("toDo"),
+        in_progress: count("inProgress"),
+        done: count("done"),
+    };
+    let done = epic.get("done").and_then(serde_json::Value::as_bool) == Some(true);
+    let children = children_by_epic.get(&key).cloned().unwrap_or_default();
+
+    TimelineEpic {
+        status: timeline_epic_status(done, &stats),
+        summary: text_property(epic, &["summary", "epicLabel"]).unwrap_or_else(|| key.clone()),
+        key,
+        done,
+        stats,
+        children,
+    }
+}
+
+/// Greenhopper does not give an epic a status name in the backlog payload, only
+/// a `done` flag and child counts, so derive a short status from those for the
+/// timeline label.
+fn timeline_epic_status(done: bool, stats: &TimelineEpicStats) -> String {
+    if done {
+        String::from("Done")
+    } else if stats.in_progress > 0 {
+        String::from("In Progress")
+    } else {
+        String::from("To Do")
+    }
 }
 
 /// Builds the board's swimlanes from the greenhopper payload, sorted by
@@ -877,5 +979,43 @@ mod tests {
             vec!["KAN-1", "KAN-3"]
         );
         assert_eq!(board.swimlanes[0].issue_keys, vec!["KAN-1", "KAN-3"]);
+    }
+
+    #[test]
+    fn timeline_epics_bucket_children_under_epics_with_stats() {
+        let epics = super::timeline_epics_from_greenhopper(&json!({
+            "epicData": {
+                "epics": [
+                    {
+                        "key": "DPP-10",
+                        "summary": "Checkout revamp",
+                        "done": false,
+                        "epicStats": { "childrenIssueCount": { "toDo": 1, "inProgress": 1, "done": 2 } }
+                    },
+                    {
+                        "key": "DPP-20",
+                        "summary": "Done epic",
+                        "done": true,
+                        "epicStats": { "childrenIssueCount": { "toDo": 0, "inProgress": 0, "done": 3 } }
+                    }
+                ]
+            },
+            "issues": [
+                { "key": "DPP-11", "summary": "Cart", "parentKey": "DPP-10", "statusName": "In Progress", "typeName": "Story", "done": false, "sprintIds": [2] },
+                { "key": "DPP-12", "summary": "Pay", "parentKey": "DPP-10", "statusName": "Done", "typeName": "Task", "done": true, "sprintIds": [1, 2] },
+                { "key": "DPP-99", "summary": "Orphan", "statusName": "To Do", "typeName": "Task", "done": false, "sprintIds": [3] }
+            ]
+        }));
+
+        assert_eq!(epics.len(), 2);
+        let revamp = &epics[0];
+        assert_eq!(revamp.key, "DPP-10");
+        assert_eq!(revamp.status, "In Progress");
+        assert_eq!(revamp.stats.total(), 4);
+        assert_eq!(revamp.stats.percent_done(), 50);
+        // Both children land under the epic; the orphan (no parentKey) does not.
+        assert_eq!(revamp.children.len(), 2);
+        assert_eq!(revamp.sprint_ids().into_iter().collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(epics[1].status, "Done");
     }
 }

@@ -148,6 +148,11 @@ impl App {
                 board,
                 logs,
             } => self.apply_board_reloaded(request_id, board, logs),
+            AppEvent::TimelineLoaded {
+                request_id,
+                timeline,
+                logs,
+            } => self.apply_timeline_loaded(request_id, timeline, logs),
             AppEvent::SearchLoaded {
                 request_id,
                 term,
@@ -245,6 +250,8 @@ impl App {
         self.pending_reload_seamless = false;
         self.reload_children_buffer.clear();
         self.filtered_tree.set_flat(false);
+        // A project switch invalidates the timeline; force a fresh lazy load.
+        self.timeline = TimelineState::default();
         self.pending_effects.push(AppEffect::LoadJiraProject {
             request_id,
             purpose,
@@ -477,6 +484,36 @@ impl App {
                     "Jira board not loaded",
                     "Board endpoint failed; the previous board is still shown.",
                 ));
+            }
+        }
+    }
+
+    /// Applies the Timeline tab's load. Stale results (a newer load already
+    /// started) are dropped, mirroring the board-reload guard.
+    fn apply_timeline_loaded(
+        &mut self,
+        request_id: u64,
+        timeline: Result<crate::services::jira::TimelineData, JiraError>,
+        logs: Vec<CommandLogEntry>,
+    ) {
+        if !self.timeline.is_pending(request_id) {
+            return;
+        }
+        self.command_log.extend(logs);
+        match timeline {
+            Ok(data) => {
+                let epic_count = data.epics.len();
+                self.timeline.finish_load(Ok(data));
+                self.status = format!("Timeline loaded ({epic_count} epics).");
+            }
+            Err(error) => {
+                let message = error.0.clone();
+                self.timeline.finish_load(Err(error.0));
+                self.notifications.push(Notification::error(
+                    "Jira timeline not loaded",
+                    message.clone(),
+                ));
+                self.status = format!("Timeline not loaded: {message}");
             }
         }
     }

@@ -2,7 +2,7 @@ use crate::{
     config::JiraCredentials,
     services::jira::{
         BoardData, CommandLogEntry, FieldSummary, IssueSummary, JiraError, JiraLoadResult,
-        ProjectSummary, UserSummary,
+        ProjectSummary, TimelineData, UserSummary,
     },
     ui::theme::ThemeName,
 };
@@ -22,6 +22,12 @@ pub enum AppEffect {
     /// Reload only the board (Greenhopper data), leaving the list view and its
     /// paging state untouched.
     ReloadBoardOnly {
+        request_id: u64,
+        credentials: JiraCredentials,
+    },
+    /// Load the Timeline tab's data (epics + sprints) on demand. Independent of
+    /// the list/board load so switching to the tab does not disturb them.
+    LoadTimeline {
         request_id: u64,
         credentials: JiraCredentials,
     },
@@ -83,6 +89,12 @@ pub enum AppEvent {
     BoardReloaded {
         request_id: u64,
         board: Result<BoardData, JiraError>,
+        logs: Vec<CommandLogEntry>,
+    },
+    /// The Timeline tab's data finished loading.
+    TimelineLoaded {
+        request_id: u64,
+        timeline: Result<TimelineData, JiraError>,
         logs: Vec<CommandLogEntry>,
     },
     /// Children of several parents from one batched query. Each tuple is

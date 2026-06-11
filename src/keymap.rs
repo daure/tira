@@ -3,7 +3,7 @@ use std::{env, fs, io, path::PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    app::{Action, BoardAction, QuickAction, Screen, SetupAction},
+    app::{Action, BoardAction, QuickAction, Screen, SetupAction, TimelineAction},
     components::{
         generic::{
             dropdown::DropdownAction, filter::FilterAction, filtered_tree::FilteredTreeAction,
@@ -82,6 +82,8 @@ struct NavBindings {
     end: Vec<KeySpec>,
     arrow_up: Vec<KeySpec>,
     arrow_down: Vec<KeySpec>,
+    scroll_left: Vec<KeySpec>,
+    scroll_right: Vec<KeySpec>,
 }
 
 impl Default for NavBindings {
@@ -105,6 +107,14 @@ impl Default for NavBindings {
             end: vec![KeySpec::code(KeyCode::End)],
             arrow_up: vec![KeySpec::code(KeyCode::Up)],
             arrow_down: vec![KeySpec::code(KeyCode::Down)],
+            scroll_left: vec![
+                KeySpec::shifted('h'),
+                KeySpec::code_with_modifiers(KeyCode::Left, KeyModifiers::SHIFT),
+            ],
+            scroll_right: vec![
+                KeySpec::shifted('l'),
+                KeySpec::code_with_modifiers(KeyCode::Right, KeyModifiers::SHIFT),
+            ],
         }
     }
 }
@@ -323,6 +333,8 @@ impl KeyBindings {
         set_keys(&value, "nav", "end", &mut bindings.nav.end);
         set_keys(&value, "nav", "arrow_up", &mut bindings.nav.arrow_up);
         set_keys(&value, "nav", "arrow_down", &mut bindings.nav.arrow_down);
+        set_keys(&value, "nav", "scroll_left", &mut bindings.nav.scroll_left);
+        set_keys(&value, "nav", "scroll_right", &mut bindings.nav.scroll_right);
 
         set_key(&value, "global", "quit", &mut bindings.quit);
         set_key(&value, "global", "reload_node", &mut bindings.reload_node);
@@ -589,13 +601,49 @@ impl KeyBindings {
         }
     }
 
+    /// Resolves a configured horizontal-scroll key to a direction: -1 for left,
+    /// +1 for right, or `None`. Shared by the List and Timeline tabs.
+    fn horizontal_scroll_direction(&self, key: KeyEvent) -> Option<i32> {
+        if matches_any(&self.nav.scroll_left, key) {
+            Some(-1)
+        } else if matches_any(&self.nav.scroll_right, key) {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    /// Resolves a key on the Timeline tab. Reuses the List view's tree key
+    /// resolution so every navigation key (j/k, half/full page, gg/G, Home/End)
+    /// and expand/collapse behaves identically; adds tab switching and the
+    /// Shift+H/L horizontal axis scroll. Filter keys are ignored (no filter).
+    pub fn timeline_action_for(&self, key: KeyEvent) -> Action {
+        if self.tabs.previous.matches(key) {
+            Action::Tabs(TabAction::Previous)
+        } else if self.tabs.next.matches(key) {
+            Action::Tabs(TabAction::Next)
+        } else if let Some(dir) = self.horizontal_scroll_direction(key) {
+            if dir < 0 {
+                Action::Timeline(TimelineAction::ScrollLeft)
+            } else {
+                Action::Timeline(TimelineAction::ScrollRight)
+            }
+        } else if let Some(FilteredTreeAction::Tree(tree_action)) =
+            self.filtered_tree_action_for(key)
+        {
+            Action::Timeline(TimelineAction::Tree(tree_action))
+        } else {
+            Action::None
+        }
+    }
+
     pub fn jira_filtered_tree_action_for(&self, key: KeyEvent) -> Action {
         if self.tabs.previous.matches(key) {
             Action::Tabs(TabAction::Previous)
         } else if self.tabs.next.matches(key) {
             Action::Tabs(TabAction::Next)
-        } else if let Some(delta) = list_horizontal_scroll_delta(key) {
-            Action::ScrollListHorizontal(delta)
+        } else if let Some(dir) = self.horizontal_scroll_direction(key) {
+            Action::ScrollListHorizontal(dir * LIST_H_SCROLL_STEP)
         } else if self.tree.open_columns.matches(key) {
             Action::JiraFilteredTree(JiraFilteredTreeAction::OpenColumns)
         } else if self.tree.open_assignee.matches(key) {
@@ -829,6 +877,23 @@ impl KeyBindings {
         )
     }
 
+    pub fn timeline_hint_text(&self) -> String {
+        let move_up = resolved_owned(&self.tree.move_up, &self.nav.up);
+        let move_down = resolved_owned(&self.tree.move_down, &self.nav.down);
+        let scroll = join_labels(
+            self.nav.scroll_left.iter().chain(&self.nav.scroll_right),
+            "/",
+        );
+        format!(
+            "{} move | {}/{} expand/collapse | {scroll} scroll | {} leader | {} help",
+            join_labels(move_up.iter().chain(&move_down), "/"),
+            self.tree.expand.label(),
+            self.tree.collapse.label(),
+            self.leader.label(),
+            self.open_help.label()
+        )
+    }
+
     pub fn column_dropdown_context_action_for(
         &self,
         key: KeyEvent,
@@ -869,6 +934,9 @@ impl KeyBindings {
                     }
                     if active_tab == "List" {
                         items.extend(self.list_help_items());
+                    }
+                    if active_tab == "Timeline" {
+                        items.extend(self.timeline_help_items());
                     }
                     items
                 }
@@ -1142,7 +1210,7 @@ impl KeyBindings {
         ));
         items.push(self.help_item(
             HelpScope::Local,
-            String::from("⇧h/⇧l or ⇧←/⇧→"),
+            join_labels(self.nav.scroll_left.iter().chain(&self.nav.scroll_right), " / "),
             "Scroll columns",
             "Pan the table left or right when columns overflow the width.",
         ));
@@ -1196,6 +1264,38 @@ impl KeyBindings {
             "Reload all issues for the active Jira project.",
         ));
         items
+    }
+
+    fn timeline_help_items(&self) -> Vec<HelpItem> {
+        let move_up = resolve(&self.tree.move_up, &self.nav.up);
+        let move_down = resolve(&self.tree.move_down, &self.nav.down);
+        vec![
+            self.help_item(
+                HelpScope::Local,
+                join_labels(move_down.iter().chain(move_up), " / "),
+                "Move selection",
+                "Move the timeline selection between epics and child issues.",
+            ),
+            self.help_item(
+                HelpScope::Local,
+                join_labels(
+                    [
+                        &self.tree.expand,
+                        &self.tree.collapse,
+                        &self.tree.toggle_expand,
+                    ],
+                    " / ",
+                ),
+                "Expand / collapse",
+                "Expand or collapse the selected epic to show its child issues.",
+            ),
+            self.help_item(
+                HelpScope::Local,
+                join_labels(self.nav.scroll_left.iter().chain(&self.nav.scroll_right), " / "),
+                "Scroll timeline",
+                "Scroll the timeline axis left/right through the months.",
+            ),
+        ]
     }
 
     fn append_global_help_items(&self, items: &mut Vec<HelpItem>) {
@@ -1608,20 +1708,6 @@ fn matches_any(bindings: &[KeySpec], key: KeyEvent) -> bool {
 
 /// Cells panned per keypress when scrolling the issue table horizontally.
 const LIST_H_SCROLL_STEP: i32 = 12;
-
-/// Maps the table's horizontal-pan keys (Shift+H/Shift+L and Shift+Left/
-/// Shift+Right) to a signed cell delta, or `None` for any other key. Plain
-/// `h`/`l` are left alone for tree collapse/expand.
-fn list_horizontal_scroll_delta(key: KeyEvent) -> Option<i32> {
-    if !key.modifiers.contains(KeyModifiers::SHIFT) {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('H') | KeyCode::Left => Some(-LIST_H_SCROLL_STEP),
-        KeyCode::Char('L') | KeyCode::Right => Some(LIST_H_SCROLL_STEP),
-        _ => None,
-    }
-}
 
 fn doubled_label(label: &str) -> String {
     if label.chars().count() == 1 {

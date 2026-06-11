@@ -487,6 +487,7 @@ impl App {
         self.screen = Screen::Main;
         self.filtered_tree.clear_transient_input();
         self.close_overlays();
+        self.ensure_timeline_loaded();
     }
 
     pub(crate) fn dispatch_assignee_dropdown(

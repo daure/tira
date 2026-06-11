@@ -126,6 +126,20 @@ fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
                     });
                 });
             }
+            AppEffect::LoadTimeline {
+                request_id,
+                credentials,
+            } => {
+                let tx = event_tx.clone();
+                thread::spawn(move || {
+                    let timeline = jira::load_project_timeline(&credentials);
+                    let _ = tx.send(AppEvent::TimelineLoaded {
+                        request_id,
+                        timeline: timeline.timeline,
+                        logs: timeline.logs,
+                    });
+                });
+            }
             AppEffect::LoadMoreRoots {
                 request_id,
                 credentials,
