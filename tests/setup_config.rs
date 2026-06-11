@@ -153,7 +153,6 @@ fn first_render_shows_setup_form_and_status_below_frame() {
     assert!(screen.contains("Board"));
     assert!(screen.contains("List"));
     assert!(screen.contains("Timeline"));
-    assert!(screen.contains("Filters"));
     assert!(screen.contains("Jira connection"));
     assert!(screen.contains("Jira site"));
     assert!(screen.contains("API token"));

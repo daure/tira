@@ -1,4 +1,5 @@
 use ratatui::{
+    layout::Alignment,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -12,6 +13,26 @@ pub fn tabbed_frame(
     theme: &crate::ui::theme::Theme,
 ) -> ratatui::widgets::Block<'static> {
     tabs::tabbed_frame(&app_tabs(), active_tab, view_mode, theme)
+}
+
+/// The compact toolbar hint shown when a board/list toolbar is too narrow to
+/// carry its inline triggers: the configured help binding (accent colour)
+/// followed by " shortcuts" (muted), right-aligned to sit where the triggers
+/// were.
+pub fn shortcuts_hint(
+    keybindings: &KeyBindings,
+    theme: &crate::ui::theme::Theme,
+) -> Paragraph<'static> {
+    let line = Line::from(vec![
+        Span::styled(
+            keybindings.open_help_label(),
+            Style::default()
+                .fg(theme.accent_fg())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" shortcuts ", Style::default().fg(theme.muted_fg())),
+    ]);
+    Paragraph::new(line).alignment(Alignment::Right)
 }
 
 pub fn border_separator(width: u16, theme: &crate::ui::theme::Theme) -> Paragraph<'static> {

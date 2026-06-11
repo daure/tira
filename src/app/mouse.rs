@@ -173,7 +173,11 @@ impl App {
             .areas(inner);
         let trigger_area = self.column_trigger_area(inner, keybindings);
         if contains_point(trigger_area, point) {
-            self.toggle_dropdown(DropdownKind::JiraColumns);
+            if crate::ui::layout::toolbar_is_collapsed(inner.width) {
+                self.open_dialog(DialogKind::Help);
+            } else {
+                self.toggle_dropdown(DropdownKind::JiraColumns);
+            }
             return;
         }
         // The filter row's two cells partition it fully, so a point inside the
@@ -326,25 +330,11 @@ impl App {
     }
 
     fn column_dropdown_rect(&self, area: Rect) -> Rect {
-        let longest = self
-            .column_dropdown()
+        self.column_dropdown()
             .map(|dropdown| {
-                dropdown
-                    .options()
-                    .iter()
-                    .map(|option| option.label.chars().count())
-                    .max()
-                    .unwrap_or(0)
+                crate::components::jira::issue_list::column_dropdown_rect(area, dropdown)
             })
-            .unwrap_or(0) as u16;
-        let width = area.width.min((longest + 6).max(20));
-        let height = area.height.min(16);
-        Rect {
-            x: area.x + area.width.saturating_sub(width + 1),
-            y: area.y + 1,
-            width,
-            height,
-        }
+            .unwrap_or(area)
     }
 
     fn is_column_trigger_point(
@@ -353,7 +343,8 @@ impl App {
         point: (u16, u16),
         keybindings: &KeyBindings,
     ) -> bool {
-        contains_point(self.column_trigger_area(inner, keybindings), point)
+        !crate::ui::layout::toolbar_is_collapsed(inner.width)
+            && contains_point(self.column_trigger_area(inner, keybindings), point)
     }
 
     fn column_trigger_area(&self, inner: Rect, keybindings: &KeyBindings) -> Rect {
@@ -364,7 +355,11 @@ impl App {
                 ratatui::layout::Constraint::Min(1),
             ])
             .areas(inner);
-        let trigger_width = 9u16.saturating_add(keybindings.open_columns_label().len() as u16);
+        let trigger_width = if crate::ui::layout::toolbar_is_collapsed(inner.width) {
+            keybindings.shortcuts_hint_width()
+        } else {
+            keybindings.column_trigger_width()
+        };
         let [_filter_area, trigger_area] = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Horizontal)
             .constraints([

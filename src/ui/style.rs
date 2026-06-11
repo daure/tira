@@ -95,7 +95,21 @@ pub fn highlighted_spans_owned(
     filter: &str,
     base_style: Style,
 ) -> Vec<Span<'static>> {
-    highlighted_spans(theme, text, filter, base_style)
+    let indices = tree::fuzzy_indices(text, filter);
+    highlighted_spans_owned_from_indices(theme, text, &indices, base_style)
+}
+
+/// Like [`highlighted_spans_owned`] but with the matched character indices
+/// supplied directly. Used when the match must be computed over a larger string
+/// than the one being rendered — e.g. a multi-line wrapped card summary, where
+/// the fuzzy subsequence can span several rendered lines.
+pub fn highlighted_spans_owned_from_indices(
+    theme: &Theme,
+    text: &str,
+    indices: &[usize],
+    base_style: Style,
+) -> Vec<Span<'static>> {
+    highlighted_spans_from_indices(theme, text, indices, base_style)
         .into_iter()
         .map(|span| Span::styled(span.content.into_owned(), span.style))
         .collect()
@@ -108,11 +122,20 @@ pub fn highlighted_spans<'a>(
     base_style: Style,
 ) -> Vec<Span<'a>> {
     let indices = tree::fuzzy_indices(text, filter);
+    highlighted_spans_from_indices(theme, text, &indices, base_style)
+}
+
+pub fn highlighted_spans_from_indices<'a>(
+    theme: &Theme,
+    text: &'a str,
+    indices: &[usize],
+    base_style: Style,
+) -> Vec<Span<'a>> {
     if indices.is_empty() {
         return vec![Span::styled(text, base_style)];
     }
 
-    let mut matched = indices.into_iter().peekable();
+    let mut matched = indices.iter().copied().peekable();
     let mut spans = Vec::new();
     let mut segment_start = 0;
     let mut current_style = base_style;

@@ -1,7 +1,7 @@
 mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tira::services::jira::{IssueSummary, JiraError, JiraLoadResult};
+use tira::services::jira::{FieldSummary, IssueSummary, JiraError, JiraLoadResult};
 use tira::{
     App, AppEffect, AppEvent, JiraLoadPurpose, JiraProjectLoadResult, KeyBindings,
     config::JiraCredentials,
@@ -58,6 +58,7 @@ fn loaded_app(issues: Vec<IssueSummary>, next_page_token: Option<String>) -> App
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -192,6 +193,7 @@ fn reload_preserves_selection_on_a_later_page() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -273,6 +275,7 @@ fn reload_without_page_token_keeps_loaded_extent() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -367,6 +370,7 @@ fn reload_after_expanding_keeps_the_loaded_extent() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -449,6 +453,7 @@ fn reload_refetches_loaded_extent_in_one_query_not_page_by_page() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -1003,4 +1008,151 @@ fn child_load_in_flight_when_search_starts_does_not_corrupt_flat_results() {
     assert_eq!(rows.len(), 1);
     assert_eq!(app.issues()[rows[0].item_index].id, "KAN-9");
     assert_eq!(rows[0].depth, 0, "search results stay flat");
+}
+
+/// Loads a project carrying two custom fields plus a "populated" sample that
+/// only mentions one of them. Returns the app on the List tab.
+fn loaded_app_with_fields(
+    fields: Vec<FieldSummary>,
+    populated_fields: Option<std::collections::BTreeSet<String>>,
+) -> App {
+    let credentials = credentials();
+    let mut app = App::from_credentials(credentials.clone());
+    let effect = app.take_effects().remove(0);
+    let AppEffect::LoadJiraProject { request_id, .. } = effect else {
+        panic!("expected initial Jira load effect, got {effect:?}");
+    };
+    app.handle_event(AppEvent::JiraProjectLoaded {
+        request_id,
+        purpose: JiraLoadPurpose::Initial,
+        credentials,
+        result: JiraProjectLoadResult {
+            issues: Ok(vec![issue("KAN-1", "Item", "Task", None)]),
+            board: Err(JiraError(String::from("board unavailable"))),
+            next_page_token: None,
+            fields: Ok(fields),
+            projects: Ok(Vec::new()),
+            users: Ok(Vec::new()),
+            current_user: Err(JiraError(String::new())),
+            populated_fields,
+            logs: Vec::new(),
+        },
+    });
+    app
+}
+
+#[test]
+fn column_picker_hides_custom_fields_absent_from_the_populated_sample() {
+    let bindings = KeyBindings::default();
+    let fields = vec![
+        FieldSummary {
+            id: String::from("customfield_1"),
+            name: String::from("Story Points"),
+        },
+        FieldSummary {
+            id: String::from("customfield_2"),
+            name: String::from("Unused Field"),
+        },
+    ];
+    let populated = Some(std::collections::BTreeSet::from([String::from("customfield_1")]));
+    let mut app = loaded_app_with_fields(fields, populated);
+
+    // Open the column picker on the List tab.
+    app.handle_key(key('c'), &bindings);
+    let labels = app
+        .column_dropdown()
+        .expect("column dropdown open")
+        .options()
+        .iter()
+        .map(|option| option.label.clone())
+        .collect::<Vec<_>>();
+
+    assert!(
+        labels.iter().any(|label| label == "Story Points"),
+        "a populated custom field stays offered: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label == "Unused Field"),
+        "an unpopulated custom field is hidden: {labels:?}"
+    );
+}
+
+#[test]
+fn column_picker_offers_all_fields_when_the_sample_is_unavailable() {
+    let bindings = KeyBindings::default();
+    let fields = vec![FieldSummary {
+        id: String::from("customfield_2"),
+        name: String::from("Unused Field"),
+    }];
+    let mut app = loaded_app_with_fields(fields, None);
+
+    app.handle_key(key('c'), &bindings);
+    let labels = app
+        .column_dropdown()
+        .expect("column dropdown open")
+        .options()
+        .iter()
+        .map(|option| option.label.clone())
+        .collect::<Vec<_>>();
+
+    assert!(
+        labels.iter().any(|label| label == "Unused Field"),
+        "with no sample, every navigable field is offered: {labels:?}"
+    );
+}
+
+#[test]
+fn column_picker_lists_curated_common_fields_before_alphabetical_custom_ones() {
+    let bindings = KeyBindings::default();
+    let fields = vec![
+        FieldSummary {
+            id: String::from("customfield_9001"),
+            name: String::from("Zebra Field"),
+        },
+        FieldSummary {
+            id: String::from("customfield_9002"),
+            name: String::from("Apple Field"),
+        },
+        FieldSummary {
+            id: String::from("reporter"),
+            name: String::from("Reporter"),
+        },
+        FieldSummary {
+            id: String::from("created"),
+            name: String::from("Created"),
+        },
+    ];
+    let mut app = loaded_app_with_fields(fields, None);
+
+    app.handle_key(key('c'), &bindings);
+    let labels = app
+        .column_dropdown()
+        .expect("column dropdown open")
+        .options()
+        .iter()
+        .map(|option| option.label.clone())
+        .collect::<Vec<_>>();
+
+    let position = |needle: &str| {
+        labels
+            .iter()
+            .position(|label| label == needle)
+            .unwrap_or_else(|| panic!("{needle} missing from {labels:?}"))
+    };
+
+    // Pinned columns lead; curated common fields follow in their listed order;
+    // the remaining custom fields trail alphabetically.
+    assert!(position("Assignee") < position("Reporter"));
+    assert!(
+        position("Reporter") < position("Created"),
+        "curated order is preserved: {labels:?}"
+    );
+    assert!(
+        position("Created") < position("Apple Field"),
+        "curated fields precede custom ones: {labels:?}"
+    );
+    assert!(
+        position("Apple Field") < position("Zebra Field"),
+        "custom fields are alphabetical: {labels:?}"
+    );
 }

@@ -195,7 +195,7 @@ impl BoardState {
         );
         self.selected_issue_key = previous
             .filter(|key| cells.iter().any(|cell| cell.key == *key))
-            .or_else(|| cells.first().map(|cell| cell.key.clone()));
+            .or_else(|| first_issue_cell(&cells).map(|cell| cell.key.clone()));
         self.data = Some(data);
         self.error = None;
     }
@@ -207,6 +207,8 @@ impl BoardState {
         };
         let lanes = board_grouped_lanes(data, grouping);
         let cells = board_cells_for_lanes(data, &lanes, search, &self.collapsed_groups, grouping);
+        // Selects the first row as-is (group header included under grouping); the
+        // first `j` then steps onto the first card, which callers rely on.
         self.selected_issue_key = cells.first().map(|cell| cell.key.clone());
     }
 
@@ -328,7 +330,7 @@ impl BoardState {
             .as_ref()
             .and_then(|key| cells.iter().position(|cell| &cell.key == key))
         else {
-            self.selected_issue_key = cells.first().map(|cell| cell.key.clone());
+            self.selected_issue_key = first_issue_cell(&cells).map(|cell| cell.key.clone());
             return;
         };
 
@@ -513,6 +515,16 @@ fn board_cells_for_lanes(
         }
     }
     cells
+}
+
+/// First selectable issue cell — skipping group headers and empty-column
+/// placeholders — falling back to the very first cell when the board has no
+/// real tickets (so empty columns stay focusable, but only as a last resort).
+fn first_issue_cell(cells: &[BoardCell]) -> Option<&BoardCell> {
+    cells
+        .iter()
+        .find(|cell| !cell.is_group && !is_board_empty_key(&cell.key))
+        .or_else(|| cells.first())
 }
 
 pub(crate) fn board_group_key(group: &str) -> String {
@@ -778,36 +790,59 @@ fn board_lane_column_keys(
         .collect()
 }
 
-fn board_issue_matches_search(issue: &IssueSummary, search: &str) -> bool {
+/// Whether an issue matches the board search query. This is the single source
+/// of truth shared by navigation (cell building, here) and rendering
+/// (`ui::board::filter`), so the cards you can select always match the cards
+/// you see — including fuzzy subsequences and the `@INITIALS` avatar bubble.
+pub(crate) fn board_issue_matches_search(issue: &IssueSummary, search: &str) -> bool {
+    use crate::components::generic::tree::fuzzy_matches;
     let search = search.trim();
     if search.is_empty() {
         return true;
     }
-    let search = search.to_ascii_lowercase();
-    issue.key.to_ascii_lowercase().contains(&search)
-        || issue.summary.to_ascii_lowercase().contains(&search)
-        || issue.status.to_ascii_lowercase().contains(&search)
-        || issue.issue_type.to_ascii_lowercase().contains(&search)
-        || board_displayed_field_matches(issue, "epic_summary", &search)
-        || board_displayed_field_matches(issue, "labels", &search)
-        || board_displayed_field_matches(issue, "dueDate", &search)
-        || board_displayed_field_matches(issue, "priorityName", &search)
-        || board_assignee_matches(issue, &search)
+    fuzzy_matches(&issue.key, search)
+        || fuzzy_matches(&issue.summary, search)
+        || fuzzy_matches(&issue.status, search)
+        || fuzzy_matches(&issue.issue_type, search)
+        || board_displayed_field_matches(issue, "epic_summary", search)
+        || board_displayed_field_matches(issue, "labels", search)
+        || board_displayed_field_matches(issue, "dueDate", search)
+        || board_displayed_field_matches(issue, "priorityName", search)
+        || board_assignee_matches(issue, search)
 }
 
 fn board_assignee_matches(issue: &IssueSummary, search: &str) -> bool {
-    issue.field_values.get("assignee").is_some_and(|assignee| {
-        let assignee = assignee.to_ascii_lowercase();
-        let initials = crate::components::generic::avatar::initials(&assignee).to_ascii_lowercase();
-        assignee.contains(search) || initials.contains(search)
-    })
+    issue
+        .field_values
+        .get("assignee")
+        .is_some_and(|assignee| board_assignee_value_matches(assignee, search))
+}
+
+/// Whether an assignee matches the search the same way navigation/selection
+/// does — fuzzy over the display name, the bare initials, and the `@INITIALS`
+/// avatar bubble. Shared with rendering so the bubble highlights exactly when
+/// the card was selectable.
+pub(crate) fn board_assignee_value_matches(assignee: &str, search: &str) -> bool {
+    let initials = crate::components::generic::avatar::initials(assignee);
+    let bubble = format!("@{initials}");
+    board_value_matches(assignee, search)
+        || board_value_matches(&initials, search)
+        || board_value_matches(&bubble, search)
 }
 
 fn board_displayed_field_matches(issue: &IssueSummary, field: &str, search: &str) -> bool {
     issue
         .field_values
         .get(field)
-        .is_some_and(|value| value.to_ascii_lowercase().contains(search))
+        .is_some_and(|value| board_value_matches(value, search))
+}
+
+/// Whether `value` matches the (trimmed, non-empty) board search, using the
+/// canonical fuzzy algorithm. Single source of truth for "does this field
+/// match" shared by navigation/selection and highlight rendering.
+pub(crate) fn board_value_matches(value: &str, search: &str) -> bool {
+    let search = search.trim();
+    !search.is_empty() && crate::components::generic::tree::fuzzy_matches(value, search)
 }
 
 pub fn board_issue_column(data: &BoardData, issue: &IssueSummary) -> usize {

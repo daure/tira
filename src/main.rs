@@ -266,22 +266,28 @@ fn load_jira_project_data(
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(jira::JiraError(String::from("skipped"))),
+            populated_fields: None,
             issues: issues.issues,
             next_page_token: issues.next_page_token,
         };
     }
 
     let fields_credentials = credentials.clone();
+    let populated_credentials = credentials.clone();
     let projects_credentials = credentials.clone();
     let users_credentials = credentials.clone();
     let board_credentials = credentials.clone();
 
     let fields_handle = thread::spawn(move || jira::load_issue_fields(&fields_credentials));
+    let populated_handle =
+        thread::spawn(move || jira::load_populated_field_ids(&populated_credentials));
     let projects_handle = thread::spawn(move || jira::load_projects(&projects_credentials));
     let users_handle = thread::spawn(move || jira::load_assignable_users(&users_credentials));
     let board_handle = thread::spawn(move || jira::load_project_board(&board_credentials));
 
     let field_summaries = fields_handle.join().expect("jira fields thread panicked");
+    let (populated_fields, populated_log) =
+        populated_handle.join().expect("jira populated fields thread panicked");
     let projects = projects_handle
         .join()
         .expect("jira projects thread panicked");
@@ -289,7 +295,11 @@ fn load_jira_project_data(
     let issues = issues_handle.join().expect("jira issues thread panicked");
     let board = board_handle.join().expect("jira board thread panicked");
 
-    let mut logs = vec![field_summaries.log.clone(), projects.log.clone()];
+    let mut logs = vec![
+        field_summaries.log.clone(),
+        populated_log,
+        projects.log.clone(),
+    ];
     logs.extend(users.logs.clone());
     logs.extend(board.logs.clone());
     logs.extend(issues.logs.clone());
@@ -301,6 +311,7 @@ fn load_jira_project_data(
         projects: projects.projects,
         users: users.users,
         current_user: users.current_user,
+        populated_fields,
         issues: issues.issues,
         next_page_token: issues.next_page_token,
     }

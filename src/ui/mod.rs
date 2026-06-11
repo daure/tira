@@ -5,7 +5,7 @@ pub mod chrome;
 pub mod layout;
 mod logo;
 mod overlays;
-mod project_switcher;
+pub(crate) mod project_switcher;
 mod quick_switcher;
 pub(crate) mod scrollbar;
 pub(crate) mod selector;
@@ -69,8 +69,6 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBi
     match app.active_tab() {
         ApplicationTab::List => issue_list::render(frame, area, app, keybindings),
         ApplicationTab::Board => board::render(frame, area, app, keybindings),
-        ApplicationTab::Timeline | ApplicationTab::Filters => {
-            logo::render(frame, area, app.anim_elapsed(), app.theme())
-        }
+        ApplicationTab::Timeline => {}
     }
 }

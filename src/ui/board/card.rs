@@ -4,6 +4,7 @@ use ratatui::{
 };
 
 use crate::{
+    app::{board_assignee_value_matches, board_value_matches},
     components::{
         generic::{avatar, label, priority},
         jira::work_item_key,
@@ -42,19 +43,33 @@ pub(super) fn issue_card_lines(
         border_style,
     )));
 
-    for summary_line in wrapped_lines(&issue.summary, inner_width)
-        .into_iter()
-        .take(3)
-    {
-        lines.push(card_highlighted_content_line(
-            &summary_line,
-            search,
+    // Highlight the summary against the *whole* wrapped text, not each line in
+    // isolation: a fuzzy subsequence (e.g. "marlo") often spans several wrapped
+    // lines, so per-line matching would miss it entirely. Compute the match once
+    // over the rejoined lines, then map the indices back onto each rendered line.
+    let summary_lines = wrapped_lines(&issue.summary, inner_width);
+    let joined_summary = summary_lines.join(" ");
+    let summary_indices =
+        crate::components::generic::tree::fuzzy_indices(&joined_summary, search);
+    let mut line_offset = 0usize;
+    for summary_line in summary_lines.iter().take(3) {
+        let line_len = summary_line.chars().count();
+        let local_indices: Vec<usize> = summary_indices
+            .iter()
+            .filter(|&&i| i >= line_offset && i < line_offset + line_len)
+            .map(|&i| i - line_offset)
+            .collect();
+        lines.push(card_highlighted_line_with_indices(
+            summary_line,
+            &local_indices,
             inner_width,
             selected,
             border_style,
             content_style,
             theme,
         ));
+        // Advance past this line plus the single space that re-joined it.
+        line_offset += line_len + 1;
     }
 
     if let Some(epic) = issue.field_values.get("epic_summary") {
@@ -124,6 +139,29 @@ fn card_highlighted_content_line(
     theme: &Theme,
 ) -> Line<'static> {
     let mut spans = crate::ui::style::highlighted_spans_owned(theme, text, search, content_style);
+    apply_background(&mut spans, content_style);
+    card_content_spans(spans, inner_width, selected, border_style, content_style)
+}
+
+/// Like [`card_highlighted_content_line`] but with the matched character indices
+/// supplied directly, so a multi-line summary can be highlighted against the
+/// fuzzy match computed over the whole (rejoined) text.
+#[allow(clippy::too_many_arguments)]
+fn card_highlighted_line_with_indices(
+    text: &str,
+    indices: &[usize],
+    inner_width: usize,
+    selected: bool,
+    border_style: Style,
+    content_style: Style,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut spans = crate::ui::style::highlighted_spans_owned_from_indices(
+        theme,
+        text,
+        indices,
+        content_style,
+    );
     apply_background(&mut spans, content_style);
     card_content_spans(spans, inner_width, selected, border_style, content_style)
 }
@@ -211,15 +249,26 @@ fn card_bottom_border(
         true,
     );
     apply_background(&mut priority_spans, content_style);
+    // The priority is icon-only on cards, so highlight the glyph itself when the
+    // search matched the (otherwise invisible) priority name — otherwise the
+    // card looks like a phantom match.
+    if board_value_matches(priority_name, search) {
+        highlight_spans(&mut priority_spans, theme);
+    }
+
+    let work_icon_style = content_style.fg(theme.issue_type_fg(&issue.issue_type));
+    let mut work_icon_spans = vec![Span::styled(work_icon.to_owned(), work_icon_style)];
+    // The work-item type is also icon-only; highlight it when the search matched
+    // the type name (e.g. "bug", "story").
+    if board_value_matches(&issue.issue_type, search) {
+        highlight_spans(&mut work_icon_spans, theme);
+    }
 
     let mut spans = vec![
         Span::styled(left.to_owned(), border_style),
         Span::styled(work_key_left_pad, content_style),
-        Span::styled(
-            work_icon.to_owned(),
-            content_style.fg(theme.issue_type_fg(&issue.issue_type)),
-        ),
     ];
+    spans.extend(work_icon_spans);
     spans.push(Span::styled(" ", content_style));
     let mut key_spans = crate::ui::style::highlighted_spans_owned(
         theme,
@@ -251,21 +300,23 @@ fn highlighted_avatar_spans(
     content_style: Style,
 ) -> Vec<Span<'static>> {
     let mut spans = avatar::bubble_only_spans(theme, assignee);
-    let search = search.trim().to_ascii_lowercase();
-    if search.is_empty() {
-        return spans;
-    }
-    let initials = avatar::initials(assignee).to_ascii_lowercase();
-    let bubble = format!("@{initials}");
-    let assignee = assignee.to_ascii_lowercase();
-    if assignee.contains(&search) || initials.contains(&search) || bubble.contains(&search) {
-        for span in &mut spans {
-            span.style = span.style.fg(theme.highlight_fg()).bg(theme.highlight_bg());
-        }
+    // Use the canonical board matcher (fuzzy over the name, the bare initials,
+    // and the "@INITIALS" bubble) so any assignee match the search found is
+    // shown on the bubble, not just substring matches.
+    if board_assignee_value_matches(assignee, search) {
+        highlight_spans(&mut spans, theme);
     } else {
         apply_background(&mut spans, content_style);
     }
     spans
+}
+
+/// Paint the search-highlight foreground/background over every span (used for
+/// icon-only fields where the matched text isn't rendered as characters).
+fn highlight_spans(spans: &mut [Span<'static>], theme: &Theme) {
+    for span in spans {
+        span.style = span.style.fg(theme.highlight_fg()).bg(theme.highlight_bg());
+    }
 }
 
 fn card_border_style(selected: bool, theme: &Theme) -> Style {

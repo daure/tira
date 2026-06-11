@@ -28,7 +28,7 @@ use ratatui::layout::Rect;
 /// The tab titles in display order, derived from [`ApplicationTab`] so the enum
 /// is the single source of truth. Passed to the generic, string/index-based
 /// `TabsState`.
-pub fn app_tabs() -> [&'static str; 4] {
+pub fn app_tabs() -> [&'static str; 3] {
     ApplicationTab::all().map(|tab| tab.title())
 }
 const DEFAULT_TAB_INDEX: usize = 1;
@@ -51,7 +51,8 @@ pub use action::{Action, BoardAction};
 pub use tab::ApplicationTab;
 pub use board::{BoardGrouping, BoardState, board_issue_column};
 pub(crate) use board::{
-    board_empty_cell_key, board_group_key, board_grouped_lanes, normalize_board_user_fields,
+    board_assignee_value_matches, board_empty_cell_key, board_group_key, board_grouped_lanes,
+    board_issue_matches_search, board_value_matches, normalize_board_user_fields,
 };
 use command_log::CommandLogView;
 pub use dropdown::QuickAction;
@@ -372,7 +373,6 @@ impl App {
             || self.board.h_scroll.is_animating()
             || self.pending_search.is_some()
             || self.is_loading()
-            || matches!(self.active_tab(), ApplicationTab::Timeline | ApplicationTab::Filters)
     }
 
     pub fn take_effects(&mut self) -> Vec<AppEffect> {
@@ -703,7 +703,6 @@ impl App {
             Action::GoToBoard => self.select_tab(ApplicationTab::Board),
             Action::GoToList => self.select_tab(ApplicationTab::List),
             Action::GoToTimeline => self.select_tab(ApplicationTab::Timeline),
-            Action::GoToFilters => self.select_tab(ApplicationTab::Filters),
             Action::OpenHelp => self.open_dialog(DialogKind::Help),
             Action::CloseHelp => self.close_dialog(DialogKind::Help),
             Action::QuickSwitcher(action) => self.dispatch_quick_switcher(action),

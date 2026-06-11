@@ -105,7 +105,7 @@ pub enum QuickAction {
     Board,
     List,
     Timeline,
-    Filters,
+    Shortcuts,
 }
 
 impl crate::ui::selector::HasShortcut for QuickAction {
@@ -131,7 +131,7 @@ impl QuickAction {
             Self::Board => "Go to Board",
             Self::List => "Go to List",
             Self::Timeline => "Go to Timeline",
-            Self::Filters => "Go to Filters",
+            Self::Shortcuts => "Shortcuts",
         }
         .to_owned()
     }
@@ -220,7 +220,7 @@ impl App {
             QuickAction::Board,
             QuickAction::List,
             QuickAction::Timeline,
-            QuickAction::Filters,
+            QuickAction::Shortcuts,
         ];
         if self.active_tab() == ApplicationTab::List {
             actions.insert(3, QuickAction::ReloadList);
@@ -478,7 +478,7 @@ impl App {
             QuickAction::Board => self.select_tab(ApplicationTab::Board),
             QuickAction::List => self.select_tab(ApplicationTab::List),
             QuickAction::Timeline => self.select_tab(ApplicationTab::Timeline),
-            QuickAction::Filters => self.select_tab(ApplicationTab::Filters),
+            QuickAction::Shortcuts => self.open_dialog(DialogKind::Help),
         }
     }
 

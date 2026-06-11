@@ -392,7 +392,7 @@ fn help_dialog_renders_local_and_global_sections() {
 
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains("Global"));
-    assert!(screen.contains("Close help"));
+    assert!(screen.contains("Close shortcuts"));
     assert!(screen.contains("Leader key"));
 }
 
@@ -432,6 +432,7 @@ fn column_dropdown_separator_connects_to_border() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(tira::services::jira::JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -482,6 +483,7 @@ fn duplicate_field_labels_append_field_id_to_differentiate() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(tira::services::jira::JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -548,6 +550,7 @@ fn priority_and_assignee_fields_render_with_components() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(tira::services::jira::JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -843,6 +846,144 @@ fn board_card_footer_highlights_avatar_bubble_for_at_prefixed_search() {
 }
 
 #[test]
+fn board_card_highlights_summary_match_spanning_wrapped_lines() {
+    // A fuzzy subsequence frequently spans several wrapped summary lines. Here
+    // the only "a" is in the first word and the only "z" is in a word that wraps
+    // onto a later line, so "az" can ONLY match across lines. Per-line matching
+    // would highlight nothing; the fix matches over the whole wrapped summary.
+    let backend = TestBackend::new(40, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut issue = issue(
+        "KAN-1",
+        "Apple bbb ccc ddd eee fff ggg hhh iii jjj kkk lll Zoo",
+        "Task",
+        None,
+    );
+    issue.status = String::from("To Do");
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![issue]);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('/'), &bindings);
+    for c in "az".chars() {
+        app.handle_key(key(c), &bindings);
+    }
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    let highlight_bg = app.theme().highlight_bg();
+    let mut a_row = None;
+    let mut z_row = None;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let cell = &buffer[(x, y)];
+            if cell.bg != highlight_bg {
+                continue;
+            }
+            match cell.symbol() {
+                "A" => a_row = Some(y),
+                "Z" => z_row = Some(y),
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        a_row.is_some() && z_row.is_some(),
+        "both the 'A' (line 1) and 'Z' (a wrapped line) of the summary must be highlighted"
+    );
+    assert_ne!(
+        a_row, z_row,
+        "the highlighted match should genuinely span two different rendered lines"
+    );
+}
+
+#[test]
+fn board_card_highlights_priority_icon_when_search_matches_priority_name() {
+    // Priority is icon-only on cards, and the board search matches the priority
+    // name. A match there used to be invisible; now the icon glyph must light up
+    // so the card doesn't look like a phantom match.
+    let backend = TestBackend::new(80, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut issue = issue("KAN-1", "Card", "Task", None);
+    issue.status = String::from("To Do");
+    issue
+        .field_values
+        .insert(String::from("priorityName"), String::from("Medium"));
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![issue]);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('/'), &bindings);
+    // "medium" matches only the (otherwise invisible) priority name, not the
+    // summary "Card" or key "KAN-1".
+    for c in "medium".chars() {
+        app.handle_key(key(c), &bindings);
+    }
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let priority_icon = tira::components::generic::priority::icon("Medium");
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    let highlight_bg = app.theme().highlight_bg();
+    let mut icon_highlighted = false;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            if buffer[(x, y)].symbol() == priority_icon && buffer[(x, y)].bg == highlight_bg {
+                icon_highlighted = true;
+            }
+        }
+    }
+    assert!(
+        icon_highlighted,
+        "the priority icon should be highlighted when the search matched 'Medium'"
+    );
+}
+
+#[test]
+fn board_card_highlights_issue_type_icon_when_search_matches_type() {
+    // The work-item type is icon-only on cards; a match on the type name must
+    // light up the type glyph.
+    let backend = TestBackend::new(80, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut issue = issue("KAN-1", "Card", "Story", None);
+    issue.status = String::from("To Do");
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![issue]);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    app.handle_key(key('/'), &bindings);
+    // "story" matches only the issue type, not the summary "Card" or key.
+    for c in "story".chars() {
+        app.handle_key(key(c), &bindings);
+    }
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let type_icon = work_item_key::icon("Story");
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    let highlight_bg = app.theme().highlight_bg();
+    let mut icon_highlighted = false;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            if buffer[(x, y)].symbol() == type_icon && buffer[(x, y)].bg == highlight_bg {
+                icon_highlighted = true;
+            }
+        }
+    }
+    assert!(
+        icon_highlighted,
+        "the issue-type icon should be highlighted when the search matched 'Story'"
+    );
+}
+
+#[test]
 fn board_grouping_by_assignee_shows_assignee_swimlanes() {
     let backend = TestBackend::new(100, 18);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -925,6 +1066,7 @@ fn board_cards_use_display_name_avatar_from_issue_search() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -988,6 +1130,7 @@ fn board_grouping_resolves_assignee_account_ids_from_users() {
                 display_name: String::from("Marlo Vlietstra"),
             }]),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -1292,6 +1435,7 @@ fn board_tab_shows_visible_fallback_when_board_load_fails() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });

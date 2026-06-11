@@ -89,24 +89,28 @@ pub fn render_single_select<T>(
                 let row_style = style::selected_row_style(theme, is_focused);
                 let label_style =
                     style::dropdown_option_label_style(theme, option.selected, is_focused);
+                let shortcut = option.value.shortcut(keybindings);
+                // The label spans fill the whole row, so room for the shortcut
+                // (plus a one-cell gap) must be carved out *before* building
+                // them — otherwise the shortcut is pushed past the right edge
+                // and clipped.
+                let label_row_width = match &shortcut {
+                    Some(shortcut) => (options_area.width as usize)
+                        .saturating_sub(shortcut.chars().count() + 1),
+                    None => options_area.width as usize,
+                };
                 let mut spans = style::single_select_dropdown_spans(
                     theme,
                     option.label.as_str(),
                     dropdown.filter(),
                     option.selected,
                     is_focused,
-                    options_area.width as usize,
+                    label_row_width,
                     label_style,
                 );
-                if let Some(shortcut) = option.value.shortcut(keybindings) {
-                    let total_width = options_area.width as usize;
-                    let label_width = option.label.chars().count() + 2;
-                    let shortcut_width = shortcut.chars().count();
-                    let gap = total_width.saturating_sub(label_width + shortcut_width);
-                    if gap > 0 {
-                        spans.push(Span::styled(" ".repeat(gap), row_style));
-                        spans.push(Span::styled(shortcut, row_style.fg(theme.muted_fg())));
-                    }
+                if let Some(shortcut) = shortcut {
+                    spans.push(Span::styled(" ", row_style));
+                    spans.push(Span::styled(shortcut, row_style.fg(theme.accent_fg())));
                 }
                 Some(ListItem::new(Line::from(spans)).style(row_style))
             }

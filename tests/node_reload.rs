@@ -44,6 +44,7 @@ fn loaded_app(issues: Vec<IssueSummary>) -> App {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -338,6 +339,7 @@ fn full_reload_restores_previously_expanded_nodes() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -478,6 +480,7 @@ fn full_reload_restores_nested_expanded_subtree_in_parallel() {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -570,6 +573,7 @@ fn full_reload_holds_subtree_dimmed_until_roots_land_when_children_arrive_first(
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });
@@ -655,6 +659,7 @@ fn deliver_full_reload(app: &mut App, issues: Vec<IssueSummary>) {
             projects: Ok(Vec::new()),
             users: Ok(Vec::new()),
             current_user: Err(JiraError(String::new())),
+            populated_fields: None,
             logs: Vec::new(),
         },
     });

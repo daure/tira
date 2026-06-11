@@ -1,39 +1,11 @@
-use crate::{
-    components::generic::{avatar, tree::fuzzy_matches},
-    services::jira::IssueSummary,
-};
+use crate::{app::board_issue_matches_search, services::jira::IssueSummary};
 
+/// Whether a board card matches the search query. Delegates to the canonical
+/// matcher in `app::board` so the cards rendered here always agree with the
+/// cards navigation can select (no divergence between what you see and what
+/// `j`/`k` can land on).
 pub(super) fn board_issue_matches_filter(issue: &IssueSummary, search: &str) -> bool {
-    let search = search.trim();
-    if search.is_empty() {
-        return true;
-    }
-    fuzzy_matches(&issue.key, search)
-        || fuzzy_matches(&issue.summary, search)
-        || fuzzy_matches(&issue.status, search)
-        || fuzzy_matches(&issue.issue_type, search)
-        || displayed_field_matches(issue, "epic_summary", search)
-        || displayed_field_matches(issue, "labels", search)
-        || displayed_field_matches(issue, "dueDate", search)
-        || displayed_field_matches(issue, "priorityName", search)
-        || assignee_matches(issue, search)
-}
-
-fn displayed_field_matches(issue: &IssueSummary, field: &str, search: &str) -> bool {
-    issue
-        .field_values
-        .get(field)
-        .is_some_and(|value| fuzzy_matches(value, search))
-}
-
-fn assignee_matches(issue: &IssueSummary, search: &str) -> bool {
-    issue.field_values.get("assignee").is_some_and(|assignee| {
-        let initials = avatar::initials(assignee);
-        let bubble = format!("@{initials}");
-        fuzzy_matches(assignee, search)
-            || fuzzy_matches(&initials, search)
-            || fuzzy_matches(&bubble, search)
-    })
+    board_issue_matches_search(issue, search)
 }
 
 #[cfg(test)]

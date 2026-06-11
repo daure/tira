@@ -38,17 +38,30 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
     let group_width = (app.board_grouping().label().len() as u16 + 9).max(16);
     let details_text = details_trigger_text(app);
     let details_width = details_text.chars().count() as u16 + 2;
-    let [filter_area, details_area, group_area] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(details_width),
-            Constraint::Length(group_width),
-        ])
-        .areas(top_area);
-    render_filter(frame, filter_area, app, keybindings);
-    render_details_trigger(frame, details_area, app, &details_text);
-    render_group_trigger(frame, group_area, app);
+    if crate::ui::layout::toolbar_is_collapsed(top_area.width) {
+        let hint_width = keybindings.shortcuts_hint_width();
+        let [filter_area, hint_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(hint_width)])
+            .areas(top_area);
+        render_filter(frame, filter_area, app, keybindings);
+        frame.render_widget(
+            crate::ui::chrome::shortcuts_hint(keybindings, theme),
+            hint_area,
+        );
+    } else {
+        let [filter_area, details_area, group_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(details_width),
+                Constraint::Length(group_width),
+            ])
+            .areas(top_area);
+        render_filter(frame, filter_area, app, keybindings);
+        render_details_trigger(frame, details_area, app, &details_text);
+        render_group_trigger(frame, group_area, app);
+    }
 
     let [main_content_area, _, scrollbar_area] = Layout::default()
         .direction(Direction::Horizontal)

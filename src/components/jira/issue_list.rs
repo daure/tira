@@ -518,10 +518,10 @@ fn render_empty_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .style(Style::default().fg(app.theme().muted_fg()));
     frame.render_widget(empty, area);
 }
-fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let Some(dropdown) = app.column_dropdown() else {
-        return;
-    };
+pub(crate) fn column_dropdown_rect(
+    area: Rect,
+    dropdown: &MultiSelectDropdownState<JiraIssueColumn>,
+) -> Rect {
     let longest_option = dropdown
         .options()
         .iter()
@@ -530,16 +530,17 @@ fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .unwrap_or(0) as u16;
     let width = area.width.min((longest_option + 6).max(20));
     let height = area.height.min(16);
-    if width < 20 || height < 5 {
+    crate::ui::project_switcher::centered_rect(area, width, height)
+}
+
+fn render_column_dropdown(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(dropdown) = app.column_dropdown() else {
+        return;
+    };
+    let dropdown_area = column_dropdown_rect(area, dropdown);
+    if dropdown_area.width < 20 || dropdown_area.height < 5 {
         return;
     }
-
-    let dropdown_area = Rect {
-        x: area.x + area.width.saturating_sub(width + 1),
-        y: area.y + 1,
-        width,
-        height,
-    };
     let block = dropdown_block("Columns", app.theme());
     let inner = block.inner(dropdown_area);
 
@@ -624,11 +625,11 @@ fn render_dropdown_options(
             let label_style =
                 style::dropdown_option_label_style(app.theme(), option.selected, is_focused);
             let icon = if option.selected {
-                if prefers_plain_icons() { "[x]" } else { "" }
+                if prefers_plain_icons() { "[x]" } else { "\u{f046}" }
             } else if prefers_plain_icons() {
                 "[ ]"
             } else {
-                ""
+                "\u{f096}"
             };
             let icon_style = if dropdown.is_option_toggle_enabled(index) {
                 Style::default().fg(app.theme().accent_fg())
@@ -713,7 +714,12 @@ fn render_dropdown_separators(
     }
 }
 fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
-    let trigger_width = 9u16.saturating_add(keybindings.open_columns_label().len() as u16);
+    let collapsed = layout::toolbar_is_collapsed(area.width);
+    let trigger_width = if collapsed {
+        keybindings.shortcuts_hint_width()
+    } else {
+        keybindings.column_trigger_width()
+    };
     let [filter_area, trigger_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(1), Constraint::Length(trigger_width)])
@@ -731,7 +737,14 @@ fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &Key
         filter::render_text(app.filter_state(), app.theme()),
         text_area,
     );
-    frame.render_widget(column_trigger(app.theme()), trigger_area);
+    if collapsed {
+        frame.render_widget(
+            crate::ui::chrome::shortcuts_hint(keybindings, app.theme()),
+            trigger_area,
+        );
+    } else {
+        frame.render_widget(column_trigger(app.theme()), trigger_area);
+    }
 
     if app.is_filter_focused() {
         let cursor_x = text_area.x + app.filter_cursor() as u16;

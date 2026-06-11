@@ -57,7 +57,6 @@ pub struct KeyBindings {
     leader_board: KeySpec,
     leader_list: KeySpec,
     leader_timeline: KeySpec,
-    leader_filters: KeySpec,
     quick_switcher: KeySpec,
     open_help: KeySpec,
     dropdown: DropdownKeyBindings,
@@ -269,7 +268,6 @@ impl Default for KeyBindings {
             leader_board: KeySpec::plain('b'),
             leader_list: KeySpec::plain('l'),
             leader_timeline: KeySpec::plain('t'),
-            leader_filters: KeySpec::plain('f'),
             quick_switcher: KeySpec::code_with_modifiers(KeyCode::Char('k'), KeyModifiers::CONTROL),
             open_help: KeySpec::plain('?'),
             dropdown: DropdownKeyBindings::default(),
@@ -343,7 +341,6 @@ impl KeyBindings {
         set_key(&value, "leader", "board", &mut bindings.leader_board);
         set_key(&value, "leader", "list", &mut bindings.leader_list);
         set_key(&value, "leader", "timeline", &mut bindings.leader_timeline);
-        set_key(&value, "leader", "filters", &mut bindings.leader_filters);
         set_key(
             &value,
             "global",
@@ -529,8 +526,6 @@ impl KeyBindings {
             Action::GoToList
         } else if self.leader_timeline.matches(key) {
             Action::GoToTimeline
-        } else if self.leader_filters.matches(key) {
-            Action::GoToFilters
         } else {
             Action::None
         }
@@ -734,6 +729,20 @@ impl KeyBindings {
         self.open_help.label()
     }
 
+    /// Width (in cells) of the compact "{?} shortcuts" toolbar hint, including a
+    /// one-cell trailing gap so it never butts against the frame border.
+    pub fn shortcuts_hint_width(&self) -> u16 {
+        (self.open_help.label().chars().count() + " shortcuts".chars().count() + 1) as u16
+    }
+
+    /// Width (in cells) of the non-collapsed "columns" toolbar trigger,
+    /// reserving space for the rendered "olumns" text plus padding alongside the
+    /// keybinding label.
+    pub fn column_trigger_width(&self) -> u16 {
+        const TRIGGER_PADDING: u16 = 9;
+        TRIGGER_PADDING.saturating_add(self.open_columns_label().chars().count() as u16)
+    }
+
     pub fn quick_action_shortcut_label(&self, action: QuickAction) -> String {
         match action {
             QuickAction::CommandLog => self.leader_shortcut_label(&self.leader_command_log),
@@ -744,7 +753,7 @@ impl KeyBindings {
             QuickAction::Board => self.leader_shortcut_label(&self.leader_board),
             QuickAction::List => self.leader_shortcut_label(&self.leader_list),
             QuickAction::Timeline => self.leader_shortcut_label(&self.leader_timeline),
-            QuickAction::Filters => self.leader_shortcut_label(&self.leader_filters),
+            QuickAction::Shortcuts => self.open_help.label(),
         }
     }
 
@@ -1195,14 +1204,13 @@ impl KeyBindings {
             self.leader.label(),
             "Leader key",
             format!(
-                "Press leader, then {} log, {} project, {} theme, or {} / {} / {} / {} tabs.",
+                "Press leader, then {} log, {} project, {} theme, or {} / {} / {} tabs.",
                 self.leader_command_log.label(),
                 self.leader_project.label(),
                 self.leader_theme.label(),
                 self.leader_board.label(),
                 self.leader_list.label(),
-                self.leader_timeline.label(),
-                self.leader_filters.label()
+                self.leader_timeline.label()
             ),
         ));
         items.push(self.help_item(
@@ -1247,12 +1255,6 @@ impl KeyBindings {
         ));
         items.push(self.help_item(
             HelpScope::Global,
-            format!("{} {}", self.leader.label(), self.leader_filters.label()),
-            "Go to Filters",
-            "Jump to the Filters tab.",
-        ));
-        items.push(self.help_item(
-            HelpScope::Global,
             self.quick_switcher.label(),
             "Quick actions",
             "Open the centered quick actions menu.",
@@ -1260,8 +1262,8 @@ impl KeyBindings {
         items.push(self.help_item(
             HelpScope::Global,
             self.open_help.label(),
-            "Close help",
-            "Close the keyboard help dialog.",
+            "Close shortcuts",
+            "Close the shortcuts dialog.",
         ));
     }
 

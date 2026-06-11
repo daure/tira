@@ -134,5 +134,10 @@ pub struct JiraProjectLoadResult {
     pub projects: Result<Vec<ProjectSummary>, JiraError>,
     pub users: Result<Vec<UserSummary>, JiraError>,
     pub current_user: Result<UserSummary, JiraError>,
+    /// Field IDs that actually carry a value on a sample of the project's most
+    /// recently updated issues, used to hide instance-wide custom fields that
+    /// are never populated here. `None` when the sample could not be taken, in
+    /// which case every navigable field is offered.
+    pub populated_fields: Option<std::collections::BTreeSet<String>>,
     pub logs: Vec<CommandLogEntry>,
 }

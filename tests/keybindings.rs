@@ -41,7 +41,7 @@ fn tab_navigation_wraps_around() {
     assert_eq!(app.active_tab(), ApplicationTab::Board);
 
     app.dispatch(Action::Tabs(TabAction::Previous));
-    assert_eq!(app.active_tab(), ApplicationTab::Filters);
+    assert_eq!(app.active_tab(), ApplicationTab::Timeline);
 
     app.dispatch(Action::Tabs(TabAction::Next));
     assert_eq!(app.active_tab(), ApplicationTab::Board);
@@ -287,6 +287,116 @@ fn board_empty_columns_are_focusable_when_navigating() {
     app.dispatch(Action::Board(BoardAction::MoveLeft));
     assert_eq!(app.selected_board_empty_cell(), Some(("Issues", 1)));
 }
+
+#[test]
+fn board_navigation_after_search_clears_selection_lands_on_a_card_not_a_column() {
+    // Regression: searching can leave the previously selected card filtered out
+    // (selection effectively lost) while the first column becomes empty. Blurring
+    // the filter and pressing `j` must select a real ticket, not the empty-column
+    // placeholder (which renders as the whole column being focused).
+    let bindings = KeyBindings::default();
+    let mut todo = support::issue("KAN-1", "alpha card", "Task", None);
+    todo.status = String::from("To Do");
+    let mut progress = support::issue("KAN-2", "bravo zzz card", "Task", None);
+    progress.status = String::from("In Progress");
+    let board = BoardData {
+        id: 9,
+        name: String::from("Kanban"),
+        columns: vec![
+            BoardColumnSummary {
+                name: String::from("To Do"),
+                statuses: vec![String::from("To Do")],
+                max: None,
+            },
+            BoardColumnSummary {
+                name: String::from("In Progress"),
+                statuses: vec![String::from("In Progress")],
+                max: None,
+            },
+        ],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1"), String::from("KAN-2")],
+        }],
+        issues: vec![todo, progress],
+        sprint: None,
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-1"));
+
+    // Search only matches the card in the second column, so column 0 empties and
+    // the selected KAN-1 is filtered out.
+    app.handle_key(key('/'), &bindings);
+    for c in "zzz".chars() {
+        app.handle_key(key(c), &bindings);
+    }
+    // Blur the filter (keeps the query).
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
+    assert!(!app.is_board_filter_focused());
+    assert_eq!(app.board_filter(), "zzz");
+
+    // Pressing `j` must land on the matching ticket, not focus the empty column.
+    app.handle_key(key('j'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-2"));
+    assert_eq!(app.selected_board_empty_cell(), None);
+}
+
+#[test]
+fn board_at_prefixed_assignee_search_is_navigable() {
+    // Regression: `@mv` (avatar-bubble search) is matched by the renderer, so the
+    // card shows, but navigation used a different (substring) matcher that didn't
+    // understand the `@` prefix. The two must agree — the rendered card has to be
+    // selectable, not replaced by an empty-column placeholder.
+    let bindings = KeyBindings::default();
+    let mut todo = support::issue("KAN-1", "alpha card", "Task", None);
+    todo.status = String::from("To Do");
+    let mut progress = support::issue("KAN-2", "bravo card", "Task", None);
+    progress.status = String::from("In Progress");
+    progress
+        .field_values
+        .insert(String::from("assignee"), String::from("Marlo Vlietstra"));
+    let board = BoardData {
+        id: 10,
+        name: String::from("Kanban"),
+        columns: vec![
+            BoardColumnSummary {
+                name: String::from("To Do"),
+                statuses: vec![String::from("To Do")],
+                max: None,
+            },
+            BoardColumnSummary {
+                name: String::from("In Progress"),
+                statuses: vec![String::from("In Progress")],
+                max: None,
+            },
+        ],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1"), String::from("KAN-2")],
+        }],
+        issues: vec![todo, progress],
+        sprint: None,
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    // The `@mv` bubble search matches only the assignee on KAN-2 (initials "MV").
+    app.handle_key(key('/'), &bindings);
+    for c in "@mv".chars() {
+        app.handle_key(key(c), &bindings);
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &bindings);
+    assert_eq!(app.board_filter(), "@mv");
+
+    // Navigation must be able to land on the rendered card, not an empty column.
+    app.handle_key(key('j'), &bindings);
+    assert_eq!(app.selected_board_issue_key(), Some("KAN-2"));
+    assert_eq!(app.selected_board_empty_cell(), None);
+}
+
 
 #[test]
 fn board_vertical_navigation_preserves_column_across_group_headers() {
@@ -686,7 +796,7 @@ fn leader_keys_are_mapped() {
     assert_eq!(bindings.leader_action_for(key('l')), Action::GoToList);
     assert_eq!(bindings.leader_action_for(key('b')), Action::GoToBoard);
     assert_eq!(bindings.leader_action_for(key('t')), Action::GoToTimeline);
-    assert_eq!(bindings.leader_action_for(key('f')), Action::GoToFilters);
+    assert_eq!(bindings.leader_action_for(key('f')), Action::None);
     assert_eq!(
         bindings.leader_action_for(key('s')),
         Action::ToggleThemeDropdown
@@ -709,10 +819,6 @@ fn leader_tab_keys_jump_to_named_tabs() {
     app.handle_key(ctrl('x'), &bindings);
     app.handle_key(key('t'), &bindings);
     assert_eq!(app.active_tab(), ApplicationTab::Timeline);
-
-    app.handle_key(ctrl('x'), &bindings);
-    app.handle_key(key('f'), &bindings);
-    assert_eq!(app.active_tab(), ApplicationTab::Filters);
 
     app.handle_key(ctrl('x'), &bindings);
     app.handle_key(key('l'), &bindings);
@@ -939,7 +1045,6 @@ fn help_items_use_configured_leader_bindings() {
         board = "b"
         list = "l"
         timeline = "t"
-        filters = "f"
         "##,
     );
 
@@ -952,7 +1057,6 @@ fn help_items_use_configured_leader_bindings() {
     assert!(items.iter().any(|item| item.binding == "⌃g b"));
     assert!(items.iter().any(|item| item.binding == "⌃g l"));
     assert!(items.iter().any(|item| item.binding == "⌃g t"));
-    assert!(items.iter().any(|item| item.binding == "⌃g f"));
 }
 
 #[test]

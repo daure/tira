@@ -1,6 +1,17 @@
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+/// Below this toolbar width (in cells), the board/list toolbar collapses its
+/// inline triggers into a single "? shortcuts" affordance so the filter keeps
+/// room to breathe on narrow terminals.
+pub const RESPONSIVE_TOOLBAR_WIDTH: u16 = 60;
+
+/// Whether a toolbar of this width should collapse its inline triggers down to
+/// the compact "? shortcuts" hint.
+pub fn toolbar_is_collapsed(width: u16) -> bool {
+    width < RESPONSIVE_TOOLBAR_WIDTH
+}
+
 /// Returns the sub-slice of a line covering display columns
 /// `[start, start + width)`, preserving span styles and adding no ellipsis.
 /// Used to trim a wider-than-viewport row to the horizontal scroll window.

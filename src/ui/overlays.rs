@@ -271,7 +271,7 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
     let content_width = binding_width + 2 + summary_width;
     let width = area.width.min((content_width + 5) as u16).max(48);
     let height = area.height.min(20).max(12);
-    let inner = Dialog::new("Keyboard help", width, height)
+    let inner = Dialog::new("Shortcuts", width, height)
         .border_style(Style::default().fg(app.theme().border_fg()))
         .y_offset(area.height.saturating_sub(height) / 2)
         .render(frame, area);

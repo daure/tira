@@ -4,7 +4,6 @@ pub enum ApplicationTab {
     Board,
     List,
     Timeline,
-    Filters,
 }
 
 impl ApplicationTab {
@@ -13,12 +12,11 @@ impl ApplicationTab {
             Self::Board => "Board",
             Self::List => "List",
             Self::Timeline => "Timeline",
-            Self::Filters => "Filters",
         }
     }
 
-    pub fn all() -> [ApplicationTab; 4] {
-        [Self::Board, Self::List, Self::Timeline, Self::Filters]
+    pub fn all() -> [ApplicationTab; 3] {
+        [Self::Board, Self::List, Self::Timeline]
     }
 
     pub fn index(self) -> usize {

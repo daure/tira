@@ -41,7 +41,6 @@ pub enum Action {
     GoToBoard,
     GoToList,
     GoToTimeline,
-    GoToFilters,
     OpenHelp,
     CloseHelp,
     Quit,

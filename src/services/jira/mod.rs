@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Url;
@@ -22,6 +22,7 @@ use query::{
     BATCH_PARENT_CHUNK, group_children_for_parents, issue_summary_from_search_issue, log_path,
     search_match_clause,
 };
+use greenhopper::format_field_value;
 
 impl crate::ui::selector::HasShortcut for ProjectSummary {
     fn shortcut(&self, _keybindings: &crate::KeyBindings) -> Option<String> {
@@ -378,6 +379,37 @@ pub fn load_issue_fields(credentials: &JiraCredentials) -> JiraFieldsResult {
             fields: Err(JiraError(format!("Jira fields request failed: {error}"))),
             log: transport_error_log(timestamp, method, path, duration_ms),
         },
+    }
+}
+
+/// Number of recently-updated issues sampled to discover which fields actually
+/// carry a value for the project, so the column picker can hide the (often
+/// dozens of) instance-wide custom fields that are never populated here.
+const FIELD_SAMPLE_SIZE: u32 = 50;
+
+/// Samples the most recently updated issues with every navigable field and
+/// returns the set of field IDs that actually carry a value. Returns `None`
+/// when the sample request fails so callers fall back to offering every field
+/// rather than hiding them all.
+pub fn load_populated_field_ids(
+    credentials: &JiraCredentials,
+) -> (Option<BTreeSet<String>>, CommandLogEntry) {
+    let project = credentials.default_project.trim();
+    let jql = format!("project = {project} ORDER BY updated DESC");
+    let (result, log) =
+        fetch_search::<SearchResponse>(credentials, &jql, "*navigable", None, FIELD_SAMPLE_SIZE);
+    match result {
+        Ok(payload) => {
+            let ids = payload
+                .issues
+                .into_iter()
+                .flat_map(|issue| issue.fields.extra.into_iter())
+                .filter(|(_, value)| format_field_value(value).is_some())
+                .map(|(id, _)| id)
+                .collect();
+            (Some(ids), log)
+        }
+        Err(_) => (None, log),
     }
 }
 

@@ -21,6 +21,108 @@ fn merge_board_issue_fields(board: &mut BoardData, list_issues: &[IssueSummary])
     }
 }
 
+/// Keep only fields that belong in the column picker's selectable tail: those
+/// neither pinned elsewhere nor (when a sample is available) empty across the
+/// project's recent issues.
+fn candidate_fields(
+    fields: Vec<FieldSummary>,
+    populated_fields: Option<&std::collections::BTreeSet<String>>,
+) -> Vec<FieldSummary> {
+    // Columns already shown elsewhere — `key`/`summary`/`priority` are
+    // always-on fixed columns, and assignee/status/labels/issuetype are
+    // pinned at the top of the picker — so their Jira fields must not be
+    // re-offered as duplicates.
+    const PINNED_IDS: [&str; 7] = [
+        "key",
+        "summary",
+        "priority",
+        "assignee",
+        "status",
+        "labels",
+        "issuetype",
+    ];
+
+    fields
+        .into_iter()
+        .filter(|field| !PINNED_IDS.contains(&field.id.as_str()))
+        .filter(|field| populated_fields.is_none_or(|ids| ids.contains(&field.id)))
+        .collect()
+}
+
+/// Count how often each display name appears so callers can disambiguate
+/// collisions with the field id. The pinned names are seeded so a custom
+/// "Status" still collides.
+fn name_disambiguation(candidates: &[FieldSummary]) -> std::collections::HashMap<String, usize> {
+    let mut name_counts = std::collections::HashMap::new();
+    for name in ["Assignee", "Status", "Labels", "Work type"] {
+        name_counts.insert(name.to_owned(), 1);
+    }
+    for field in candidates {
+        *name_counts.entry(field.name.clone()).or_insert(0) += 1;
+    }
+    name_counts
+}
+
+/// Order candidates (curated common fields first, then an alphabetical tail)
+/// and build their picker columns, disambiguating shared names with the id.
+fn ordered_columns(
+    candidates: Vec<FieldSummary>,
+    name_counts: &std::collections::HashMap<String, usize>,
+) -> Vec<JiraIssueColumn> {
+    // Common Jira fields surfaced (in this order) right after the pinned set,
+    // ahead of the long tail of custom fields. Matched by stable system field
+    // id first, then by display name for agile custom fields whose ids vary
+    // per instance (Sprint, Story Points, …).
+    const CURATED_IDS: [&str; 9] = [
+        "reporter",
+        "creator",
+        "created",
+        "updated",
+        "duedate",
+        "resolution",
+        "fixVersions",
+        "versions",
+        "components",
+    ];
+    const CURATED_NAMES: [&str; 4] =
+        ["Sprint", "Story Points", "Story point estimate", "Epic Link"];
+
+    // Rank curated common fields by their listed order; everything else has no
+    // rank and falls into the alphabetical tail.
+    let curated_rank = |field: &FieldSummary| -> Option<usize> {
+        CURATED_IDS
+            .iter()
+            .position(|id| *id == field.id)
+            .or_else(|| {
+                CURATED_NAMES
+                    .iter()
+                    .position(|name| *name == field.name)
+                    .map(|pos| CURATED_IDS.len() + pos)
+            })
+    };
+    let (mut curated, mut rest): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|field| curated_rank(field).is_some());
+    curated.sort_by_key(|field| curated_rank(field).unwrap_or(usize::MAX));
+    rest.sort_by_key(|field| field.name.to_lowercase());
+
+    curated
+        .into_iter()
+        .chain(rest)
+        .map(|field| {
+            let label = if name_counts.get(&field.name).copied().unwrap_or(0) > 1 {
+                format!("{} ({})", field.name, field.id)
+            } else {
+                field.name.clone()
+            };
+            JiraIssueColumn::Field {
+                id: field.id,
+                label,
+            }
+        })
+        .collect()
+}
+
 impl App {
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {
@@ -213,7 +315,7 @@ impl App {
         let list_only = matches!(purpose, JiraLoadPurpose::Reload);
 
         if !list_only {
-            self.apply_loaded_fields(result.fields);
+            self.apply_loaded_fields(result.fields, result.populated_fields);
             self.apply_loaded_projects(result.projects);
         }
 
@@ -261,9 +363,13 @@ impl App {
         }
     }
 
-    fn apply_loaded_fields(&mut self, fields: Result<Vec<FieldSummary>, JiraError>) {
+    fn apply_loaded_fields(
+        &mut self,
+        fields: Result<Vec<FieldSummary>, JiraError>,
+        populated_fields: Option<std::collections::BTreeSet<String>>,
+    ) {
         if let Ok(fields) = fields {
-            self.apply_available_columns(fields);
+            self.apply_available_columns(fields, populated_fields);
         } else {
             self.notifications.push(Notification::error(
                 "Jira fields not loaded",
@@ -396,7 +502,11 @@ impl App {
         }
     }
 
-    fn apply_available_columns(&mut self, fields: Vec<FieldSummary>) {
+    fn apply_available_columns(
+        &mut self,
+        fields: Vec<FieldSummary>,
+        populated_fields: Option<std::collections::BTreeSet<String>>,
+    ) {
         let mut columns = vec![
             JiraIssueColumn::Field {
                 id: String::from("assignee"),
@@ -406,35 +516,11 @@ impl App {
             JiraIssueColumn::labels_column(),
             JiraIssueColumn::IssueType,
         ];
-        let mut name_counts = std::collections::HashMap::new();
-        name_counts.insert(String::from("Assignee"), 1);
-        name_counts.insert(String::from("Status"), 1);
-        name_counts.insert(String::from("Labels"), 1);
-        name_counts.insert(String::from("Work type"), 1);
 
-        let mut candidate_fields = Vec::new();
-        for field in fields {
-            let is_known = matches!(
-                field.id.as_str(),
-                "key" | "summary" | "issuetype" | "status" | "priority" | "labels"
-            );
-            if !is_known {
-                *name_counts.entry(field.name.clone()).or_insert(0) += 1;
-                candidate_fields.push(field);
-            }
-        }
+        let candidates = candidate_fields(fields, populated_fields.as_ref());
+        let name_counts = name_disambiguation(&candidates);
+        columns.extend(ordered_columns(candidates, &name_counts));
 
-        columns.extend(candidate_fields.into_iter().map(|field| {
-            let label = if name_counts.get(&field.name).copied().unwrap_or(0) > 1 {
-                format!("{} ({})", field.name, field.id)
-            } else {
-                field.name
-            };
-            JiraIssueColumn::Field {
-                id: field.id,
-                label,
-            }
-        }));
         self.filtered_tree.set_available_columns(columns);
     }
 
