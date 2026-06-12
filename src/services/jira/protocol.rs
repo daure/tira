@@ -27,6 +27,44 @@ pub(super) struct AssignIssuePayload<'a> {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct TransitionsResponse {
+    pub(super) transitions: Vec<IssueTransition>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueTransition {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) to: IssueTransitionStatus,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueTransitionStatus {
+    pub(super) id: String,
+    pub(super) name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TransitionIssuePayload<'a> {
+    pub(super) transition: TransitionIssueId<'a>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TransitionIssueId<'a> {
+    pub(super) id: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RankIssuePayload<'a> {
+    pub(super) issues: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) rank_before_issue: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) rank_after_issue: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SearchResponse {
     pub(super) issues: Vec<SearchIssue>,

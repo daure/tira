@@ -10,7 +10,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     App, JiraIssueColumn, KeyBindings, TreeRow,
     components::generic::{
-        avatar, dropdown::{DropdownVisibleOption, MultiSelectDropdownState}, filter, filtered_tree::FilteredTreeViewMode,
+        avatar,
+        dropdown::{DropdownVisibleOption, MultiSelectDropdownState},
+        filter,
+        filtered_tree::FilteredTreeViewMode,
         label, priority,
     },
     ui::{layout, scrollbar, style, theme::prefers_plain_icons},
@@ -164,21 +167,29 @@ fn render_table(
             .unwrap_or(0);
 
         let header_style = Style::default()
-            .fg(app.theme().muted_fg())
+            .fg(app.theme().subtle_fg())
             .add_modifier(Modifier::BOLD);
 
         // The first column (Work) stays pinned at the left edge while the rest
         // scroll; `sticky_width` covers it plus the trailing column gap.
-        let sticky_width =
-            (layout.widths.first().copied().unwrap_or(0) + 1).min(content_width);
+        let sticky_width = (layout.widths.first().copied().unwrap_or(0) + 1).min(content_width);
 
         let header_cells = header_cell_spans(columns, layout.has_expandable);
         let header_sticky = header_cells.first().cloned().unwrap_or_default();
-        let mut lines = vec![compose_strip_line(header_cells, &layout.widths, header_style)];
-        let mut sticky_lines = vec![padded_cell(header_sticky, sticky_width as usize, header_style)];
+        let mut lines = vec![compose_strip_line(
+            header_cells,
+            &layout.widths,
+            header_style,
+        )];
+        let mut sticky_lines = vec![padded_cell(
+            header_sticky,
+            sticky_width as usize,
+            header_style,
+        )];
 
         for row_index in app.visible_issue_range(area.height.saturating_sub(1) as usize) {
             let row = &layout.rows[row_index];
+            let is_selected = row_index == app.selected_issue_index();
             let row_style = row_table_style(app, row, row_index);
             let cells = columns
                 .iter()
@@ -192,6 +203,7 @@ fn render_table(
                         description_width,
                         layout.has_expandable,
                         row_style,
+                        is_selected,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -259,7 +271,6 @@ fn render_table(
     None
 }
 
-
 fn render_filtered_tree_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let rows = app.visible_issue_rows();
     if rows.is_empty() {
@@ -270,9 +281,9 @@ fn render_filtered_tree_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let items = visible_range.clone().map(|row_index| {
         let row = &rows[row_index];
         let item = &app.issues()[row.item_index];
-        let row_style =
-            style::selected_row_style(app.theme(), row_index == app.selected_issue_index());
-        let mut spans = tree_control_spans(app.theme(), row, app.spinner_glyph());
+        let is_selected = row_index == app.selected_issue_index();
+        let row_style = style::selected_row_style(app.theme(), is_selected);
+        let mut spans = tree_control_spans(app.theme(), row, app.spinner_glyph(), is_selected);
         spans.push(Span::raw(" "));
         spans.extend(style::code_cell_spans(
             app.theme(),
@@ -392,11 +403,18 @@ fn compute_column_widths(
                 JiraIssueColumn::Status => status_width,
                 JiraIssueColumn::Field { id, .. } => {
                     layout::max_column_width(rows, column.header_label(), |row| {
-                        prefix
-                            + app.issues()[row.item_index]
-                                .field_values
-                                .get(id)
-                                .map_or(0, |value| field_display_width(id, value))
+                        let issue = &app.issues()[row.item_index];
+                        if id == "assignee" || id == "reporter" {
+                            let value =
+                                issue.field_values.get(id).map(String::as_str).unwrap_or("");
+                            prefix + field_display_width(id, value)
+                        } else {
+                            prefix
+                                + issue
+                                    .field_values
+                                    .get(id)
+                                    .map_or(0, |value| field_display_width(id, value))
+                        }
                     })
                 }
                 JiraIssueColumn::Summary => layout::max_column_width(rows, "Summary", |row| {
@@ -422,6 +440,7 @@ fn build_table_row<'a>(
     has_expandable: bool,
 ) -> Row<'a> {
     let row = &rows[row_index];
+    let is_selected = row_index == app.selected_issue_index();
     let row_style = row_table_style(app, row, row_index);
     let cells = columns
         .iter()
@@ -435,6 +454,7 @@ fn build_table_row<'a>(
                 description_width,
                 has_expandable,
                 row_style,
+                is_selected,
             )))
         })
         .collect::<Vec<_>>();
@@ -462,6 +482,7 @@ fn column_cell_spans<'a>(
     description_width: usize,
     has_expandable: bool,
     row_style: Style,
+    is_selected: bool,
 ) -> Vec<Span<'a>> {
     let item = &app.issues()[row.item_index];
     let spans = match column {
@@ -478,10 +499,16 @@ fn column_cell_spans<'a>(
         JiraIssueColumn::Status => {
             style::highlighted_spans(app.theme(), &item.status, app.highlight_term(), row_style)
         }
-        JiraIssueColumn::Field { id, .. } => item
-            .field_values
-            .get(id)
-            .map_or_else(Vec::new, |value| field_spans(app, id, value, row_style)),
+        JiraIssueColumn::Field { id, .. } => {
+            if id == "assignee" || id == "reporter" {
+                let value = item.field_values.get(id).map(String::as_str).unwrap_or("");
+                field_spans(app, id, value, row_style)
+            } else {
+                item.field_values
+                    .get(id)
+                    .map_or_else(Vec::new, |value| field_spans(app, id, value, row_style))
+            }
+        }
     };
     with_tree_prefix(
         app.theme(),
@@ -489,6 +516,7 @@ fn column_cell_spans<'a>(
         row,
         column_index == 0 && has_expandable,
         app.spinner_glyph(),
+        is_selected,
     )
 }
 
@@ -507,7 +535,7 @@ fn build_header(app: &App, columns: &[JiraIssueColumn], has_expandable: bool) ->
         .collect::<Vec<_>>();
     Row::new(cells).style(
         Style::default()
-            .fg(app.theme().muted_fg())
+            .fg(app.theme().subtle_fg())
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -625,7 +653,11 @@ fn render_dropdown_options(
             let label_style =
                 style::dropdown_option_label_style(app.theme(), option.selected, is_focused);
             let icon = if option.selected {
-                if prefers_plain_icons() { "[x]" } else { "\u{f046}" }
+                if prefers_plain_icons() {
+                    "[x]"
+                } else {
+                    "\u{f046}"
+                }
             } else if prefers_plain_icons() {
                 "[ ]"
             } else {
@@ -743,7 +775,7 @@ fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &Key
             trigger_area,
         );
     } else {
-        frame.render_widget(column_trigger(app.theme()), trigger_area);
+        frame.render_widget(column_trigger(app.theme(), keybindings), trigger_area);
     }
 
     if app.is_filter_focused() {
@@ -752,10 +784,16 @@ fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &Key
     }
 }
 
-fn column_trigger(theme: &crate::ui::theme::Theme) -> Paragraph<'static> {
+fn column_trigger(
+    theme: &crate::ui::theme::Theme,
+    keybindings: &KeyBindings,
+) -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
-        Span::styled("c", Style::default().fg(theme.accent_fg())),
-        Span::styled("olumns", Style::default().fg(theme.muted_fg())),
+        Span::styled(
+            keybindings.open_columns_label(),
+            Style::default().fg(theme.accent_fg()),
+        ),
+        Span::styled(" columns", Style::default().fg(theme.muted_fg())),
     ]))
     .alignment(Alignment::Right)
 }
@@ -784,12 +822,13 @@ fn with_tree_prefix<'a>(
     row: &TreeRow,
     include_prefix: bool,
     spinner: &str,
+    is_selected: bool,
 ) -> Vec<Span<'a>> {
     if !include_prefix {
         return spans;
     }
 
-    let mut prefixed = tree_control_spans(theme, row, spinner)
+    let mut prefixed = tree_control_spans(theme, row, spinner, is_selected)
         .into_iter()
         .map(|span| Span::styled(span.content.into_owned(), span.style))
         .collect::<Vec<_>>();
@@ -802,14 +841,20 @@ fn tree_control_spans(
     theme: &crate::ui::theme::Theme,
     row: &TreeRow,
     spinner: &str,
+    is_selected: bool,
 ) -> Vec<Span<'static>> {
     let indent = "  ".repeat(row.depth);
+    let indicator_style = if is_selected {
+        style::selected_row_style(theme, true)
+    } else {
+        Style::default().fg(theme.border_fg())
+    };
     let indicator = if row.loading {
         // The spinner glyph is owned by the App and advances each tick; clone
         // it into the span so the returned spans stay 'static.
         return vec![
             Span::raw(indent),
-            Span::styled(spinner.to_owned(), Style::default().fg(theme.border_fg())),
+            Span::styled(spinner.to_owned(), indicator_style),
         ];
     } else if row.expandable {
         if row.expanded {
@@ -820,10 +865,7 @@ fn tree_control_spans(
     } else {
         " "
     };
-    vec![
-        Span::raw(indent),
-        Span::styled(indicator, Style::default().fg(theme.border_fg())),
-    ]
+    vec![Span::raw(indent), Span::styled(indicator, indicator_style)]
 }
 
 fn collapsed_icon() -> &'static str {

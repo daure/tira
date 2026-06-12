@@ -10,11 +10,7 @@ use crate::{
         jira::work_item_key,
     },
     services::jira::IssueSummary,
-    ui::{
-        layout::truncate_spans_with_ellipsis,
-        layout::truncate_with_ellipsis,
-        theme::Theme,
-    },
+    ui::{layout::truncate_spans_with_ellipsis, layout::truncate_with_ellipsis, theme::Theme},
 };
 
 use super::text::{apply_background, bordered_line, display_width, wrapped_lines};
@@ -22,6 +18,7 @@ use super::text::{apply_background, bordered_line, display_width, wrapped_lines}
 pub(super) fn issue_card_lines(
     issue: &IssueSummary,
     selected: bool,
+    moving: bool,
     theme: &Theme,
     width: u16,
     search: &str,
@@ -34,8 +31,8 @@ pub(super) fn issue_card_lines(
         ))];
     }
 
-    let border_style = card_border_style(selected, theme);
-    let content_style = card_content_style(selected, theme);
+    let border_style = card_border_style(selected, moving, theme);
+    let content_style = card_content_style(selected, moving, theme);
     let inner_width = width.saturating_sub(2);
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
@@ -49,8 +46,7 @@ pub(super) fn issue_card_lines(
     // over the rejoined lines, then map the indices back onto each rendered line.
     let summary_lines = wrapped_lines(&issue.summary, inner_width);
     let joined_summary = summary_lines.join(" ");
-    let summary_indices =
-        crate::components::generic::tree::fuzzy_indices(&joined_summary, search);
+    let summary_indices = crate::components::generic::tree::fuzzy_indices(&joined_summary, search);
     let mut line_offset = 0usize;
     for summary_line in summary_lines.iter().take(3) {
         let line_len = summary_line.chars().count();
@@ -125,7 +121,9 @@ pub(super) fn issue_card_lines(
         ));
     }
 
-    lines.push(card_bottom_border(issue, width, selected, theme, search));
+    lines.push(card_bottom_border(
+        issue, width, selected, moving, theme, search,
+    ));
     lines
 }
 
@@ -156,12 +154,8 @@ fn card_highlighted_line_with_indices(
     content_style: Style,
     theme: &Theme,
 ) -> Line<'static> {
-    let mut spans = crate::ui::style::highlighted_spans_owned_from_indices(
-        theme,
-        text,
-        indices,
-        content_style,
-    );
+    let mut spans =
+        crate::ui::style::highlighted_spans_owned_from_indices(theme, text, indices, content_style);
     apply_background(&mut spans, content_style);
     card_content_spans(spans, inner_width, selected, border_style, content_style)
 }
@@ -200,6 +194,7 @@ fn card_bottom_border(
     issue: &IssueSummary,
     width: usize,
     selected: bool,
+    moving: bool,
     theme: &Theme,
     search: &str,
 ) -> Line<'static> {
@@ -208,14 +203,16 @@ fn card_bottom_border(
     } else {
         ("└", "─", "┘")
     };
-    let border_style = card_border_style(selected, theme);
-    let content_style = card_content_style(selected, theme);
+    let border_style = card_border_style(selected, moving, theme);
+    let content_style = card_content_style(selected, moving, theme);
     let priority_name = issue
         .field_values
         .get("priorityName")
         .map(String::as_str)
         .unwrap_or("");
-    let assignee = issue.field_values.get("assignee").map(String::as_str);
+    let assignee_opt = issue.field_values.get("assignee").map(String::as_str);
+    let assignee = assignee_opt.unwrap_or("");
+    let has_assignee = assignee_opt.is_some();
     let work_icon = work_item_key::icon(&issue.issue_type);
     let work_key_left_pad = " ";
     let key_segment = format!(" {}", issue.key);
@@ -223,12 +220,8 @@ fn card_bottom_border(
     let priority_left_pad = " ";
     let priority_right_pad = " ";
     let assignee_right_pad = " ";
-    let avatar_width = assignee.map_or(0, avatar::bubble_width);
-    let assignee_segment_width = if assignee.is_some() {
-        avatar_width + display_width(assignee_right_pad)
-    } else {
-        0
-    };
+    let avatar_width = avatar::bubble_width(assignee);
+    let assignee_segment_width = avatar_width + display_width(assignee_right_pad);
     let priority_width = display_width(priority::icon(priority_name));
     let fixed_width = display_width(left)
         + display_width(work_key_left_pad)
@@ -283,12 +276,11 @@ fn card_bottom_border(
     spans.push(Span::styled(priority_left_pad, content_style));
     spans.extend(priority_spans);
     spans.push(Span::styled(priority_right_pad, content_style));
-    if let Some(assignee) = assignee {
-        let mut avatar_spans = highlighted_avatar_spans(theme, assignee, search, content_style);
-        apply_background(&mut avatar_spans, content_style);
-        spans.extend(avatar_spans);
-        spans.push(Span::styled(assignee_right_pad, content_style));
-    }
+    let mut avatar_spans =
+        highlighted_avatar_spans(theme, assignee, has_assignee, search, content_style);
+    apply_background(&mut avatar_spans, content_style);
+    spans.extend(avatar_spans);
+    spans.push(Span::styled(assignee_right_pad, content_style));
     spans.push(Span::styled(right.to_owned(), border_style));
     Line::from(spans)
 }
@@ -296,6 +288,7 @@ fn card_bottom_border(
 fn highlighted_avatar_spans(
     theme: &Theme,
     assignee: &str,
+    has_assignee: bool,
     search: &str,
     content_style: Style,
 ) -> Vec<Span<'static>> {
@@ -303,7 +296,7 @@ fn highlighted_avatar_spans(
     // Use the canonical board matcher (fuzzy over the name, the bare initials,
     // and the "@INITIALS" bubble) so any assignee match the search found is
     // shown on the bubble, not just substring matches.
-    if board_assignee_value_matches(assignee, search) {
+    if has_assignee && board_assignee_value_matches(assignee, search) {
         highlight_spans(&mut spans, theme);
     } else {
         apply_background(&mut spans, content_style);
@@ -319,26 +312,34 @@ fn highlight_spans(spans: &mut [Span<'static>], theme: &Theme) {
     }
 }
 
-fn card_border_style(selected: bool, theme: &Theme) -> Style {
-    let style = Style::default().fg(if selected {
+fn card_border_style(selected: bool, moving: bool, theme: &Theme) -> Style {
+    let style = Style::default().fg(if moving {
+        theme.warning_fg()
+    } else if selected {
         theme.accent_fg()
     } else {
         theme.border_fg()
     });
-    if selected {
+    if moving {
+        style.bg(theme.selected_bg()).add_modifier(Modifier::BOLD)
+    } else if selected {
         style.bg(theme.selected_bg())
     } else {
         style
     }
 }
 
-fn card_content_style(selected: bool, theme: &Theme) -> Style {
-    let style = Style::default().fg(if selected {
+fn card_content_style(selected: bool, moving: bool, theme: &Theme) -> Style {
+    let style = Style::default().fg(if moving {
+        theme.warning_fg()
+    } else if selected {
         theme.selected_fg()
     } else {
         theme.selected_alt_fg()
     });
-    if selected {
+    if moving {
+        style.bg(theme.selected_bg()).add_modifier(Modifier::BOLD)
+    } else if selected {
         style.bg(theme.selected_bg())
     } else {
         style

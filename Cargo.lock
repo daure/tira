@@ -2355,6 +2355,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "signal-hook",
  "toml",
  "unicode-width",
  "url",

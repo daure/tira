@@ -1,4 +1,4 @@
-use super::BoardAction;
+use super::{BoardAction, BoardTicketDirection};
 use crate::services::jira::{
     BoardColumnSummary, BoardData, BoardSwimlaneSummary, IssueSummary, UserSummary,
 };
@@ -156,6 +156,22 @@ struct BoardCell {
     is_group: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BoardTicketMove {
+    Reordered {
+        issue_key: String,
+        rank_before: Option<String>,
+        rank_after: Option<String>,
+    },
+    StatusChanged {
+        issue_key: String,
+        status: String,
+        status_id: Option<String>,
+        previous_status: String,
+        previous_status_id: Option<String>,
+    },
+}
+
 impl BoardState {
     pub(crate) fn empty() -> Self {
         Self {
@@ -270,6 +286,109 @@ impl BoardState {
         }
     }
 
+    pub(crate) fn update_status(
+        &mut self,
+        issue_key: &str,
+        status: String,
+        status_id: Option<String>,
+    ) {
+        let Some(data) = &mut self.data else {
+            return;
+        };
+        let Some(issue) = data.issues.iter_mut().find(|issue| issue.key == issue_key) else {
+            return;
+        };
+        issue.status = status;
+        match status_id {
+            Some(id) => {
+                issue.field_values.insert(String::from("status_id"), id);
+            }
+            None => {
+                issue.field_values.remove("status_id");
+            }
+        }
+    }
+
+    pub(crate) fn move_selected_ticket(
+        &mut self,
+        direction: BoardTicketDirection,
+        search: &str,
+        grouping: BoardGrouping,
+    ) -> Option<BoardTicketMove> {
+        let data = self.data.as_mut()?;
+        let issue_key = self
+            .selected_issue_key
+            .as_deref()
+            .filter(|key| !is_board_group_key(key) && !is_board_empty_key(key))?
+            .to_owned();
+        let issue_index = data
+            .issues
+            .iter()
+            .position(|issue| issue.key == issue_key)?;
+        let current_column = board_issue_column(data, &data.issues[issue_index]);
+
+        match direction {
+            BoardTicketDirection::Left | BoardTicketDirection::Right => {
+                let target_column = match direction {
+                    BoardTicketDirection::Left => current_column.checked_sub(1)?,
+                    BoardTicketDirection::Right => current_column + 1,
+                    _ => unreachable!(),
+                };
+                let column = data.columns.get(target_column)?.clone();
+                let status = column.name;
+                let status_id = column
+                    .statuses
+                    .first()
+                    .filter(|candidate| *candidate != &status)
+                    .cloned();
+                let previous_status = data.issues[issue_index].status.clone();
+                let previous_status_id = data.issues[issue_index]
+                    .field_values
+                    .get("status_id")
+                    .cloned();
+                data.issues[issue_index].status = status.clone();
+                if let Some(status_id) = &status_id {
+                    data.issues[issue_index]
+                        .field_values
+                        .insert(String::from("status_id"), status_id.to_owned());
+                } else {
+                    data.issues[issue_index].field_values.remove("status_id");
+                }
+                move_issue_to_last_in_column(data, &issue_key, target_column);
+                self.preferred_column = target_column;
+                Some(BoardTicketMove::StatusChanged {
+                    issue_key,
+                    status,
+                    status_id,
+                    previous_status,
+                    previous_status_id,
+                })
+            }
+            BoardTicketDirection::Up | BoardTicketDirection::Down => {
+                let lanes = board_grouped_lanes(data, grouping);
+                let cells =
+                    board_cells_for_lanes(data, &lanes, search, &self.collapsed_groups, grouping);
+                let selected = cells.iter().find(|cell| cell.key == issue_key)?;
+                let keys =
+                    board_lane_column_keys(data, &lanes[selected.lane], selected.column, search);
+                let pos = keys.iter().position(|key| key == &issue_key)?;
+                let swap_key = match direction {
+                    BoardTicketDirection::Up => keys.get(pos.checked_sub(1)?)?,
+                    BoardTicketDirection::Down => keys.get(pos + 1)?,
+                    _ => unreachable!(),
+                }
+                .clone();
+                reorder_issue_keys(data, &issue_key, &swap_key);
+                Some(BoardTicketMove::Reordered {
+                    issue_key,
+                    rank_before: matches!(direction, BoardTicketDirection::Up)
+                        .then_some(swap_key.clone()),
+                    rank_after: matches!(direction, BoardTicketDirection::Down).then_some(swap_key),
+                })
+            }
+        }
+    }
+
     pub fn selected_issue_index(&self, search: &str, grouping: BoardGrouping) -> usize {
         let Some(data) = &self.data else {
             return 0;
@@ -309,6 +428,13 @@ impl BoardState {
     }
 
     pub(crate) fn dispatch(&mut self, action: BoardAction, search: &str, grouping: BoardGrouping) {
+        if matches!(
+            action,
+            BoardAction::CollapseAllGroups | BoardAction::ExpandAllGroups
+        ) && !grouping.is_grouped()
+        {
+            return;
+        }
         // Keyboard navigation re-enables selection-following for both axes.
         self.manual_v_scroll.set(false);
         self.manual_h_scroll.set(false);
@@ -456,6 +582,80 @@ impl BoardState {
             self.selected_issue_key = Some(next);
         }
     }
+}
+
+fn reorder_issue_keys(data: &mut BoardData, issue_key: &str, swap_key: &str) {
+    if let (Some(a), Some(b)) = (
+        data.issues.iter().position(|issue| issue.key == issue_key),
+        data.issues.iter().position(|issue| issue.key == swap_key),
+    ) {
+        data.issues.swap(a, b);
+    }
+    for lane in &mut data.swimlanes {
+        if let (Some(a), Some(b)) = (
+            lane.issue_keys.iter().position(|key| key == issue_key),
+            lane.issue_keys.iter().position(|key| key == swap_key),
+        ) {
+            lane.issue_keys.swap(a, b);
+        }
+    }
+}
+
+fn move_issue_to_last_in_column(data: &mut BoardData, issue_key: &str, column: usize) {
+    let columns = data.columns.clone();
+    move_issue_to_last_matching(&mut data.issues, issue_key, |issue| {
+        board_issue_column_for_columns(&columns, issue) == column
+    });
+
+    let issue_columns = data
+        .issues
+        .iter()
+        .map(|issue| {
+            (
+                issue.key.clone(),
+                board_issue_column_for_columns(&columns, issue),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for lane in &mut data.swimlanes {
+        move_key_to_last_matching(&mut lane.issue_keys, issue_key, |key| {
+            issue_columns.get(key).copied() == Some(column)
+        });
+    }
+}
+
+fn move_issue_to_last_matching(
+    issues: &mut Vec<IssueSummary>,
+    issue_key: &str,
+    matches: impl Fn(&IssueSummary) -> bool,
+) {
+    let Some(from) = issues.iter().position(|issue| issue.key == issue_key) else {
+        return;
+    };
+    let issue = issues.remove(from);
+    let insert_at = issues
+        .iter()
+        .rposition(matches)
+        .map(|index| index + 1)
+        .unwrap_or(issues.len());
+    issues.insert(insert_at, issue);
+}
+
+fn move_key_to_last_matching(
+    keys: &mut Vec<String>,
+    issue_key: &str,
+    matches: impl Fn(&String) -> bool,
+) {
+    let Some(from) = keys.iter().position(|key| key == issue_key) else {
+        return;
+    };
+    let key = keys.remove(from);
+    let insert_at = keys
+        .iter()
+        .rposition(matches)
+        .map(|index| index + 1)
+        .unwrap_or(keys.len());
+    keys.insert(insert_at, key);
 }
 
 fn board_cells_for_lanes(
@@ -846,8 +1046,12 @@ pub(crate) fn board_value_matches(value: &str, search: &str) -> bool {
 }
 
 pub fn board_issue_column(data: &BoardData, issue: &IssueSummary) -> usize {
+    board_issue_column_for_columns(&data.columns, issue)
+}
+
+fn board_issue_column_for_columns(columns: &[BoardColumnSummary], issue: &IssueSummary) -> usize {
     let status_id = issue.field_values.get("status_id").map(String::as_str);
-    data.columns
+    columns
         .iter()
         .position(|column| board_column_contains_issue(column, issue, status_id))
         .unwrap_or(0)

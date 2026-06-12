@@ -170,7 +170,10 @@ mod tests {
 
     #[test]
     fn slice_line_preserves_per_span_styles_across_the_cut() {
-        let line = Line::from(vec![Span::raw("ab".to_owned()), Span::raw("cdef".to_owned())]);
+        let line = Line::from(vec![
+            Span::raw("ab".to_owned()),
+            Span::raw("cdef".to_owned()),
+        ]);
         let sliced = slice_line(line, 1, 3);
         let text: String = sliced.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "bcd");

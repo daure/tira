@@ -62,13 +62,31 @@ pub(super) fn board_data_from_greenhopper(
 /// section degrades to an empty list.
 pub(super) fn timeline_epics_from_greenhopper(payload: &serde_json::Value) -> Vec<TimelineEpic> {
     let children_by_epic = timeline_children_by_epic(payload);
+    let issues_by_key = timeline_issues_by_key(payload);
     payload
         .pointer("/epicData/epics")
         .and_then(serde_json::Value::as_array)
         .map(|epics| {
             epics
                 .iter()
-                .map(|epic| timeline_epic_from_value(epic, &children_by_epic))
+                .map(|epic| timeline_epic_from_value(epic, &children_by_epic, &issues_by_key))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn timeline_issues_by_key<'a>(
+    payload: &'a serde_json::Value,
+) -> BTreeMap<String, &'a serde_json::Value> {
+    payload
+        .get("issues")
+        .and_then(serde_json::Value::as_array)
+        .map(|issues| {
+            issues
+                .iter()
+                .filter_map(|issue| {
+                    text_property(issue, &["key", "issueKey"]).map(|key| (key, issue))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -77,9 +95,7 @@ pub(super) fn timeline_epics_from_greenhopper(payload: &serde_json::Value) -> Ve
 /// Groups the backlog issues under their epic (Jira's modern `parentKey`). Each
 /// issue keeps the sprint ids it belongs to so the timeline can bucket it into
 /// columns.
-fn timeline_children_by_epic(
-    payload: &serde_json::Value,
-) -> BTreeMap<String, Vec<TimelineIssue>> {
+fn timeline_children_by_epic(payload: &serde_json::Value) -> BTreeMap<String, Vec<TimelineIssue>> {
     let mut grouped: BTreeMap<String, Vec<TimelineIssue>> = BTreeMap::new();
     let Some(issues) = payload.get("issues").and_then(serde_json::Value::as_array) else {
         return grouped;
@@ -98,6 +114,8 @@ fn timeline_children_by_epic(
             issue_type: text_property(issue, &["typeName", "issueType"])
                 .unwrap_or_else(|| String::from("Issue")),
             done: issue.get("done").and_then(serde_json::Value::as_bool) == Some(true),
+            start_day: timeline_start_day(issue),
+            end_day: timeline_end_day(issue),
             sprint_ids: timeline_sprint_ids(issue),
         });
     }
@@ -112,11 +130,50 @@ fn timeline_sprint_ids(issue: &serde_json::Value) -> Vec<i64> {
         .unwrap_or_default()
 }
 
+fn timeline_start_day(issue: &serde_json::Value) -> Option<i64> {
+    timeline_day(
+        issue,
+        &[
+            "isoStartDate",
+            "startDate",
+            "start",
+            "plannedStart",
+            "plannedStartDate",
+            "targetStart",
+            "targetStartDate",
+        ],
+    )
+}
+
+fn timeline_end_day(issue: &serde_json::Value) -> Option<i64> {
+    timeline_day(
+        issue,
+        &[
+            "isoDueDate",
+            "isoEndDate",
+            "endDate",
+            "dueDate",
+            "duedate",
+            "end",
+            "plannedEnd",
+            "plannedEndDate",
+            "targetEnd",
+            "targetEndDate",
+        ],
+    )
+}
+
+fn timeline_day(issue: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+    text_property(issue, keys).and_then(|date| crate::domain::date::iso_to_days(&date))
+}
+
 fn timeline_epic_from_value(
     epic: &serde_json::Value,
     children_by_epic: &BTreeMap<String, Vec<TimelineIssue>>,
+    issues_by_key: &BTreeMap<String, &serde_json::Value>,
 ) -> TimelineEpic {
     let key = text_property(epic, &["key", "epicKey"]).unwrap_or_default();
+    let issue = issues_by_key.get(&key).copied();
     let counts = epic.pointer("/epicStats/childrenIssueCount");
     let count = |field: &str| {
         counts
@@ -137,6 +194,14 @@ fn timeline_epic_from_value(
         summary: text_property(epic, &["summary", "epicLabel"]).unwrap_or_else(|| key.clone()),
         key,
         done,
+        start_day: timeline_start_day(epic).or_else(|| issue.and_then(timeline_start_day)),
+        end_day: timeline_end_day(epic).or_else(|| issue.and_then(timeline_end_day)),
+        sprint_ids: timeline_sprint_ids(epic)
+            .into_iter()
+            .chain(issue.map(timeline_sprint_ids).unwrap_or_default())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         stats,
         children,
     }
@@ -392,9 +457,7 @@ fn normalize_swimlane_issue_keys(issues: &[IssueSummary], swimlanes: &mut [Board
     }
 }
 
-fn board_visible_issue_ids(
-    payload: &serde_json::Value,
-) -> Option<BTreeSet<String>> {
+fn board_visible_issue_ids(payload: &serde_json::Value) -> Option<BTreeSet<String>> {
     let mut ids = BTreeSet::new();
     collect_issue_ids_from_array(payload.get("issues"), &mut ids);
     if !ids.is_empty() {
@@ -414,10 +477,7 @@ fn board_visible_issue_ids(
     (!ids.is_empty()).then_some(ids)
 }
 
-fn collect_issue_ids_from_array(
-    value: Option<&serde_json::Value>,
-    ids: &mut BTreeSet<String>,
-) {
+fn collect_issue_ids_from_array(value: Option<&serde_json::Value>, ids: &mut BTreeSet<String>) {
     let Some(values) = value.and_then(serde_json::Value::as_array) else {
         return;
     };
@@ -990,6 +1050,8 @@ mod tests {
                         "key": "DPP-10",
                         "summary": "Checkout revamp",
                         "done": false,
+                        "isoStartDate": "2026-06-10",
+                        "isoDueDate": "2026-06-24",
                         "epicStats": { "childrenIssueCount": { "toDo": 1, "inProgress": 1, "done": 2 } }
                     },
                     {
@@ -1001,7 +1063,8 @@ mod tests {
                 ]
             },
             "issues": [
-                { "key": "DPP-11", "summary": "Cart", "parentKey": "DPP-10", "statusName": "In Progress", "typeName": "Story", "done": false, "sprintIds": [2] },
+                { "key": "DPP-10", "summary": "Checkout revamp", "statusName": "In Progress", "typeName": "Epic", "done": false, "sprintIds": [2] },
+                { "key": "DPP-11", "summary": "Cart", "parentKey": "DPP-10", "statusName": "In Progress", "typeName": "Story", "done": false, "startDate": "2026-06-03", "dueDate": "2026-06-17", "sprintIds": [2] },
                 { "key": "DPP-12", "summary": "Pay", "parentKey": "DPP-10", "statusName": "Done", "typeName": "Task", "done": true, "sprintIds": [1, 2] },
                 { "key": "DPP-99", "summary": "Orphan", "statusName": "To Do", "typeName": "Task", "done": false, "sprintIds": [3] }
             ]
@@ -1013,9 +1076,26 @@ mod tests {
         assert_eq!(revamp.status, "In Progress");
         assert_eq!(revamp.stats.total(), 4);
         assert_eq!(revamp.stats.percent_done(), 50);
+        assert_eq!(
+            revamp.start_day,
+            crate::domain::date::iso_to_days("2026-06-10")
+        );
+        assert_eq!(
+            revamp.end_day,
+            crate::domain::date::iso_to_days("2026-06-24")
+        );
+        assert_eq!(revamp.sprint_ids, vec![2]);
         // Both children land under the epic; the orphan (no parentKey) does not.
         assert_eq!(revamp.children.len(), 2);
-        assert_eq!(revamp.sprint_ids().into_iter().collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            revamp.children[0].start_day,
+            crate::domain::date::iso_to_days("2026-06-03")
+        );
+        assert_eq!(
+            revamp.children[0].end_day,
+            crate::domain::date::iso_to_days("2026-06-17")
+        );
+        assert_eq!(revamp.sprint_ids().into_iter().collect::<Vec<_>>(), vec![2]);
         assert_eq!(epics[1].status, "Done");
     }
 }

@@ -49,7 +49,9 @@ pub fn border_separator(width: u16, theme: &crate::ui::theme::Theme) -> Paragrap
 
 pub fn status_bar(app: &App, keybindings: &KeyBindings, width: u16) -> Paragraph<'static> {
     let theme = app.theme();
-    let (mode_str, mode_bg) = if app.is_input_focused() {
+    let (mode_str, mode_bg) = if app.is_board_move_mode() {
+        ("  MOVE  ", theme.status_project_bg())
+    } else if app.is_input_focused() {
         (" INSERT ", theme.status_input_bg())
     } else {
         (" NORMAL ", theme.status_normal_bg())
@@ -141,6 +143,12 @@ pub fn status_bar(app: &App, keybindings: &KeyBindings, width: u16) -> Paragraph
 }
 
 fn status_hint(app: &App, keybindings: &KeyBindings) -> String {
+    if app.is_command_log_open() {
+        return keybindings.command_log_hint_text();
+    }
+    if app.is_ticket_dialog_open() {
+        return keybindings.ticket_dialog_hint_text();
+    }
     match app.screen() {
         crate::Screen::Setup => keybindings.setup_hint_text(),
         crate::Screen::Main if app.active_tab() == ApplicationTab::Board => {

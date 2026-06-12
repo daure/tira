@@ -14,7 +14,7 @@ const PARTICLES: &[&str] = &[
 
 pub fn spans(theme: &Theme, name: &str, filter: &str, base_style: Style) -> Vec<Span<'static>> {
     let mut spans = bubble_spans(theme, name);
-    if !name.is_empty() {
+    if !name.is_empty() && name != "--" {
         spans.push(Span::raw(" "));
         spans.extend(style::highlighted_spans_owned(
             theme, name, filter, base_style,
@@ -33,17 +33,25 @@ pub fn bubble_width(name: &str) -> usize {
 
 pub fn display_width(name: &str) -> usize {
     let bubble = bubble(name);
-    let gap = usize::from(!name.is_empty());
-    bubble.chars().count() + gap + name.chars().count()
+    let gap = usize::from(!name.is_empty() && name != "--");
+    let name_len = if name == "--" {
+        0
+    } else {
+        name.chars().count()
+    };
+    bubble.chars().count() + gap + name_len
 }
 
 pub fn initials(name: &str) -> String {
+    if name.is_empty() || name == "--" {
+        return String::from("--");
+    }
     let tokens = name
         .split_whitespace()
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>();
     if tokens.is_empty() {
-        return String::from("??");
+        return String::from("--");
     }
     if tokens.len() == 1 {
         return take_initials(tokens[0], 2);
@@ -64,6 +72,12 @@ pub fn initials(name: &str) -> String {
 }
 
 fn bubble_spans(theme: &Theme, name: &str) -> Vec<Span<'static>> {
+    if name.is_empty() || name == "--" {
+        let text_style = Style::default()
+            .fg(theme.muted_fg())
+            .add_modifier(Modifier::DIM);
+        return vec![Span::styled(format!("@{}", initials(name)), text_style)];
+    }
     let palette = avatar_palette(theme);
     let (_, avatar) = palette[hash_index(name) % palette.len()];
     let text_style = Style::default().fg(avatar).add_modifier(Modifier::BOLD);

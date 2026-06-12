@@ -1,7 +1,7 @@
 mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tira::services::jira::{FieldSummary, IssueSummary, JiraError, JiraLoadResult};
+use tira::services::jira::{FieldSummary, IssueSummary, JiraError, JiraLoadResult, TimelineData};
 use tira::{
     App, AppEffect, AppEvent, JiraLoadPurpose, JiraProjectLoadResult, KeyBindings,
     config::JiraCredentials,
@@ -42,9 +42,16 @@ fn issues_range(start: usize, end: usize) -> Vec<IssueSummary> {
 fn loaded_app(issues: Vec<IssueSummary>, next_page_token: Option<String>) -> App {
     let credentials = credentials();
     let mut app = App::from_credentials(credentials.clone());
-    let effect = app.take_effects().remove(0);
-    let AppEffect::LoadJiraProject { request_id, .. } = effect else {
-        panic!("expected initial Jira load effect, got {effect:?}");
+    let mut effects = app.take_effects();
+    let timeline_request_id = effects.iter().find_map(|effect| match effect {
+        AppEffect::LoadTimeline { request_id, .. } => Some(*request_id),
+        _ => None,
+    });
+    let Some(request_id) = effects.iter_mut().find_map(|effect| match effect {
+        AppEffect::LoadJiraProject { request_id, .. } => Some(*request_id),
+        _ => None,
+    }) else {
+        panic!("expected initial Jira load effect, got {effects:?}");
     };
     app.handle_event(AppEvent::JiraProjectLoaded {
         request_id,
@@ -62,6 +69,13 @@ fn loaded_app(issues: Vec<IssueSummary>, next_page_token: Option<String>) -> App
             logs: Vec::new(),
         },
     });
+    if let Some(request_id) = timeline_request_id {
+        app.handle_event(AppEvent::TimelineLoaded {
+            request_id,
+            timeline: Ok(TimelineData::default()),
+            logs: Vec::new(),
+        });
+    }
     app
 }
 
@@ -882,7 +896,10 @@ fn clearing_filter_restores_browse_view() {
         .into_iter()
         .filter(|effect| matches!(effect, AppEffect::LoadJiraProject { .. }))
         .count();
-    assert_eq!(reloads, 1, "dropping below the minimum reloads the browse view");
+    assert_eq!(
+        reloads, 1,
+        "dropping below the minimum reloads the browse view"
+    );
 }
 
 #[test]
@@ -1054,7 +1071,9 @@ fn column_picker_hides_custom_fields_absent_from_the_populated_sample() {
             name: String::from("Unused Field"),
         },
     ];
-    let populated = Some(std::collections::BTreeSet::from([String::from("customfield_1")]));
+    let populated = Some(std::collections::BTreeSet::from([String::from(
+        "customfield_1",
+    )]));
     let mut app = loaded_app_with_fields(fields, populated);
 
     // Open the column picker on the List tab.

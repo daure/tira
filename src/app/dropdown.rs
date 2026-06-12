@@ -102,6 +102,7 @@ pub enum QuickAction {
     ProjectPicker,
     ReloadList,
     ReloadBoard,
+    ReloadTimeline,
     Board,
     List,
     Timeline,
@@ -128,6 +129,7 @@ impl QuickAction {
             Self::ProjectPicker => "Project picker",
             Self::ReloadList => "Reload list",
             Self::ReloadBoard => "Reload board",
+            Self::ReloadTimeline => "Reload timeline",
             Self::Board => "Go to Board",
             Self::List => "Go to List",
             Self::Timeline => "Go to Timeline",
@@ -226,6 +228,8 @@ impl App {
             actions.insert(3, QuickAction::ReloadList);
         } else if self.active_tab() == ApplicationTab::Board {
             actions.insert(3, QuickAction::ReloadBoard);
+        } else if self.active_tab() == ApplicationTab::Timeline {
+            actions.insert(3, QuickAction::ReloadTimeline);
         }
         let options = actions
             .into_iter()
@@ -475,6 +479,7 @@ impl App {
             QuickAction::ProjectPicker => self.open_project_dropdown(),
             QuickAction::ReloadList => self.reload_list(),
             QuickAction::ReloadBoard => self.reload_board(),
+            QuickAction::ReloadTimeline => self.reload_timeline(),
             QuickAction::Board => self.select_tab(ApplicationTab::Board),
             QuickAction::List => self.select_tab(ApplicationTab::List),
             QuickAction::Timeline => self.select_tab(ApplicationTab::Timeline),

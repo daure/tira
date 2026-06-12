@@ -161,6 +161,36 @@ fn board_tab_keys_reach_all_cards() {
 }
 
 #[test]
+fn board_move_mode_commits_status_change_and_rank_change() {
+    let bindings = KeyBindings::default();
+    let mut todo = support::issue("KAN-1", "Todo", "Task", None);
+    todo.status = String::from("To Do");
+    let mut doing_top = support::issue("KAN-2", "Doing top", "Task", None);
+    doing_top.status = String::from("In Progress");
+    let mut doing_bottom = support::issue("KAN-3", "Doing bottom", "Task", None);
+    doing_bottom.status = String::from("In Progress");
+    let mut app = App::with_issues_and_projects(
+        vec![todo, doing_top, doing_bottom],
+        vec![support::project("KAN", "Kanban")],
+        "KAN",
+    );
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(key('m'), &bindings);
+    app.handle_key(shift('l'), &bindings);
+    app.handle_key(shift('k'), &bindings);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &bindings);
+
+    let effects = app.take_effects();
+    assert!(effects.iter().any(|effect| {
+        matches!(effect, AppEffect::TransitionIssueStatus { issue_key, status, .. } if issue_key == "KAN-1" && status == "In Progress")
+    }));
+    assert!(effects.iter().any(|effect| {
+        matches!(effect, AppEffect::RankIssue { issue_key, rank_before, .. } if issue_key == "KAN-1" && rank_before.as_deref() == Some("KAN-3"))
+    }));
+}
+
+#[test]
 fn board_home_end_stay_within_the_focused_column() {
     let bindings = KeyBindings::default();
     let mut todo_top = support::issue("KAN-1", "Todo top", "Task", None);
@@ -396,7 +426,6 @@ fn board_at_prefixed_assignee_search_is_navigable() {
     assert_eq!(app.selected_board_issue_key(), Some("KAN-2"));
     assert_eq!(app.selected_board_empty_cell(), None);
 }
-
 
 #[test]
 fn board_vertical_navigation_preserves_column_across_group_headers() {
@@ -801,10 +830,7 @@ fn leader_keys_are_mapped() {
         bindings.leader_action_for(key('s')),
         Action::ToggleThemeDropdown
     );
-    assert_eq!(
-        bindings.global_action_for(key('r')),
-        Some(Action::ReloadNode)
-    );
+    assert_eq!(bindings.global_action_for(key('r')), None);
 }
 
 #[test]
@@ -1065,15 +1091,42 @@ fn reload_help_entries_are_tab_scoped() {
 
     let list_items = bindings.help_items(Screen::Main, "List", false);
     let board_items = bindings.help_items(Screen::Main, "Board", false);
+    let timeline_items = bindings.help_items(Screen::Main, "Timeline", false);
 
     assert!(list_items.iter().any(|item| item.summary == "Reload list"));
+    assert!(!list_items.iter().any(|item| item.summary == "Reload node"));
     assert!(!list_items.iter().any(|item| item.summary == "Reload board"));
+    assert!(
+        !list_items
+            .iter()
+            .any(|item| item.summary == "Reload timeline")
+    );
     assert!(
         board_items
             .iter()
             .any(|item| item.summary == "Reload board")
     );
     assert!(!board_items.iter().any(|item| item.summary == "Reload list"));
+    assert!(
+        !board_items
+            .iter()
+            .any(|item| item.summary == "Reload timeline")
+    );
+    assert!(
+        timeline_items
+            .iter()
+            .any(|item| item.summary == "Reload timeline")
+    );
+    assert!(
+        !timeline_items
+            .iter()
+            .any(|item| item.summary == "Reload list")
+    );
+    assert!(
+        !timeline_items
+            .iter()
+            .any(|item| item.summary == "Reload board")
+    );
     assert!(
         board_items
             .iter()
@@ -1107,11 +1160,7 @@ fn board_help_uses_custom_navigation_labels() {
 
     assert!(board_items.iter().any(|item| item.binding == "a/d"));
     assert!(board_items.iter().any(|item| item.binding == "w/s"));
-    assert!(
-        board_items
-            .iter()
-            .any(|item| item.binding == "⌃b / ⌃f")
-    );
+    assert!(board_items.iter().any(|item| item.binding == "⌃b / ⌃f"));
 }
 
 #[test]
@@ -1241,7 +1290,11 @@ fn help_dialog_during_dropdown_does_not_close_dropdown_and_shows_dropdown_help()
     assert!(app.is_theme_dropdown_open());
 
     // The help items should contain dropdown-specific help
-    let items = bindings.help_items(app.screen(), app.active_tab().title(), app.is_any_dropdown_open());
+    let items = bindings.help_items(
+        app.screen(),
+        app.active_tab().title(),
+        app.is_any_dropdown_open(),
+    );
     assert!(items.iter().any(|item| item.summary == "Toggle selection"));
     assert!(items.iter().any(|item| item.summary == "Do selection"));
 
@@ -1250,6 +1303,28 @@ fn help_dialog_during_dropdown_does_not_close_dropdown_and_shows_dropdown_help()
     assert!(!app.is_help_open());
     // Dropdown is still open
     assert!(app.is_theme_dropdown_open());
+}
+
+#[test]
+fn dropdown_help_uses_configured_filter_bindings() {
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [dropdown]
+        toggle_selected = "t"
+        toggle_from_filter = "ctrl+t"
+        submit_from_filter = "ctrl+s"
+        filter_move_down = "ctrl+n"
+        filter_move_up = "ctrl+p"
+        filter_clear = "ctrl+x"
+        "##,
+    );
+
+    let items = bindings.help_items(Screen::Main, "List", true);
+
+    assert!(items.iter().any(|item| item.binding == "t / ⌃t"));
+    assert!(items.iter().any(|item| item.binding == "⌃s"));
+    assert!(items.iter().any(|item| item.binding == "⌃n / ⌃p"));
+    assert!(items.iter().any(|item| item.binding == "⌃x"));
 }
 
 #[test]
@@ -1426,12 +1501,74 @@ fn quick_switcher_lists_tab_scoped_reload_actions() {
         .iter()
         .map(|option| (option.label.clone(), option.value))
         .collect::<Vec<_>>();
-    for (label, action) in list_shortcuts.iter().chain(board_shortcuts.iter()) {
+
+    app.dispatch(Action::Tabs(TabAction::Next));
+    app.dispatch(Action::Tabs(TabAction::Next));
+    app.handle_key(ctrl('k'), &bindings);
+    let timeline_options = app.quick_switcher().expect("quick switcher").options();
+    assert!(
+        timeline_options
+            .iter()
+            .any(|option| option.label == "Reload timeline")
+    );
+    assert!(
+        !timeline_options
+            .iter()
+            .any(|option| option.label == "Reload list")
+    );
+    assert!(
+        !timeline_options
+            .iter()
+            .any(|option| option.label == "Reload board")
+    );
+    let timeline_shortcuts = timeline_options
+        .iter()
+        .map(|option| (option.label.clone(), option.value))
+        .collect::<Vec<_>>();
+
+    for (label, action) in list_shortcuts
+        .iter()
+        .chain(board_shortcuts.iter())
+        .chain(timeline_shortcuts.iter())
+    {
         assert!(
             !bindings.quick_action_shortcut_label(*action).is_empty(),
             "{label} is missing a shortcut",
         );
     }
+}
+
+#[test]
+fn shift_r_reloads_timeline_on_timeline_tab() {
+    let bindings = KeyBindings::default();
+    let credentials = JiraCredentials {
+        site: String::from("https://example.atlassian.net"),
+        email: String::from("test@example.com"),
+        api_key: String::from("test"),
+        default_project: String::from("KAN"),
+    };
+    let mut app = App::from_credentials(credentials);
+    app.take_effects();
+    app.dispatch(Action::Tabs(TabAction::Next));
+    app.take_effects();
+
+    app.handle_key(shift('r'), &bindings);
+
+    assert_eq!(app.status(), "Reloading Jira timeline...");
+    let effects = app.take_effects();
+    assert!(
+        matches!(
+            effects.first().expect("reload effect"),
+            AppEffect::LoadTimeline { .. }
+        ),
+        "Shift+R on the timeline reloads only the timeline"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, AppEffect::LoadJiraProject { .. })),
+        "timeline reload must not reload the list"
+    );
 }
 
 #[test]
@@ -1773,5 +1910,32 @@ fn help_items_render_resolved_nav_labels() {
         board_items
             .iter()
             .all(|item| item.binding != "k/j" && item.binding != "j/k")
+    );
+}
+
+#[test]
+fn shifted_letter_help_labels_render_as_capitals() {
+    let bindings = KeyBindings::from_toml_str(
+        r##"
+        [global]
+        reload_list = "shift+r"
+
+        [tree]
+        expand_all = "shift+z"
+        "##,
+    );
+
+    let list_items = bindings.help_items(Screen::Main, "List", false);
+    let board_items = bindings.help_items(Screen::Main, "Board", false);
+    let timeline_items = bindings.help_items(Screen::Main, "Timeline", false);
+
+    assert!(list_items.iter().any(|item| item.binding == "R"));
+    assert!(timeline_items.iter().any(|item| item.binding.contains('Z')));
+    assert!(
+        list_items
+            .iter()
+            .chain(board_items.iter())
+            .chain(timeline_items.iter())
+            .all(|item| !item.binding.contains("Shift+r") && !item.binding.contains("Shift+z"))
     );
 }

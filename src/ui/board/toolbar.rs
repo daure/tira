@@ -6,12 +6,14 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::{
-    App, KeyBindings,
-    components::generic::filter,
-};
+use crate::{App, KeyBindings, components::generic::filter};
 
-pub(super) fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App, _keybindings: &KeyBindings) {
+pub(super) fn render_filter(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    _keybindings: &KeyBindings,
+) {
     let [icon_area, text_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(2), Constraint::Min(1)])
@@ -40,39 +42,48 @@ pub(super) fn details_trigger_text(app: &App) -> String {
         .and_then(|sprint| sprint.days_left_label())
     {
         Some(days_left) => format!("details: {days_left}"),
-        None => String::from("details"),
+        None => String::from("details: No active sprint"),
     }
 }
 
-pub(super) fn render_details_trigger(frame: &mut Frame<'_>, area: Rect, app: &App, text: &str) {
+pub(super) fn render_details_trigger(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    keybindings: &KeyBindings,
+    text: &str,
+) {
     let theme = app.theme();
-    let (hotkey, rest) = text.split_at(1);
     let line = Line::from(vec![
         Span::styled(" ", Style::default()),
         Span::styled(
-            hotkey.to_owned(),
+            keybindings.board_details_label(),
             Style::default()
                 .fg(theme.accent_fg())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(rest.to_owned(), Style::default().fg(theme.muted_fg())),
+        Span::styled(format!(" {text}"), Style::default().fg(theme.muted_fg())),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
-pub(super) fn render_group_trigger(frame: &mut Frame<'_>, area: Rect, app: &App) {
+pub(super) fn render_group_trigger(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    keybindings: &KeyBindings,
+) {
     let theme = app.theme();
     let label = app.board_grouping().label();
     let text = Line::from(vec![
         Span::styled(" ", Style::default()),
-        Span::styled("g", Style::default().fg(theme.muted_fg())),
         Span::styled(
-            "r",
+            keybindings.board_group_label(),
             Style::default()
                 .fg(theme.accent_fg())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("oup: ", Style::default().fg(theme.muted_fg())),
+        Span::styled(" group: ", Style::default().fg(theme.muted_fg())),
         Span::styled(
             label.to_owned(),
             Style::default().fg(theme.selected_alt_fg()),

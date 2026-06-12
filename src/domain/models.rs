@@ -145,18 +145,26 @@ pub struct TimelineEpic {
     pub summary: String,
     pub status: String,
     pub done: bool,
+    pub start_day: Option<i64>,
+    pub end_day: Option<i64>,
+    pub sprint_ids: Vec<i64>,
     pub stats: TimelineEpicStats,
     pub children: Vec<TimelineIssue>,
 }
 
 impl TimelineEpic {
-    /// The distinct sprint ids this epic touches through its children. Drives
-    /// the columns the epic's bar spans.
+    /// The distinct sprint ids this epic touches. Jira can assign sprints to an
+    /// epic independently from its children; when it does not, fall back to the
+    /// children so older payloads still produce a useful parent span.
     pub fn sprint_ids(&self) -> std::collections::BTreeSet<i64> {
-        self.children
-            .iter()
-            .flat_map(|child| child.sprint_ids.iter().copied())
-            .collect()
+        if self.sprint_ids.is_empty() {
+            self.children
+                .iter()
+                .flat_map(|child| child.sprint_ids.iter().copied())
+                .collect()
+        } else {
+            self.sprint_ids.iter().copied().collect()
+        }
     }
 }
 
@@ -192,6 +200,8 @@ pub struct TimelineIssue {
     pub status: String,
     pub issue_type: String,
     pub done: bool,
+    pub start_day: Option<i64>,
+    pub end_day: Option<i64>,
     pub sprint_ids: Vec<i64>,
 }
 
@@ -241,10 +251,7 @@ pub fn sprint_short_label(name: &str) -> String {
             .flat_map(char::to_uppercase)
             .collect()
     } else {
-        name.chars()
-            .take(3)
-            .flat_map(char::to_uppercase)
-            .collect()
+        name.chars().take(3).flat_map(char::to_uppercase).collect()
     }
 }
 

@@ -1,7 +1,10 @@
-use std::{io, panic};
+use std::{io, panic, process, thread};
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -14,6 +17,7 @@ pub struct Tui {
 impl Tui {
     pub fn enter() -> io::Result<Self> {
         install_panic_hook();
+        install_signal_hook();
         enable_raw_mode()?;
 
         let mut stdout = io::stdout();
@@ -25,6 +29,14 @@ impl Tui {
             let _ = execute!(stdout, LeaveAlternateScreen);
             return Err(error);
         }
+        let _ = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        );
 
         let backend = CrosstermBackend::new(stdout);
         match Terminal::new(backend) {
@@ -58,6 +70,7 @@ impl Drop for Tui {
         let _ = disable_raw_mode();
         let _ = execute!(
             self.terminal.backend_mut(),
+            PopKeyboardEnhancementFlags,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -76,7 +89,31 @@ fn install_panic_hook() {
     });
 }
 
+fn install_signal_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let Ok(mut signals) = signal_hook::iterator::Signals::new([
+            signal_hook::consts::SIGHUP,
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGTERM,
+        ]) else {
+            return;
+        };
+        thread::spawn(move || {
+            if let Some(signal) = signals.forever().next() {
+                restore_terminal();
+                process::exit(128 + signal);
+            }
+        });
+    });
+}
+
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
 }

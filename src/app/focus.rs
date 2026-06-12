@@ -17,7 +17,11 @@ pub(crate) enum InputMode {
 
 impl App {
     pub(crate) fn input_mode(&self) -> InputMode {
-        if self.screen == Screen::Setup || self.any_overlay_filter_focused() {
+        if self.screen == Screen::Setup
+            || self.any_overlay_filter_focused()
+            || self.is_board_filter_focused()
+            || self.is_timeline_filter_focused()
+        {
             InputMode::Input
         } else {
             InputMode::Normal
@@ -27,14 +31,15 @@ impl App {
     fn any_overlay_filter_focused(&self) -> bool {
         self.is_filter_focused()
             || self.is_column_dropdown_filter_focused()
-            || self.overlay.as_ref().is_some_and(Overlay::is_filter_focused)
+            || self
+                .overlay
+                .as_ref()
+                .is_some_and(Overlay::is_filter_focused)
     }
 
-    /// Whether a printable key should be treated as text input. Adds the board
-    /// filter on top of `is_input_focused` (which intentionally omits it for the
-    /// footer mode label).
+    /// Whether a printable key should be treated as text input.
     pub(crate) fn text_input_focused(&self) -> bool {
-        self.is_input_focused() || self.is_board_filter_focused()
+        self.is_input_focused()
     }
 
     /// Whether an open overlay (or focused filter) should capture keys, blocking
@@ -52,6 +57,7 @@ impl App {
             Screen::Main if self.filtered_tree.is_column_dropdown_open() => true,
             Screen::Main if self.filtered_tree.is_filter_focused() => true,
             Screen::Main if self.board_filter.is_focused() => true,
+            Screen::Main if self.timeline.is_filter_focused() => true,
             _ => false,
         }
     }

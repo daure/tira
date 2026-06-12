@@ -14,16 +14,17 @@ pub use crate::domain::models::*;
 pub use query::{CHILD_PAGE_SIZE, ChildrenBatch, ROOT_PAGE_SIZE};
 
 use greenhopper::board_data_from_greenhopper;
+use greenhopper::format_field_value;
 use greenhopper::timeline_epics_from_greenhopper;
 use protocol::{
     AssignIssuePayload, AssignableUser, BoardDetails, BoardSearchResponse, FieldDetails,
-    ParentProbeResponse, ProjectSearchResponse, SearchResponse,
+    ParentProbeResponse, ProjectSearchResponse, RankIssuePayload, SearchResponse,
+    TransitionIssueId, TransitionIssuePayload, TransitionsResponse,
 };
 use query::{
     BATCH_PARENT_CHUNK, group_children_for_parents, issue_summary_from_search_issue, log_path,
     search_match_clause,
 };
-use greenhopper::format_field_value;
 
 impl crate::ui::selector::HasShortcut for ProjectSummary {
     fn shortcut(&self, _keybindings: &crate::KeyBindings) -> Option<String> {
@@ -832,7 +833,9 @@ fn load_board_sprints(
             Ok(page) => page,
             Err(error) => {
                 return (
-                    Err(JiraError(format!("Jira sprints could not be read: {error}"))),
+                    Err(JiraError(format!(
+                        "Jira sprints could not be read: {error}"
+                    ))),
                     logs,
                 );
             }
@@ -1013,6 +1016,185 @@ pub fn assign_issue(
         )),
     }
 }
+
+pub fn transition_issue_to_status(
+    credentials: &JiraCredentials,
+    issue_key: &str,
+    target_status: &str,
+    target_status_id: Option<&str>,
+) -> Result<Vec<CommandLogEntry>, (JiraError, Vec<CommandLogEntry>)> {
+    let mut logs = Vec::new();
+    let site = credentials.site.trim().trim_end_matches('/');
+    let transitions_path = format!("/issue/{issue_key}/transitions");
+    let timestamp = current_time_string();
+    let transitions_url = match Url::parse(&format!("{site}/rest/api/3{transitions_path}")) {
+        Ok(url) => url,
+        Err(error) => {
+            return Err((
+                JiraError(format!("Invalid Jira site URL: {error}")),
+                vec![failed_log(timestamp, "GET", transitions_path.as_str())],
+            ));
+        }
+    };
+
+    let started_at = Instant::now();
+    let response = reqwest::blocking::Client::new()
+        .get(transitions_url.clone())
+        .basic_auth(credentials.email.trim(), Some(credentials.api_key.trim()))
+        .send();
+    let duration_ms = started_at.elapsed().as_millis();
+    let transitions_log_path = log_path(&transitions_url);
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            return Err((
+                JiraError(format!("Jira transition lookup failed: {error}")),
+                vec![transport_error_log(
+                    timestamp,
+                    "GET",
+                    transitions_log_path,
+                    duration_ms,
+                )],
+            ));
+        }
+    };
+    let status = response.status();
+    logs.push(response_log(
+        timestamp,
+        "GET",
+        transitions_log_path,
+        status,
+        duration_ms,
+    ));
+    if !status.is_success() {
+        return Err((JiraError(format!("Jira returned HTTP {status}")), logs));
+    }
+    let transitions = match response.json::<TransitionsResponse>() {
+        Ok(payload) => payload.transitions,
+        Err(error) => {
+            return Err((
+                JiraError(format!("Jira transitions could not be read: {error}")),
+                logs,
+            ));
+        }
+    };
+    let transition = if let Some(target_status_id) = target_status_id {
+        transitions
+            .iter()
+            .find(|transition| transition.to.id == target_status_id)
+    } else {
+        transitions.iter().find(|transition| {
+            transition.to.name.eq_ignore_ascii_case(target_status)
+                || transition.name.eq_ignore_ascii_case(target_status)
+        })
+    };
+    let Some(transition) = transition else {
+        return Err((
+            JiraError(format!(
+                "No Jira transition found for status {target_status}"
+            )),
+            logs,
+        ));
+    };
+
+    let timestamp = current_time_string();
+    let transition_id = transition.id.clone();
+    let transition_url = match Url::parse(&format!("{site}/rest/api/3{transitions_path}")) {
+        Ok(url) => url,
+        Err(error) => {
+            logs.push(failed_log(timestamp, "POST", transitions_path.as_str()));
+            return Err((JiraError(format!("Invalid Jira site URL: {error}")), logs));
+        }
+    };
+    let started_at = Instant::now();
+    let response = reqwest::blocking::Client::new()
+        .post(transition_url.clone())
+        .basic_auth(credentials.email.trim(), Some(credentials.api_key.trim()))
+        .json(&TransitionIssuePayload {
+            transition: TransitionIssueId { id: &transition_id },
+        })
+        .send();
+    let duration_ms = started_at.elapsed().as_millis();
+    let log_path = log_path(&transition_url);
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            logs.push(response_log(
+                timestamp,
+                "POST",
+                log_path,
+                status,
+                duration_ms,
+            ));
+            if status.is_success() {
+                Ok(logs)
+            } else {
+                Err((JiraError(format!("Jira returned HTTP {status}")), logs))
+            }
+        }
+        Err(error) => {
+            logs.push(transport_error_log(
+                timestamp,
+                "POST",
+                log_path,
+                duration_ms,
+            ));
+            Err((
+                JiraError(format!("Jira transition request failed: {error}")),
+                logs,
+            ))
+        }
+    }
+}
+
+pub fn rank_issue(
+    credentials: &JiraCredentials,
+    issue_key: &str,
+    rank_before: Option<&str>,
+    rank_after: Option<&str>,
+) -> Result<CommandLogEntry, (JiraError, CommandLogEntry)> {
+    let site = credentials.site.trim().trim_end_matches('/');
+    let method = "PUT";
+    let path = "/issue/rank";
+    let timestamp = current_time_string();
+    let url = match Url::parse(&format!("{site}/rest/agile/1.0{path}")) {
+        Ok(url) => url,
+        Err(error) => {
+            return Err((
+                JiraError(format!("Invalid Jira site URL: {error}")),
+                failed_log(timestamp, method, path),
+            ));
+        }
+    };
+    let started_at = Instant::now();
+    let response = reqwest::blocking::Client::new()
+        .put(url.clone())
+        .basic_auth(credentials.email.trim(), Some(credentials.api_key.trim()))
+        .json(&RankIssuePayload {
+            issues: vec![issue_key],
+            rank_before_issue: rank_before,
+            rank_after_issue: rank_after,
+        })
+        .send();
+    let duration_ms = started_at.elapsed().as_millis();
+    let log_path = log_path(&url);
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let log = response_log(timestamp, method, log_path, status, duration_ms);
+            if status.is_success() {
+                Ok(log)
+            } else {
+                Err((JiraError(format!("Jira returned HTTP {status}")), log))
+            }
+        }
+        Err(error) => Err((
+            JiraError(format!("Jira rank request failed: {error}")),
+            transport_error_log(timestamp, method, log_path, duration_ms),
+        )),
+    }
+}
+
 fn failed_log(timestamp: String, method: &'static str, path: &str) -> CommandLogEntry {
     CommandLogEntry {
         timestamp,

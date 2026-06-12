@@ -84,8 +84,12 @@ fn ordered_columns(
         "versions",
         "components",
     ];
-    const CURATED_NAMES: [&str; 4] =
-        ["Sprint", "Story Points", "Story point estimate", "Epic Link"];
+    const CURATED_NAMES: [&str; 4] = [
+        "Sprint",
+        "Story Points",
+        "Story point estimate",
+        "Epic Link",
+    ];
 
     // Rank curated common fields by their listed order; everything else has no
     // rank and falls into the alphabetical tail.
@@ -182,6 +186,115 @@ impl App {
                 assignee,
                 result,
             } => self.apply_issue_assignment(request_id, issue_key, assignee, result),
+            AppEvent::IssueStatusChanged {
+                request_id,
+                issue_key,
+                status,
+                status_id,
+                result,
+            } => self.apply_issue_status_change(request_id, issue_key, status, status_id, result),
+            AppEvent::IssueRanked {
+                request_id,
+                issue_key,
+                result,
+            } => self.apply_issue_ranked(request_id, issue_key, result),
+        }
+    }
+
+    fn apply_issue_ranked(
+        &mut self,
+        request_id: u64,
+        issue_key: String,
+        result: Result<CommandLogEntry, (JiraError, CommandLogEntry)>,
+    ) {
+        let pending = self.pending_rank_requests.remove(&request_id);
+        if pending.is_none() {
+            match result {
+                Ok(log) => self.command_log.push(log),
+                Err((_error, log)) => self.command_log.push(log),
+            }
+            return;
+        }
+
+        match result {
+            Ok(log) => {
+                self.command_log.push(log);
+                let message = format!("{issue_key} reordered on board.");
+                self.status = message.clone();
+                self.notifications
+                    .push(Notification::success("Ticket reordered", message));
+            }
+            Err((error, log)) => {
+                if let Some(pending) = pending {
+                    self.board.set_data(pending.original_board);
+                }
+                self.command_log.push(log);
+                self.status = format!("Could not reorder {issue_key}: {}", error.0);
+                self.notifications.push(Notification::error(
+                    "Ticket not reordered",
+                    format!("Could not reorder {issue_key}: {}", error.0),
+                ));
+            }
+        }
+    }
+
+    fn apply_issue_status_change(
+        &mut self,
+        request_id: u64,
+        issue_key: String,
+        status: String,
+        status_id: Option<String>,
+        result: Result<Vec<CommandLogEntry>, (JiraError, Vec<CommandLogEntry>)>,
+    ) {
+        if self
+            .pending_status_requests
+            .get(issue_key.as_str())
+            .is_none_or(|pending| pending.request_id != request_id)
+        {
+            match result {
+                Ok(logs) => self.command_log.extend(logs),
+                Err((_error, logs)) => self.command_log.extend(logs),
+            }
+            return;
+        }
+
+        let pending = self.pending_status_requests.remove(issue_key.as_str());
+        match result {
+            Ok(logs) => {
+                self.command_log.extend(logs);
+                self.board
+                    .update_status(issue_key.as_str(), status.clone(), status_id.clone());
+                self.filtered_tree
+                    .update_status(issue_key.as_str(), status.clone(), status_id);
+                let message = format!("{issue_key} status changed to {status}.");
+                self.status = message.clone();
+                self.notifications
+                    .push(Notification::success("Status updated", message));
+            }
+            Err((error, logs)) => {
+                self.command_log.extend(logs);
+                if let Some(pending) = pending {
+                    if let Some(original_board) = pending.original_board {
+                        self.board.set_data(original_board);
+                    } else {
+                        self.board.update_status(
+                            issue_key.as_str(),
+                            pending.previous_status.clone(),
+                            pending.previous_status_id.clone(),
+                        );
+                    }
+                    self.filtered_tree.update_status(
+                        issue_key.as_str(),
+                        pending.previous_status,
+                        pending.previous_status_id,
+                    );
+                }
+                self.status = format!("Could not update {issue_key}: {}", error.0);
+                self.notifications.push(Notification::error(
+                    "Status not updated",
+                    format!("Could not update {issue_key}: {}", error.0),
+                ));
+            }
         }
     }
 
@@ -252,6 +365,7 @@ impl App {
         self.filtered_tree.set_flat(false);
         // A project switch invalidates the timeline; force a fresh lazy load.
         self.timeline = TimelineState::default();
+        self.pending_timeline_refresh = false;
         self.pending_effects.push(AppEffect::LoadJiraProject {
             request_id,
             purpose,
@@ -360,6 +474,12 @@ impl App {
                 }
                 self.screen = Screen::Main;
                 self.status = self.loaded_status_message(purpose);
+                if matches!(purpose, JiraLoadPurpose::Reload) {
+                    self.notifications.push(Notification::success(
+                        "List refreshed",
+                        "Jira issues refreshed.",
+                    ));
+                }
             }
             Err(error) => {
                 if !list_only && let Ok(board) = board {
@@ -477,6 +597,10 @@ impl App {
                 normalize_board_user_fields(&mut board, &self.users, self.current_user.as_ref());
                 self.board.set_data(board);
                 self.status = String::from("Jira board loaded.");
+                self.notifications.push(Notification::success(
+                    "Board refreshed",
+                    "Jira board refreshed.",
+                ));
             }
             Err(error) => {
                 self.board.set_error(error.0);
@@ -500,11 +624,18 @@ impl App {
             return;
         }
         self.command_log.extend(logs);
+        let was_refresh = std::mem::take(&mut self.pending_timeline_refresh);
         match timeline {
             Ok(data) => {
                 let epic_count = data.epics.len();
                 self.timeline.finish_load(Ok(data));
                 self.status = format!("Timeline loaded ({epic_count} epics).");
+                if was_refresh {
+                    self.notifications.push(Notification::success(
+                        "Timeline refreshed",
+                        format!("Timeline refreshed ({epic_count} epics)."),
+                    ));
+                }
             }
             Err(error) => {
                 let message = error.0.clone();
@@ -593,6 +724,26 @@ impl App {
         let request_id = self.next_request_id();
         self.active_load_request_id = Some(request_id);
         self.pending_effects.push(AppEffect::ReloadBoardOnly {
+            request_id,
+            credentials,
+        });
+    }
+
+    pub(crate) fn reload_timeline(&mut self) {
+        if self.active_tab() != ApplicationTab::Timeline {
+            return;
+        }
+
+        let Some(credentials) = self.credentials.clone() else {
+            self.status = String::from("No Jira credentials available for reload.");
+            return;
+        };
+
+        self.status = String::from("Reloading Jira timeline...");
+        let request_id = self.next_request_id();
+        self.timeline.begin_load(request_id);
+        self.pending_timeline_refresh = true;
+        self.pending_effects.push(AppEffect::LoadTimeline {
             request_id,
             credentials,
         });

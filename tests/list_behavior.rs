@@ -49,6 +49,51 @@ fn list_tree_orders_orphans_before_epics_and_children_expand_with_space() {
 }
 
 #[test]
+fn selected_list_tree_chevron_uses_selected_color() {
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![
+        issue("KAN-1", "Catalog epic", "Epic", None),
+        issue("KAN-2", "Catalog story", "Story", Some("KAN-1")),
+    ]);
+    app.handle_key(ctrl('x'), &bindings);
+    app.handle_key(key('l'), &bindings);
+    let selected_fg = app.theme().selected_fg();
+    let mut terminal = Terminal::new(TestBackend::new(100, 12)).expect("test terminal");
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw list");
+
+    let buffer = terminal.backend().buffer();
+    let (key_x, key_y) = find_text(buffer, "KAN-1").expect("selected issue key rendered");
+    let chevron_x = (0..key_x)
+        .find(|x| matches!(buffer[(*x, key_y)].symbol(), "" | ">"))
+        .expect("selected epic has a tree chevron");
+    let chevron_cell = &buffer[(chevron_x, key_y)];
+    assert_eq!(chevron_cell.fg, selected_fg);
+}
+
+fn find_text(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+    let area = *buffer.area();
+    let needle_chars = needle.chars().collect::<Vec<_>>();
+    if needle_chars.is_empty() || needle_chars.len() > area.width as usize {
+        return None;
+    }
+    for y in 0..area.height {
+        for x in 0..=area.width - needle_chars.len() as u16 {
+            if needle_chars
+                .iter()
+                .enumerate()
+                .all(|(offset, ch)| buffer[(x + offset as u16, y)].symbol() == ch.to_string())
+            {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+#[test]
 fn slash_focuses_filter_and_captures_query_text() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(vec![
@@ -464,7 +509,7 @@ fn list_navigation_moves_selection_and_half_pages() {
 }
 
 #[test]
-fn only_ctrl_q_quits_app() {
+fn configured_quit_binding_quits_app() {
     let bindings = KeyBindings::default();
     let mut app = App::with_issues(Vec::new());
 
@@ -489,7 +534,7 @@ fn only_ctrl_q_quits_app() {
     );
     let mut configured_app = App::with_issues(Vec::new());
     configured_app.handle_key(key('q'), &configured_bindings);
-    assert!(configured_app.is_running());
+    assert!(!configured_app.is_running());
     let mut configured_ctrl_app = App::with_issues(Vec::new());
     configured_ctrl_app.handle_key(ctrl('q'), &configured_bindings);
     assert!(!configured_ctrl_app.is_running());

@@ -15,14 +15,16 @@ use crate::{
         },
     },
     config::JiraCredentials,
-    keymap::KeyBindings,
+    keymap::{HelpContext, KeyBindings},
     services::jira::{
         BoardData, CommandLogEntry, FieldSummary, IssueSummary, JiraError, ProjectSummary,
         UserSummary,
     },
     ui::theme::{Theme, ThemeChoice},
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::Rect;
 
 /// The tab titles in display order, derived from [`ApplicationTab`] so the enum
@@ -50,12 +52,11 @@ mod modal;
 mod mouse;
 mod setup;
 mod tab;
+pub(crate) mod ticket_dialog;
 mod timeline;
 
-pub use action::{Action, BoardAction, TimelineAction};
-pub use tab::ApplicationTab;
+pub use action::{Action, BoardAction, BoardTicketDirection, TicketDialogAction, TimelineAction};
 pub use board::{BoardGrouping, BoardState, board_issue_column};
-pub use timeline::TimelineState;
 pub(crate) use board::{
     board_assignee_value_matches, board_empty_cell_key, board_group_key, board_grouped_lanes,
     board_issue_matches_search, board_value_matches, normalize_board_user_fields,
@@ -65,8 +66,10 @@ pub use dropdown::QuickAction;
 use dropdown::{DropdownKind, Overlay};
 pub use effect::{AppEffect, AppEvent, JiraLoadPurpose, JiraProjectLoadResult};
 use modal::{DialogKind, ModalState};
-pub use setup::{CredentialField, CredentialForm, SetupAction};
 use setup::Spinner;
+pub use setup::{CredentialField, CredentialForm, SetupAction};
+pub use tab::ApplicationTab;
+pub use timeline::TimelineState;
 
 /// Which content the List screen is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +103,9 @@ pub struct App {
     board: BoardState,
     timeline: TimelineState,
     board_go_to_start_pending: bool,
+    board_move_highlight: Option<String>,
+    pending_board_move: Option<PendingBoardMove>,
+    board_move_session: Option<BoardMoveSession>,
     board_grouping: BoardGrouping,
     credentials: Option<JiraCredentials>,
     command_log: Vec<CommandLogEntry>,
@@ -118,6 +124,8 @@ pub struct App {
     active_load_request_id: Option<u64>,
     next_request_id: u64,
     pending_assignment_requests: std::collections::BTreeMap<String, u64>,
+    pending_status_requests: std::collections::BTreeMap<String, PendingStatusChange>,
+    pending_rank_requests: std::collections::BTreeMap<u64, PendingRankChange>,
     /// Whether the list is browsing the project tree or showing search results.
     view: ListView,
     /// Cursor for the next page of root issues while browsing; `None` when the
@@ -170,11 +178,51 @@ pub struct App {
     /// it fires. Reset on each keystroke so only a pause in typing triggers the
     /// server search; `None` when no search is pending.
     pending_search: Option<(String, std::time::Duration)>,
+    pending_timeline_refresh: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PendingBoardMove {
+    issue_key: String,
+    status: Option<String>,
+    status_id: Option<String>,
+    rank_before: Option<String>,
+    rank_after: Option<String>,
+    previous_status: String,
+    previous_status_id: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct BoardMoveSession {
+    original_board: BoardData,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PendingStatusChange {
+    request_id: u64,
+    previous_status: String,
+    previous_status_id: Option<String>,
+    original_board: Option<BoardData>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PendingRankChange {
+    original_board: BoardData,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self::setup("No Jira credentials found. Enter them to save config and load Jira issues.")
+    }
+}
+
+fn board_move_direction(action: BoardAction) -> Option<BoardTicketDirection> {
+    match action {
+        BoardAction::MoveLeft => Some(BoardTicketDirection::Left),
+        BoardAction::MoveRight => Some(BoardTicketDirection::Right),
+        BoardAction::MoveUp => Some(BoardTicketDirection::Up),
+        BoardAction::MoveDown => Some(BoardTicketDirection::Down),
+        _ => None,
     }
 }
 
@@ -194,6 +242,9 @@ impl App {
             board,
             timeline: TimelineState::default(),
             board_go_to_start_pending: false,
+            board_move_highlight: None,
+            pending_board_move: None,
+            board_move_session: None,
             board_grouping: BoardGrouping::None,
             board_filter: crate::FilterState::default(),
             credentials: None,
@@ -212,6 +263,8 @@ impl App {
             active_load_request_id: None,
             next_request_id: 1,
             pending_assignment_requests: std::collections::BTreeMap::new(),
+            pending_status_requests: std::collections::BTreeMap::new(),
+            pending_rank_requests: std::collections::BTreeMap::new(),
             view: ListView::Browse,
             next_root_page_token: None,
             pending_roots_request_id: None,
@@ -228,6 +281,7 @@ impl App {
             anim_clock: std::time::Duration::ZERO,
             awaiting_initial_load: false,
             pending_search: None,
+            pending_timeline_refresh: false,
         }
     }
 
@@ -299,9 +353,15 @@ impl App {
         app.filtered_tree.set_jira_site(credentials.site.clone());
         app.queue_jira_load(
             JiraLoadPurpose::Initial,
-            credentials,
+            credentials.clone(),
             crate::services::jira::ROOT_PAGE_SIZE,
         );
+        let request_id = app.next_request_id();
+        app.timeline.begin_load(request_id);
+        app.pending_effects.push(AppEffect::LoadTimeline {
+            request_id,
+            credentials,
+        });
         app
     }
 
@@ -311,8 +371,18 @@ impl App {
 
     pub fn help_selected(&self) -> usize {
         match &self.modal {
-            Some(ModalState::Help { selected }) => *selected,
+            Some(ModalState::Help { selected, .. }) => *selected,
             _ => 0,
+        }
+    }
+
+    pub fn help_context(&self) -> HelpContext {
+        match &self.modal {
+            Some(ModalState::Help { context, .. }) => *context,
+            _ if self.is_any_dropdown_open() => HelpContext::Dropdown,
+            _ if self.is_command_log_open() => HelpContext::CommandLog,
+            _ if self.is_ticket_dialog_open() => HelpContext::TicketDialog,
+            _ => HelpContext::Normal,
         }
     }
 
@@ -385,6 +455,152 @@ impl App {
             || self.timeline.is_animating()
             || self.pending_search.is_some()
             || self.is_loading()
+    }
+
+    pub fn is_board_ticket_moving(&self, issue_key: &str) -> bool {
+        self.board_move_highlight.as_deref() == Some(issue_key)
+    }
+
+    pub fn is_board_move_mode(&self) -> bool {
+        self.board_move_session.is_some()
+    }
+
+    pub(crate) fn highlight_selected_board_ticket_move(&mut self) {
+        self.board_move_highlight = self.selected_board_issue_key().map(str::to_owned);
+    }
+
+    pub(crate) fn clear_board_ticket_move_highlight(&mut self) {
+        self.board_move_highlight = None;
+    }
+
+    fn start_board_ticket_move_mode(&mut self) {
+        let Some(original_board) = self.board.data().cloned() else {
+            self.status = String::from("No board ticket selected.");
+            return;
+        };
+        let Some(issue_key) = self.selected_board_issue_key().map(str::to_owned) else {
+            self.status = String::from("No board ticket selected.");
+            return;
+        };
+        self.board_move_session = Some(BoardMoveSession { original_board });
+        self.pending_board_move = None;
+        self.board_move_highlight = Some(issue_key);
+    }
+
+    pub(crate) fn cancel_board_ticket_move_mode(&mut self) {
+        if let Some(session) = self.board_move_session.take() {
+            self.board.set_data(session.original_board);
+        }
+        self.pending_board_move = None;
+        self.clear_board_ticket_move_highlight();
+    }
+
+    fn toggle_board_ticket_move_mode(&mut self) {
+        if self.board_move_session.is_some() {
+            self.commit_board_ticket_move();
+        } else {
+            self.start_board_ticket_move_mode();
+        }
+    }
+
+    pub(crate) fn commit_board_ticket_move(&mut self) {
+        let original_board = self
+            .board_move_session
+            .take()
+            .map(|session| session.original_board);
+        self.clear_board_ticket_move_highlight();
+        let Some(move_state) = self.pending_board_move.take() else {
+            return;
+        };
+        let Some(status) = move_state.status else {
+            if let Some(original_board) = original_board {
+                self.queue_board_ticket_rank(
+                    move_state.issue_key,
+                    move_state.rank_before,
+                    move_state.rank_after,
+                    original_board,
+                );
+            }
+            return;
+        };
+        let Some(credentials) = self.credentials.clone() else {
+            if let Some(original_board) = original_board {
+                self.board.set_data(original_board);
+            } else {
+                self.board.update_status(
+                    move_state.issue_key.as_str(),
+                    move_state.previous_status.clone(),
+                    move_state.previous_status_id.clone(),
+                );
+            }
+            self.notifications.push(Notification::error(
+                "Status not updated",
+                "No Jira credentials available for status update.",
+            ));
+            return;
+        };
+        let request_id = self.next_request_id();
+        self.status = format!("Updating {} status to {status}.", move_state.issue_key);
+        self.filtered_tree.update_status(
+            move_state.issue_key.as_str(),
+            status.clone(),
+            move_state.status_id.clone(),
+        );
+        self.pending_status_requests.insert(
+            move_state.issue_key.clone(),
+            PendingStatusChange {
+                request_id,
+                previous_status: move_state.previous_status,
+                previous_status_id: move_state.previous_status_id,
+                original_board: original_board.clone(),
+            },
+        );
+        self.pending_effects.push(AppEffect::TransitionIssueStatus {
+            request_id,
+            issue_key: move_state.issue_key.clone(),
+            status,
+            status_id: move_state.status_id,
+            credentials,
+        });
+        if let Some(original_board) = original_board
+            && (move_state.rank_before.is_some() || move_state.rank_after.is_some())
+        {
+            self.queue_board_ticket_rank(
+                move_state.issue_key,
+                move_state.rank_before,
+                move_state.rank_after,
+                original_board,
+            );
+        }
+    }
+
+    fn queue_board_ticket_rank(
+        &mut self,
+        issue_key: String,
+        rank_before: Option<String>,
+        rank_after: Option<String>,
+        original_board: BoardData,
+    ) {
+        let Some(credentials) = self.credentials.clone() else {
+            self.board.set_data(original_board);
+            self.notifications.push(Notification::error(
+                "Ticket not reordered",
+                "No Jira credentials available for rank update.",
+            ));
+            return;
+        };
+        let request_id = self.next_request_id();
+        self.status = format!("Updating {issue_key} rank.");
+        self.pending_rank_requests.clear();
+        self.pending_rank_requests
+            .insert(request_id, PendingRankChange { original_board });
+        self.pending_effects.push(AppEffect::RankIssue {
+            request_id,
+            issue_key,
+            rank_before,
+            rank_after,
+            credentials,
+        });
     }
 
     pub fn take_effects(&mut self) -> Vec<AppEffect> {
@@ -485,6 +701,22 @@ impl App {
         &self.board_filter
     }
 
+    pub fn timeline_filter(&self) -> &str {
+        self.timeline.filter()
+    }
+
+    pub fn timeline_filter_cursor(&self) -> usize {
+        self.timeline.filter_cursor()
+    }
+
+    pub fn timeline_filter_state(&self) -> &crate::FilterState {
+        self.timeline.filter_state()
+    }
+
+    pub fn is_timeline_filter_focused(&self) -> bool {
+        self.timeline.is_filter_focused()
+    }
+
     pub fn is_board_filter_focused(&self) -> bool {
         self.board_filter.is_focused()
     }
@@ -568,7 +800,9 @@ impl App {
     }
 
     fn overlay_filter_focused(&self) -> bool {
-        self.overlay.as_ref().is_some_and(Overlay::is_filter_focused)
+        self.overlay
+            .as_ref()
+            .is_some_and(Overlay::is_filter_focused)
     }
 
     pub fn is_assignee_dropdown_filter_focused(&self) -> bool {
@@ -691,11 +925,34 @@ impl App {
             }
             Action::Board(action) => {
                 self.board_go_to_start_pending = false;
+                if let Some(direction) = board_move_direction(action)
+                    && self.is_board_move_mode()
+                {
+                    self.move_board_ticket(direction);
+                    return;
+                }
                 let search = self.board_filter.value().to_owned();
                 self.board.dispatch(action, &search, self.board_grouping);
             }
+            Action::MoveBoardTicket(direction) => {
+                if self.is_board_move_mode() {
+                    self.move_board_ticket(direction);
+                }
+            }
+            Action::ToggleBoardTicketMoveMode => self.toggle_board_ticket_move_mode(),
+            Action::PlaceBoardTicketMoveMode => {
+                if self.is_board_move_mode() {
+                    self.commit_board_ticket_move();
+                } else {
+                    self.open_selected_ticket_dialog();
+                }
+            }
             Action::FocusBoardFilter => self.board_filter.focus(),
             Action::ClearBoardFilter => {
+                if self.is_board_move_mode() {
+                    self.cancel_board_ticket_move_mode();
+                    return;
+                }
                 if !self.board_filter.value().is_empty() {
                     self.board_filter.clear();
                     self.board.select_first("", self.board_grouping);
@@ -703,11 +960,14 @@ impl App {
             }
             Action::ReloadList => self.reload_list(),
             Action::ReloadBoard => self.reload_board(),
-            Action::ReloadNode => self.reload_node(),
+            Action::ReloadTimeline => self.reload_timeline(),
             Action::Leader => self.leader_pending = true,
             Action::ToggleCommandLog => self.toggle_dialog(DialogKind::CommandLog),
             Action::ToggleSprintDetails => self.toggle_dialog(DialogKind::SprintDetails),
             Action::CloseSprintDetails => self.close_dialog(DialogKind::SprintDetails),
+            Action::OpenTicketDialog => self.open_selected_ticket_dialog(),
+            Action::CloseTicketDialog => self.close_dialog(DialogKind::Ticket),
+            Action::TicketDialog(action) => self.dispatch_ticket_dialog(action),
             Action::ToggleQuickSwitcher => self.toggle_dropdown(DropdownKind::QuickSwitcher),
             Action::ToggleProjectDropdown => self.toggle_dropdown(DropdownKind::ProjectSwitcher),
             Action::ToggleThemeDropdown => self.toggle_dropdown(DropdownKind::ThemePicker),
@@ -738,6 +998,74 @@ impl App {
         }
     }
 
+    fn move_board_ticket(&mut self, direction: BoardTicketDirection) {
+        let search = self.board_filter.value().to_owned();
+        let Some(move_result) =
+            self.board
+                .move_selected_ticket(direction, &search, self.board_grouping)
+        else {
+            return;
+        };
+
+        match move_result {
+            board::BoardTicketMove::Reordered {
+                issue_key,
+                rank_before,
+                rank_after,
+            } => {
+                self.board_move_highlight = Some(issue_key.clone());
+                let previous = self.pending_board_move.take();
+                self.pending_board_move = Some(PendingBoardMove {
+                    issue_key,
+                    status: previous.as_ref().and_then(|pending| pending.status.clone()),
+                    status_id: previous
+                        .as_ref()
+                        .and_then(|pending| pending.status_id.clone()),
+                    rank_before,
+                    rank_after,
+                    previous_status: previous
+                        .as_ref()
+                        .map(|pending| pending.previous_status.clone())
+                        .unwrap_or_default(),
+                    previous_status_id: previous
+                        .as_ref()
+                        .and_then(|pending| pending.previous_status_id.clone()),
+                });
+            }
+            board::BoardTicketMove::StatusChanged {
+                issue_key,
+                status,
+                status_id,
+                previous_status,
+                previous_status_id,
+            } => {
+                self.board_move_highlight = Some(issue_key.clone());
+                let previous = self.pending_board_move.take();
+                let previous_status = previous
+                    .as_ref()
+                    .map(|pending| pending.previous_status.clone())
+                    .unwrap_or(previous_status);
+                let previous_status_id = match &previous {
+                    Some(pending) => pending.previous_status_id.clone(),
+                    None => previous_status_id,
+                };
+                self.pending_board_move = Some(PendingBoardMove {
+                    issue_key,
+                    status: Some(status),
+                    status_id,
+                    rank_before: previous
+                        .as_ref()
+                        .and_then(|pending| pending.rank_before.clone()),
+                    rank_after: previous
+                        .as_ref()
+                        .and_then(|pending| pending.rank_after.clone()),
+                    previous_status,
+                    previous_status_id,
+                });
+            }
+        }
+    }
+
     pub fn dispatch_filter(&mut self, action: FilterAction) {
         if let Some(event) = self.filtered_tree.dispatch_filter(action) {
             self.handle_jira_filtered_tree_event(event);
@@ -745,7 +1073,11 @@ impl App {
     }
 
     fn dispatch_tabs(&mut self, action: TabAction) {
+        let was_board = self.active_tab() == ApplicationTab::Board;
         self.tabs.dispatch(action, &app_tabs());
+        if was_board && self.active_tab() != ApplicationTab::Board {
+            self.cancel_board_ticket_move_mode();
+        }
         self.filtered_tree.clear_transient_input();
         self.close_overlays();
         self.ensure_timeline_loaded();
@@ -801,7 +1133,11 @@ impl App {
         self.modal = Some(match dialog {
             DialogKind::CommandLog => ModalState::CommandLog,
             DialogKind::SprintDetails => ModalState::SprintDetails,
-            DialogKind::Help => ModalState::Help { selected: 0 },
+            DialogKind::Help => ModalState::Help {
+                selected: 0,
+                context: self.help_context(),
+            },
+            DialogKind::Ticket => return,
         });
         if matches!(dialog, DialogKind::CommandLog) {
             // Open scrolled to the latest entry at the bottom.
@@ -866,6 +1202,15 @@ impl App {
     fn dispatch_timeline(&mut self, action: TimelineAction) {
         match action {
             TimelineAction::Tree(action) => self.timeline.dispatch_tree(action),
+            TimelineAction::FocusFilter => self.timeline.focus_filter(),
+            TimelineAction::ClearFilter => self.timeline.clear_filter(),
+            TimelineAction::Filter(action) => {
+                if action == FilterAction::Quit {
+                    self.running = false;
+                } else {
+                    self.timeline.dispatch_filter(action);
+                }
+            }
             TimelineAction::ScrollLeft => self.timeline.scroll_h(-TIMELINE_SCROLL_STEP),
             TimelineAction::ScrollRight => self.timeline.scroll_h(TIMELINE_SCROLL_STEP),
         }
@@ -886,11 +1231,10 @@ impl App {
         };
         let request_id = self.next_request_id();
         self.timeline.begin_load(request_id);
-        self.pending_effects
-            .push(AppEffect::LoadTimeline {
-                request_id,
-                credentials,
-            });
+        self.pending_effects.push(AppEffect::LoadTimeline {
+            request_id,
+            credentials,
+        });
     }
 }
 

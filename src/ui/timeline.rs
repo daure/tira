@@ -11,7 +11,13 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     App, KeyBindings,
     app::TimelineState,
-    components::{generic::tree::TreeRow, jira::work_item_key},
+    components::{
+        generic::{
+            filter,
+            tree::{TreeRow, TreeState},
+        },
+        jira::work_item_key,
+    },
     domain::{
         date::{civil_from_days, days_from_civil, next_month, today_days},
         models::{SprintState, TimelineEpicStats, TimelineSprint},
@@ -29,15 +35,20 @@ use crate::{
 const HEADER_ROWS: u16 = 2;
 /// Width of the right-aligned epic completion-percentage column.
 const PCT_COL_WIDTH: usize = 4;
+/// Space between the epic percentage column and the timeline canvas.
+const PCT_TRAILING_GAP: usize = 1;
 /// Rolling axis window: how far back and forward from today it spans.
-const WINDOW_BACK_DAYS: i64 = 365;
-const WINDOW_FWD_DAYS: i64 = 180;
+const WINDOW_BACK_DAYS: i64 = 180;
+const WINDOW_FWD_DAYS: i64 = 365;
 /// Floor on cells-per-day so sprint pills stay legible; above this the axis
 /// stretches to fill the viewport.
 const MIN_PX_PER_DAY: f64 = 1.0;
-/// Glyphs for the today marker: a triangle at the top, a line down the rest.
-const TODAY_TRIANGLE: char = '▼';
+/// Glyph for the today marker.
 const TODAY_LINE: char = '┊';
+const POWERLINE_ROUND_LEFT: char = '\u{e0b6}';
+const POWERLINE_ROUND_RIGHT: char = '\u{e0b4}';
+const POWERLINE_ARROW_RIGHT: char = '\u{e0b0}';
+const TIMELINE_BAR: char = '━';
 const NERD_COLLAPSED_ICON: &str = "\u{f460}";
 const NERD_EXPANDED_ICON: &str = "\u{f47c}";
 
@@ -95,7 +106,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .areas(area);
-    render_toolbar(frame, toolbar_area, keybindings, theme);
+    render_toolbar(frame, toolbar_area, app, keybindings, theme);
 
     let state = app.timeline();
     let Some(data) = state.data() else {
@@ -109,6 +120,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
 
     let tree = state.tree();
     let rows = tree.rows();
+    if rows.is_empty() {
+        render_message(
+            frame,
+            content_area,
+            theme,
+            "No timeline items match the search.",
+        );
+        return;
+    }
     let label_width = (content_area.width / 2).clamp(28, 52);
     let [label_area, grid_area] = Layout::default()
         .direction(Direction::Horizontal)
@@ -130,12 +150,18 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
     let body_height = grid_area
         .height
         .saturating_sub(HEADER_ROWS + u16::from(scrolls_h)) as usize;
+    let range = tree.visible_range(body_height);
+    let item_spans = state.item_spans();
+    let epic_stats = state.epic_stats();
+
+    let selected_span = selected_timeline_span(&rows, tree, item_spans);
+    let selected_range = selected_span.and_then(|span| axis_range(&axis, span));
     let h_offset = state.resolve_h_offset(
         grid_main_width,
         axis.width.min(u16::MAX as usize) as u16,
         today_x,
+        selected_range,
     );
-    let range = tree.visible_range(body_height);
 
     render_label_header(frame, label_area, theme);
     render_grid_header(
@@ -144,14 +170,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         grid_main_width,
         &axis,
         &data.sprints,
+        selected_span,
         today_x,
         h_offset,
         theme,
     );
-
-    let sprint_dates = state.sprint_dates();
-    let item_sprints = state.item_sprints();
-    let epic_stats = state.epic_stats();
 
     let body_y = grid_area.y + HEADER_ROWS;
     let mut label_lines = Vec::new();
@@ -163,14 +186,26 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         let item = &tree.items()[row.item_index];
         let selected = row_index == tree.selected_row();
         let stats = epic_stats.get(item.id.as_str()).copied();
-        label_lines.push(label_line(theme, row, item, label_width as usize, stats, selected));
+        label_lines.push(label_line(
+            theme,
+            row,
+            item,
+            label_width as usize,
+            stats,
+            selected,
+            state.filter(),
+        ));
 
-        let ids = item_sprints
-            .get(item.id.as_str())
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
         let is_epic = item.kind == "Epic";
-        let cells = bar_row(&axis, is_epic, &item.kind, ids, today_x, sprint_dates, theme);
+        let cells = bar_row(
+            &axis,
+            is_epic,
+            &item.kind,
+            item_spans.get(item.id.as_str()).copied(),
+            selected,
+            today_x,
+            theme,
+        );
         let mut line = slice_line(&cells, h_offset, grid_main_width);
         if selected {
             line = line.style(Style::default().bg(theme.selected_bg()));
@@ -222,22 +257,44 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
     }
 }
 
-fn render_toolbar(frame: &mut Frame<'_>, area: Rect, keybindings: &KeyBindings, theme: &Theme) {
-    let [title_area, hint_area] = Layout::default()
+fn render_toolbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    keybindings: &KeyBindings,
+    theme: &Theme,
+) {
+    let [filter_area, _spacer_area, hint_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
+            Constraint::Length(24),
             Constraint::Min(1),
             Constraint::Length(keybindings.shortcuts_hint_width()),
         ])
         .areas(area);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            " Timeline — epics scheduled by sprint",
-            Style::default().fg(theme.muted_fg()),
-        ))),
-        title_area,
-    );
+    render_filter(frame, filter_area, app);
     frame.render_widget(chrome::shortcuts_hint(keybindings, theme), hint_area);
+}
+
+fn render_filter(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let [icon_area, text_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .areas(area);
+
+    frame.render_widget(
+        filter::render_icon(app.timeline_filter_state(), app.theme()),
+        icon_area,
+    );
+    frame.render_widget(
+        filter::render_text(app.timeline_filter_state(), app.theme()),
+        text_area,
+    );
+
+    if app.is_timeline_filter_focused() {
+        let cursor_x = text_area.x + app.timeline_filter_cursor() as u16;
+        frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, text_area.y));
+    }
 }
 
 fn render_message(frame: &mut Frame<'_>, area: Rect, theme: &Theme, message: &str) {
@@ -261,17 +318,20 @@ fn empty_message(state: &TimelineState) -> &'static str {
 }
 
 fn render_label_header(frame: &mut Frame<'_>, label_area: Rect, theme: &Theme) {
+    let area = Rect {
+        x: label_area.x.saturating_add(2),
+        width: label_area.width.saturating_sub(2),
+        height: 1,
+        ..label_area
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "Epic / progress",
+            "Work",
             Style::default()
                 .fg(theme.subtle_fg())
                 .add_modifier(Modifier::BOLD),
         ))),
-        Rect {
-            height: 1,
-            ..label_area
-        },
+        area,
     );
 }
 
@@ -282,16 +342,15 @@ fn render_grid_header(
     grid_main_width: u16,
     axis: &Axis,
     sprints: &[TimelineSprint],
+    selected_span: Option<(i64, i64)>,
     today_x: i32,
     h_offset: u16,
     theme: &Theme,
 ) {
-    let mut month = month_row(axis, theme);
-    let mut sprint = sprint_row(axis, sprints, theme);
-    // The today marker is a full-height line: a triangle caps it on the top
-    // header row, a thin line runs down the rest but only through blank cells,
-    // so it never overwrites a pill or bar.
-    overlay_today_triangle(&mut month, today_x, theme);
+    let month = month_row(axis, selected_span, theme);
+    let mut sprint = sprint_row(axis, sprints, selected_span, theme);
+    // The today marker is a thin line through blank cells, so it never
+    // overwrites a month label, sprint pill, or range bar.
     overlay_today_line(&mut sprint, today_x, theme);
     for (index, cells) in [month, sprint].iter().enumerate() {
         frame.render_widget(
@@ -306,26 +365,18 @@ fn render_grid_header(
     }
 }
 
-fn overlay_today_triangle(cells: &mut [GridCell], today_x: i32, theme: &Theme) {
-    if today_x >= 0 && (today_x as usize) < cells.len() {
-        put_cell(
-            cells,
-            today_x as usize,
-            TODAY_TRIANGLE,
-            Style::default()
-                .fg(theme.warning_fg())
-                .add_modifier(Modifier::BOLD),
-        );
-    }
-}
-
 fn overlay_today_line(cells: &mut [GridCell], today_x: i32, theme: &Theme) {
     if today_x < 0 {
         return;
     }
     let x = today_x as usize;
     if cells.get(x).is_some_and(|cell| cell.ch == ' ') {
-        put_cell(cells, x, TODAY_LINE, Style::default().fg(theme.warning_fg()));
+        put_cell(
+            cells,
+            x,
+            TODAY_LINE,
+            Style::default().fg(theme.warning_fg()),
+        );
     }
 }
 
@@ -344,7 +395,7 @@ const MONTHS: [&str; 12] = [
     "December",
 ];
 
-fn month_row(axis: &Axis, theme: &Theme) -> Vec<GridCell> {
+fn month_row(axis: &Axis, selected_span: Option<(i64, i64)>, theme: &Theme) -> Vec<GridCell> {
     let mut cells = blank_row(axis.width);
     let (mut year, mut month, _) = civil_from_days(axis.start_day);
     loop {
@@ -367,15 +418,20 @@ fn month_row(axis: &Axis, theme: &Theme) -> Vec<GridCell> {
             } else {
                 MONTHS[(month - 1) as usize].to_owned()
             };
-            let label = truncate_with_ellipsis(&label, span.saturating_sub(1));
-            let start = x0 + span.saturating_sub(label.chars().count()) / 2;
-            put_str(
+            let color = if overlaps_selected(selected_span, month_start, month_end) {
+                theme.success_fg()
+            } else {
+                theme.subtle_fg()
+            };
+            put_span_pill(
                 &mut cells,
-                start,
+                x0,
+                span,
                 &label,
-                Style::default()
-                    .fg(theme.accent_fg())
-                    .add_modifier(Modifier::BOLD),
+                color,
+                (POWERLINE_ROUND_LEFT, POWERLINE_ROUND_RIGHT),
+                false,
+                theme,
             );
         }
         year = next_year;
@@ -384,7 +440,12 @@ fn month_row(axis: &Axis, theme: &Theme) -> Vec<GridCell> {
     cells
 }
 
-fn sprint_row(axis: &Axis, sprints: &[TimelineSprint], theme: &Theme) -> Vec<GridCell> {
+fn sprint_row(
+    axis: &Axis,
+    sprints: &[TimelineSprint],
+    selected_span: Option<(i64, i64)>,
+    theme: &Theme,
+) -> Vec<GridCell> {
     let mut cells = blank_row(axis.width);
     for sprint in sprints {
         let (Some(start), Some(end)) = (sprint.start_day, sprint.end_day) else {
@@ -399,27 +460,98 @@ fn sprint_row(axis: &Axis, sprints: &[TimelineSprint], theme: &Theme) -> Vec<Gri
         if span < 2 {
             continue;
         }
-        let style = Style::default().fg(sprint_color(sprint.state, theme));
+        let color = if overlaps_selected(selected_span, start, end) {
+            darker(theme.success_fg())
+        } else {
+            sprint_color(sprint.state, theme)
+        };
         let label = sprint.short_label();
         if span >= label.chars().count() + 2 {
-            put_cell(&mut cells, x0, '(', style);
-            put_cell(&mut cells, x1 - 1, ')', style);
-            let start = x0 + (span - label.chars().count()) / 2;
-            put_str(&mut cells, start, &label, style);
+            put_span_pill(
+                &mut cells,
+                x0,
+                span,
+                &label,
+                color,
+                (' ', POWERLINE_ARROW_RIGHT),
+                true,
+                theme,
+            );
         } else {
             let clipped = truncate_with_ellipsis(&label, span);
-            put_str(&mut cells, x0, &clipped, style);
+            put_str(&mut cells, x0, &clipped, Style::default().fg(color));
         }
     }
     cells
 }
 
+fn put_span_pill(
+    cells: &mut [GridCell],
+    x: usize,
+    width: usize,
+    label: &str,
+    color: Color,
+    caps: (char, char),
+    fill_left_cap: bool,
+    theme: &Theme,
+) {
+    if width < 3 {
+        return;
+    }
+    let label = truncate_with_ellipsis(label, width.saturating_sub(2));
+    let label_width = label.chars().count();
+    let cap_style = Style::default().fg(color);
+    let fill_style = Style::default().fg(theme.highlight_fg()).bg(color);
+    let left_cap_style = if fill_left_cap { fill_style } else { cap_style };
+    put_cell(cells, x, caps.0, left_cap_style);
+    for fill_x in x + 1..x + width - 1 {
+        put_cell(cells, fill_x, ' ', fill_style);
+    }
+    let label_start = x + 1 + width.saturating_sub(2 + label_width) / 2;
+    put_str(cells, label_start, &label, fill_style);
+    put_cell(cells, x + width - 1, caps.1, cap_style);
+}
+
+fn darker(color: Color) -> Color {
+    match color {
+        Color::Rgb(red, green, blue) => Color::Rgb(red / 2, green / 2, blue / 2),
+        other => other,
+    }
+}
+
 fn sprint_color(state: SprintState, theme: &Theme) -> Color {
     match state {
-        SprintState::Active => theme.success_fg(),
+        SprintState::Active => theme.muted_fg(),
         SprintState::Closed => theme.muted_fg(),
-        SprintState::Future => theme.subtle_fg(),
+        SprintState::Future => theme.muted_fg(),
     }
+}
+
+fn selected_timeline_span(
+    rows: &[TreeRow],
+    tree: &TreeState,
+    item_spans: &BTreeMap<String, (i64, i64)>,
+) -> Option<(i64, i64)> {
+    let row = rows.get(tree.selected_row())?;
+    let item = &tree.items()[row.item_index];
+    item_spans.get(item.id.as_str()).copied()
+}
+
+fn axis_range(axis: &Axis, (start, end): (i64, i64)) -> Option<(u16, u16)> {
+    if axis.x(end) < 0 || axis.x(start) > axis.width as i32 {
+        return None;
+    }
+    let x0 = axis.clamp_x(axis.x(start));
+    let x1 = axis.clamp_x(axis.x(end)).max(x0 + 1);
+    Some((
+        x0.min(u16::MAX as usize) as u16,
+        x1.min(u16::MAX as usize) as u16,
+    ))
+}
+
+fn overlaps_selected(selected_span: Option<(i64, i64)>, start: i64, end: i64) -> bool {
+    selected_span
+        .is_some_and(|(selected_start, selected_end)| start < selected_end && end > selected_start)
 }
 
 /// Builds one body row's canvas: the today line, then the row's bar drawn over
@@ -428,15 +560,15 @@ fn bar_row(
     axis: &Axis,
     is_epic: bool,
     kind: &str,
-    sprint_ids: &[i64],
+    span: Option<(i64, i64)>,
+    is_selected: bool,
     today_x: i32,
-    sprint_dates: &BTreeMap<i64, (i64, i64)>,
     theme: &Theme,
 ) -> Vec<GridCell> {
     let mut cells = blank_row(axis.width);
     overlay_today_line(&mut cells, today_x, theme);
 
-    let Some((start, end)) = span_of(sprint_ids, sprint_dates) else {
+    let Some((start, end)) = span else {
         return cells;
     };
     // An epic whose sprints fall entirely outside the visible window would
@@ -446,28 +578,30 @@ fn bar_row(
     }
     let x0 = axis.clamp_x(axis.x(start));
     let x1 = axis.clamp_x(axis.x(end)).max(x0 + 1);
-    // Colour the bar by the work item's type (epics in the epic colour), which
-    // is distinct from the accent-coloured scrollbar so they never blend at the
-    // right edge.
-    let glyph = if is_epic { '█' } else { '▓' };
-    let style = Style::default().fg(theme.issue_type_fg(kind));
-    for cell in cells.iter_mut().take(x1).skip(x0) {
-        *cell = GridCell { ch: glyph, style };
+    // Colour the range by the work item's type (epics in the epic colour),
+    // while using centered timeline glyphs so adjacent rows do not visually merge.
+    let color = if is_selected {
+        theme.success_fg()
+    } else if !is_epic {
+        theme.accent_fg()
+    } else {
+        theme.issue_type_fg(kind)
+    };
+    let style = Style::default().fg(color);
+    let span = x1.saturating_sub(x0);
+    if span <= 1 {
+        put_cell(&mut cells, x0, '●', style);
+    } else {
+        put_cell(&mut cells, x0, '●', style);
+        for cell in cells.iter_mut().take(x1 - 1).skip(x0 + 1) {
+            *cell = GridCell {
+                ch: TIMELINE_BAR,
+                style,
+            };
+        }
+        put_cell(&mut cells, x1 - 1, '●', style);
     }
     cells
-}
-
-fn span_of(ids: &[i64], sprint_dates: &BTreeMap<i64, (i64, i64)>) -> Option<(i64, i64)> {
-    let mut span: Option<(i64, i64)> = None;
-    for id in ids {
-        if let Some(&(start, end)) = sprint_dates.get(id) {
-            span = Some(match span {
-                Some((s, e)) => (s.min(start), e.max(end)),
-                None => (start, end),
-            });
-        }
-    }
-    span
 }
 
 fn label_line(
@@ -477,25 +611,38 @@ fn label_line(
     label_width: usize,
     stats: Option<TimelineEpicStats>,
     is_selected: bool,
+    filter: &str,
 ) -> Line<'static> {
     let is_epic = item.kind == "Epic";
     let indent = "  ".repeat(row.depth);
     let chevron = chevron(row);
     let icon = work_item_key::icon(&item.kind);
 
+    let percent_width = PCT_COL_WIDTH + PCT_TRAILING_GAP;
     let prefix_width =
         indent.width() + chevron.width() + 1 + icon.width() + 1 + item.id.width() + 1;
     let summary_budget = label_width
-        .saturating_sub(1 + PCT_COL_WIDTH)
+        .saturating_sub(1 + percent_width)
         .saturating_sub(prefix_width)
         .max(1);
     let summary = truncate_with_ellipsis(&item.label, summary_budget);
     let content_width = prefix_width + summary.width();
     let pad = label_width
         .saturating_sub(PCT_COL_WIDTH)
+        .saturating_sub(PCT_TRAILING_GAP)
         .saturating_sub(content_width);
 
-    let summary_style = if is_epic {
+    let base_style = style::selected_row_style(theme, is_selected);
+    let chevron_style = if is_selected {
+        base_style
+    } else {
+        Style::default().fg(theme.border_fg())
+    };
+    let icon_style = base_style.fg(theme.issue_type_fg(&item.kind));
+    let key_style = base_style.fg(theme.key_fg());
+    let summary_style = if is_selected {
+        base_style
+    } else if is_epic {
         Style::default().fg(theme.selected_alt_fg())
     } else {
         Style::default().fg(theme.muted_fg())
@@ -508,19 +655,27 @@ fn label_line(
         .filter(|_| is_epic)
         .map_or_else(Style::default, |stats| percent_style(stats, theme));
 
-    let spans = vec![
-        Span::raw(indent),
-        Span::styled(chevron, Style::default().fg(theme.border_fg())),
-        Span::raw(" "),
-        Span::styled(icon, Style::default().fg(theme.issue_type_fg(&item.kind))),
-        Span::raw(" "),
-        Span::styled(item.id.clone(), Style::default().fg(theme.key_fg())),
-        Span::raw(" "),
-        Span::styled(summary, summary_style),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(percent_cell, percent_style),
+    let mut spans = vec![
+        Span::styled(indent, base_style),
+        Span::styled(chevron, chevron_style),
+        Span::styled(" ", base_style),
+        Span::styled(icon, icon_style),
+        Span::styled(" ", base_style),
     ];
-    Line::from(spans).style(style::selected_row_style(theme, is_selected))
+    spans.extend(style::highlighted_spans_owned(
+        theme, &item.id, filter, key_style,
+    ));
+    spans.push(Span::styled(" ", base_style));
+    spans.extend(style::highlighted_spans_owned(
+        theme,
+        &summary,
+        filter,
+        summary_style,
+    ));
+    spans.push(Span::styled(" ".repeat(pad), base_style));
+    spans.push(Span::styled(percent_cell, percent_style));
+    spans.push(Span::styled(" ".repeat(PCT_TRAILING_GAP), Style::default()));
+    Line::from(spans)
 }
 
 fn chevron(row: &TreeRow) -> &'static str {
@@ -550,12 +705,17 @@ fn percent_text(stats: TimelineEpicStats) -> String {
 }
 
 fn percent_style(stats: TimelineEpicStats, theme: &Theme) -> Style {
-    let color = if stats.total() == 0 || stats.done == 0 {
+    let percent = stats.percent_done();
+    let color = if stats.total() == 0 || percent == 0 {
         theme.muted_fg()
-    } else if stats.percent_done() >= 100 {
-        theme.success_fg()
-    } else {
+    } else if percent <= 33 {
+        theme.warning_fg()
+    } else if percent <= 66 {
         theme.accent_fg()
+    } else if percent < 100 {
+        theme.key_fg()
+    } else {
+        theme.success_fg()
     };
     Style::default().fg(color)
 }

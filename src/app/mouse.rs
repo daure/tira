@@ -9,10 +9,10 @@ impl App {
                 _ => None,
             };
             if let Some(delta) = scroll_delta {
-                let items = keybindings.help_items(
+                let items = keybindings.help_items_for_context(
                     self.screen(),
                     self.active_tab().title(),
-                    self.is_any_dropdown_open(),
+                    self.help_context(),
                 );
                 self.move_help_selection(delta, items.len());
             }
@@ -174,7 +174,8 @@ impl App {
             self.timeline.scroll_viewport(delta, viewport_height);
         }
         if let Some(delta) = horizontal_delta {
-            self.timeline.scroll_h(delta as i32 * TIMELINE_WHEEL_SCROLL_STEP);
+            self.timeline
+                .scroll_h(delta as i32 * TIMELINE_WHEEL_SCROLL_STEP);
         }
     }
 

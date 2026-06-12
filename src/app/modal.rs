@@ -12,7 +12,10 @@ pub(crate) enum DialogKind {
     CommandLog,
     Help,
     SprintDetails,
+    Ticket,
 }
+
+use crate::keymap::HelpContext;
 
 /// The currently-open modal together with its own view state. Stored as
 /// `Option<ModalState>` on `App`; `None` means no modal is open.
@@ -20,7 +23,11 @@ pub(crate) enum DialogKind {
 pub(crate) enum ModalState {
     CommandLog,
     SprintDetails,
-    Help { selected: usize },
+    Help {
+        selected: usize,
+        context: HelpContext,
+    },
+    Ticket(crate::app::ticket_dialog::TicketDialogState),
 }
 
 impl ModalState {
@@ -30,6 +37,7 @@ impl ModalState {
             ModalState::CommandLog => DialogKind::CommandLog,
             ModalState::SprintDetails => DialogKind::SprintDetails,
             ModalState::Help { .. } => DialogKind::Help,
+            ModalState::Ticket(_) => DialogKind::Ticket,
         }
     }
 }

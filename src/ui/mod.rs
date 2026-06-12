@@ -20,20 +20,25 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
 };
 
-use crate::{App, ApplicationTab, KeyBindings, Screen, components::jira::issue_list};
+use crate::{
+    App, ApplicationTab, KeyBindings, Screen,
+    components::jira::{issue_list, ticket_dialog},
+};
 
 pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
-    // At launch with stored credentials, show only the animated splash logo
-    // (no tabs, no footer) until the initial Jira load resolves.
-    if app.is_loading_splash() {
-        logo::render(frame, frame.area(), app.anim_elapsed(), app.theme());
-        return;
-    }
-
     let [frame_area, status_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .areas(frame.area());
+
+    if app.is_loading_splash() {
+        logo::render(frame, frame_area, app.anim_elapsed(), app.theme());
+        frame.render_widget(
+            chrome::status_bar(app, keybindings, status_area.width),
+            status_area,
+        );
+        return;
+    }
 
     let outer = chrome::tabbed_frame(app.active_tab_index(), app.tabs_view_mode(), app.theme());
     let inner = outer.inner(frame_area);
@@ -59,6 +64,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, keybindings: &KeyBindings) {
     }
     if app.is_sprint_details_open() {
         overlays::render_sprint_details_dialog(frame, inner, app);
+    }
+    if let Some(ticket) = app.ticket_dialog() {
+        ticket_dialog::render(frame, inner, ticket, app.theme());
     }
     if app.is_help_open() {
         overlays::render_help_dialog(frame, inner, app, keybindings);

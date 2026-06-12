@@ -15,6 +15,7 @@ pub enum TreeAction {
     Expand,
     ToggleExpanded,
     CollapseAll,
+    ExpandAll,
     GoToStart,
     GoToEnd,
     GotoPrefix,
@@ -122,6 +123,21 @@ impl TreeState {
             }
             None => {
                 item.field_values.remove(field_id);
+            }
+        }
+    }
+
+    pub fn update_item_status(&mut self, item_id: &str, status: String, status_id: Option<String>) {
+        let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) else {
+            return;
+        };
+        item.status = status;
+        match status_id {
+            Some(id) => {
+                item.field_values.insert(String::from("status_id"), id);
+            }
+            None => {
+                item.field_values.remove("status_id");
             }
         }
     }
@@ -575,6 +591,7 @@ impl TreeState {
             TreeAction::Expand => return self.expand_or_go_to_first_child(),
             TreeAction::ToggleExpanded => return self.toggle_selected_expansion(),
             TreeAction::CollapseAll => self.collapse_all_expansion(),
+            TreeAction::ExpandAll => self.expand_all_loaded_expansion(),
             TreeAction::GoToStart => self.go_to_start(),
             TreeAction::GoToEnd => self.go_to_end(),
             TreeAction::GotoPrefix => self.handle_goto_prefix(),
@@ -726,6 +743,24 @@ impl TreeState {
     fn collapse_all_expansion(&mut self) {
         self.pending_goto_prefix = false;
         self.expanded_item_ids.clear();
+        self.clamp_selection();
+    }
+
+    fn expand_all_loaded_expansion(&mut self) {
+        self.pending_goto_prefix = false;
+        let children = self.children_by_parent();
+        let expandable_ids = self
+            .items
+            .iter()
+            .filter_map(|item| {
+                let has_loaded_children = children
+                    .get(item.id.as_str())
+                    .is_some_and(|children| !children.is_empty());
+                (self.is_expandable(item, has_loaded_children) && has_loaded_children)
+                    .then(|| item.id.clone())
+            })
+            .collect::<Vec<_>>();
+        self.expanded_item_ids.extend(expandable_ids);
         self.clamp_selection();
     }
 

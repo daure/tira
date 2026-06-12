@@ -63,6 +63,11 @@ impl FilteredTreeState {
         self.tree.clamp_selection();
     }
 
+    pub fn update_item_status(&mut self, item_id: &str, status: String, status_id: Option<String>) {
+        self.tree.update_item_status(item_id, status, status_id);
+        self.tree.clamp_selection();
+    }
+
     pub fn set_items(&mut self, items: Vec<TreeItem>, preserve_expanded: &HashSet<String>) {
         self.tree.set_items(items, preserve_expanded);
         self.tree.clamp_selection();

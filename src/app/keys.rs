@@ -2,6 +2,18 @@ use super::*;
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent, keybindings: &KeyBindings) {
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+
+        if self.screen == Screen::Main
+            && self.active_tab() == ApplicationTab::Board
+            && self.is_board_move_mode()
+            && !self.is_board_filter_focused()
+        {
+            self.highlight_selected_board_ticket_move();
+        }
+
         let typing = self.overlay_captures_keys();
 
         if self.leader_pending {
@@ -50,14 +62,12 @@ impl App {
         }
 
         if let Some(Overlay::BoardGroup(_)) = &self.overlay {
-            self.dispatch(Action::BoardGroupDropdown(
-                self.dropdown_key_action(
-                    key,
-                    keybindings,
-                    self.is_board_group_dropdown_filter_focused(),
-                    KeyBindings::project_dropdown_action_for,
-                ),
-            ));
+            self.dispatch(Action::BoardGroupDropdown(self.dropdown_key_action(
+                key,
+                keybindings,
+                self.is_board_group_dropdown_filter_focused(),
+                KeyBindings::project_dropdown_action_for,
+            )));
             return;
         }
 
@@ -89,6 +99,9 @@ impl App {
             Screen::Main if self.is_sprint_details_open() => {
                 self.dispatch(keybindings.sprint_details_action_for(key))
             }
+            Screen::Main if self.is_ticket_dialog_open() => {
+                self.dispatch(keybindings.ticket_dialog_action_for(key))
+            }
             Screen::Main if self.filtered_tree.is_column_dropdown_open() => {
                 let action = if self.filtered_tree.is_column_dropdown_filter_focused() {
                     JiraFilteredTreeAction::Dropdown(self.dropdown_key_action(
@@ -104,8 +117,27 @@ impl App {
                 };
                 self.dispatch(Action::JiraFilteredTree(action));
             }
-            Screen::Main if self.active_tab() == ApplicationTab::Board && self.board_filter.is_focused() => {
+            Screen::Main
+                if self.active_tab() == ApplicationTab::Board && self.board_filter.is_focused() =>
+            {
                 self.dispatch_board_filter(keybindings.filter_action_for(key));
+            }
+            Screen::Main
+                if self.active_tab() == ApplicationTab::Timeline
+                    && self.timeline.is_filter_focused() =>
+            {
+                let action = keybindings.filter_action_for(key);
+                if action == FilterAction::MoveSelectionUp {
+                    self.dispatch(Action::Timeline(TimelineAction::Tree(
+                        crate::components::generic::tree::TreeAction::MoveUp,
+                    )));
+                } else if action == FilterAction::MoveSelectionDown {
+                    self.dispatch(Action::Timeline(TimelineAction::Tree(
+                        crate::components::generic::tree::TreeAction::MoveDown,
+                    )));
+                } else {
+                    self.dispatch(Action::Timeline(TimelineAction::Filter(action)));
+                }
             }
             Screen::Main if self.active_tab() == ApplicationTab::Timeline => {
                 self.dispatch(keybindings.timeline_action_for(key));
@@ -143,11 +175,15 @@ impl App {
                         action,
                         Action::Tabs(_)
                             | Action::Board(_)
+                            | Action::MoveBoardTicket(_)
+                            | Action::ToggleBoardTicketMoveMode
+                            | Action::PlaceBoardTicketMoveMode
                             | Action::JiraFilteredTree(_)
                             | Action::FocusBoardFilter
                             | Action::ClearBoardFilter
                             | Action::ToggleBoardGrouping
                             | Action::ToggleSprintDetails
+                            | Action::OpenTicketDialog
                             | Action::ToggleAssigneeDropdown
                             | Action::AssignSelectedToMe
                             | Action::UnassignSelected
@@ -196,10 +232,10 @@ impl App {
 
     fn handle_help_key(&mut self, key: KeyEvent, keybindings: &KeyBindings) {
         let item_count = keybindings
-            .help_items(
+            .help_items_for_context(
                 self.screen(),
                 self.active_tab().title(),
-                self.is_any_dropdown_open(),
+                self.help_context(),
             )
             .len();
         match keybindings.help_dialog_action_for(key) {
@@ -225,7 +261,7 @@ impl App {
     /// Mutable handle to the help dialog's selection index, when help is open.
     fn help_selected_mut(&mut self) -> Option<&mut usize> {
         match &mut self.modal {
-            Some(ModalState::Help { selected }) => Some(selected),
+            Some(ModalState::Help { selected, .. }) => Some(selected),
             _ => None,
         }
     }
@@ -252,42 +288,8 @@ impl App {
         ) -> crate::components::generic::dropdown::DropdownAction,
     ) -> crate::components::generic::dropdown::DropdownAction {
         if filter_focused {
-            let is_ctrl_space =
-                key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL);
-            let is_ctrl_enter =
-                key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL);
-            if is_ctrl_space || is_ctrl_enter {
-                return crate::components::generic::dropdown::DropdownAction::ToggleSelected;
-            }
-            if key.code == KeyCode::Enter {
-                return crate::components::generic::dropdown::DropdownAction::Filter(
-                    FilterAction::Submit,
-                );
-            }
-            if key.code == KeyCode::PageUp {
-                return crate::components::generic::dropdown::DropdownAction::HalfPageUp;
-            }
-            if key.code == KeyCode::PageDown {
-                return crate::components::generic::dropdown::DropdownAction::HalfPageDown;
-            }
-            if key.code == KeyCode::Home {
-                return crate::components::generic::dropdown::DropdownAction::GoToStart;
-            }
-            if key.code == KeyCode::End {
-                return crate::components::generic::dropdown::DropdownAction::GoToEnd;
-            }
-            if key.code == KeyCode::Esc
-                || key.code == KeyCode::Char('[') && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                crate::components::generic::dropdown::DropdownAction::Close
-            } else {
-                crate::components::generic::dropdown::DropdownAction::Filter(
-                    keybindings.filter_action_for(key),
-                )
-            }
-        } else if key.code == KeyCode::Esc
-            || key.code == KeyCode::Char('[') && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
+            keybindings.dropdown_filter_focused_action_for(key)
+        } else if keybindings.dropdown_close_matches(key) {
             crate::components::generic::dropdown::DropdownAction::Close
         } else {
             normal_action(keybindings, key)
@@ -304,12 +306,13 @@ impl App {
     }
 
     fn contextual_global_action(&self, action: Action) -> Action {
-        if matches!(action, Action::ReloadList | Action::ReloadNode)
-            && self.active_tab() == ApplicationTab::Board
-        {
-            Action::ReloadBoard
-        } else {
-            action
+        if !matches!(action, Action::ReloadList) {
+            return action;
+        }
+        match self.active_tab() {
+            ApplicationTab::Board => Action::ReloadBoard,
+            ApplicationTab::Timeline => Action::ReloadTimeline,
+            ApplicationTab::List => action,
         }
     }
 }

@@ -15,7 +15,7 @@ use tira::{
     ui::theme::{Theme, ThemeName},
 };
 
-use support::{ctrl, issue, key, rendered_text};
+use support::{ctrl, issue, key, rendered_text, shift};
 
 #[test]
 fn list_render_shows_filtered_tree_as_table_with_columns() {
@@ -42,6 +42,28 @@ fn list_render_shows_filtered_tree_as_table_with_columns() {
     assert!(screen.contains("Status"));
     assert!(screen.contains("Labels"));
     assert!(!screen.contains("Work type"));
+}
+
+#[test]
+fn list_render_shows_assignee_placeholder_when_unassigned() {
+    let backend = TestBackend::new(160, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let app = App::with_issues(vec![issue(
+        "KAN-1",
+        "Legacy placeholder task",
+        "Task",
+        None,
+    )]);
+
+    terminal
+        .draw(|frame| draw(frame, &app, &KeyBindings::default()))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(
+        screen.contains("@--"),
+        "unassigned issue in list view should show @--"
+    );
 }
 
 #[test]
@@ -325,6 +347,55 @@ fn command_log_highlights_path_but_not_query_string() {
         content[row * width + query_col].bg,
         highlight,
         "the query string is not highlighted"
+    );
+}
+
+#[test]
+fn command_log_renders_http_failures_as_errors() {
+    let backend = TestBackend::new(120, 10);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(Vec::new());
+    app.handle_event(AppEvent::IssueAssigned {
+        request_id: 999,
+        issue_key: String::from("KAN-1"),
+        assignee: None,
+        result: Err((
+            JiraError(String::from("Jira returned HTTP 400")),
+            CommandLogEntry {
+                timestamp: String::from("10:00:00"),
+                method: "PUT",
+                path: String::from("/rest/agile/1.0/issue/rank"),
+                status: String::from("400"),
+                duration_ms: 5,
+            },
+        )),
+    });
+    app.dispatch(Action::ToggleCommandLog);
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let buffer = terminal.backend().buffer();
+    let width = buffer.area().width as usize;
+    let height = buffer.area().height as usize;
+    let content = buffer.content();
+    let error_fg = app.theme().error_fg();
+    let failed_status = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            x + 2 < width
+                && content[y * width + x].symbol() == "4"
+                && content[y * width + x + 1].symbol() == "0"
+                && content[y * width + x + 2].symbol() == "0"
+        })
+        .expect("failed status rendered");
+
+    assert_eq!(
+        content[failed_status.1 * width + failed_status.0].fg,
+        error_fg,
+        "HTTP 400 should render as an error status"
     );
 }
 
@@ -794,6 +865,48 @@ fn board_card_footer_highlights_key_and_avatar_matches() {
             .content()
             .iter()
             .any(|cell| cell.bg == app.theme().highlight_bg())
+    );
+}
+
+#[test]
+fn board_card_without_assignee_shows_avatar_placeholder() {
+    let backend = TestBackend::new(80, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut issue = issue("KAN-1", "No Assignee", "Story", None);
+    issue.status = String::from("To Do");
+    let bindings = KeyBindings::default();
+    let mut app = App::with_issues(vec![issue]);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(
+        screen.contains("@--"),
+        "rendered screen should contain placeholder @--"
+    );
+
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    let muted_fg = app.theme().muted_fg();
+    let mut placeholder_has_muted_color = false;
+    for y in 0..area.height {
+        for x in 0..area.width.saturating_sub(2) {
+            if buffer[(x, y)].symbol() == "@"
+                && buffer[(x + 1, y)].symbol() == "-"
+                && buffer[(x + 2, y)].symbol() == "-"
+            {
+                placeholder_has_muted_color = buffer[(x, y)].fg == muted_fg
+                    && buffer[(x + 1, y)].fg == muted_fg
+                    && buffer[(x + 2, y)].fg == muted_fg;
+            }
+        }
+    }
+    assert!(
+        placeholder_has_muted_color,
+        "the @-- avatar bubble should be rendered with the muted_fg theme color"
     );
 }
 
@@ -1286,7 +1399,7 @@ fn board_scroll_keeps_swimlane_context_when_returning_to_edges() {
         .expect("draw app");
     let (screen, _) = rendered_text(&terminal);
     assert!(screen.contains("Bottom swimlane"));
-    assert!(screen.contains("╚") || screen.contains("└"));
+    assert!(screen.contains("Bottom lane issue"));
 }
 
 #[test]
@@ -1468,9 +1581,9 @@ fn board_help_overlay_shows_board_keybindings() {
     assert!(screen.contains("Sprint details"));
     assert!(screen.contains("Move columns"));
     assert!(screen.contains("Move cards"));
+    assert!(screen.contains("Move mode"));
     assert!(screen.contains("Page cards"));
     assert!(screen.contains("Start / End"));
-    assert!(screen.contains("Reload board"));
 }
 
 #[test]
@@ -1839,6 +1952,185 @@ fn board_top_bar_shows_details_days_left_and_lowercase_group() {
 }
 
 #[test]
+fn board_top_bar_says_no_active_sprint_when_sprint_is_missing() {
+    let backend = TestBackend::new(100, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let bindings = KeyBindings::default();
+    let board = BoardData {
+        id: 1,
+        name: String::from("Kanban"),
+        columns: vec![BoardColumnSummary {
+            name: String::from("To Do"),
+            statuses: vec![String::from("To Do")],
+            max: None,
+        }],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1")],
+        }],
+        issues: vec![issue("KAN-1", "Sprintless task", "Task", None)],
+        sprint: None,
+    };
+    let mut app = App::with_board_data(board);
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    terminal
+        .draw(|frame| draw(frame, &app, &bindings))
+        .expect("draw app");
+
+    let (screen, _) = rendered_text(&terminal);
+    assert!(screen.contains("details: No active sprint"));
+}
+
+#[test]
+fn move_mode_places_board_ticket_and_queues_status_update_on_second_m() {
+    let credentials = JiraCredentials {
+        site: String::from("https://example.atlassian.net"),
+        email: String::from("dev@example.com"),
+        api_key: String::from("token"),
+        default_project: String::from("KAN"),
+    };
+    let mut app = App::from_credentials(credentials.clone());
+    let AppEffect::LoadJiraProject { request_id, .. } = app.take_effects().remove(0) else {
+        panic!("expected initial load effect");
+    };
+    let board = BoardData {
+        id: 1,
+        name: String::from("Kanban"),
+        columns: vec![
+            BoardColumnSummary {
+                name: String::from("To Do"),
+                statuses: vec![String::from("100")],
+                max: None,
+            },
+            BoardColumnSummary {
+                name: String::from("In Progress"),
+                statuses: vec![String::from("200")],
+                max: None,
+            },
+        ],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1")],
+        }],
+        issues: vec![issue("KAN-1", "Move me", "Task", None)],
+        sprint: None,
+    };
+    app.handle_event(AppEvent::JiraProjectLoaded {
+        request_id,
+        purpose: JiraLoadPurpose::Initial,
+        credentials,
+        result: JiraProjectLoadResult {
+            issues: Ok(board.issues.clone()),
+            board: Ok(board),
+            next_page_token: None,
+            fields: Ok(Vec::new()),
+            projects: Ok(Vec::new()),
+            users: Ok(Vec::new()),
+            current_user: Err(JiraError(String::from("not loaded"))),
+            populated_fields: None,
+            logs: Vec::new(),
+        },
+    });
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(key('m'), &KeyBindings::default());
+    app.handle_key(key('l'), &KeyBindings::default());
+
+    assert!(
+        app.take_effects()
+            .into_iter()
+            .all(|effect| !matches!(effect, AppEffect::TransitionIssueStatus { .. })),
+        "status update waits until move mode is placed"
+    );
+    app.handle_key(key('m'), &KeyBindings::default());
+
+    assert!(
+        app.status()
+            .contains("Updating KAN-1 status to In Progress")
+    );
+    let effect = app.take_effects().remove(0);
+    assert!(matches!(
+        effect,
+        AppEffect::TransitionIssueStatus { issue_key, status, .. }
+            if issue_key == "KAN-1" && status == "In Progress"
+    ));
+}
+
+#[test]
+fn move_mode_second_m_commits_staged_board_ticket_move() {
+    let credentials = JiraCredentials {
+        site: String::from("https://example.atlassian.net"),
+        email: String::from("dev@example.com"),
+        api_key: String::from("token"),
+        default_project: String::from("KAN"),
+    };
+    let mut app = App::from_credentials(credentials.clone());
+    let AppEffect::LoadJiraProject { request_id, .. } = app.take_effects().remove(0) else {
+        panic!("expected initial load effect");
+    };
+    let board = BoardData {
+        id: 1,
+        name: String::from("Kanban"),
+        columns: vec![
+            BoardColumnSummary {
+                name: String::from("To Do"),
+                statuses: vec![String::from("100")],
+                max: None,
+            },
+            BoardColumnSummary {
+                name: String::from("Done"),
+                statuses: vec![String::from("300")],
+                max: None,
+            },
+        ],
+        swimlanes: vec![BoardSwimlaneSummary {
+            id: None,
+            name: String::from("Issues"),
+            issue_keys: vec![String::from("KAN-1")],
+        }],
+        issues: vec![issue("KAN-1", "Move me", "Task", None)],
+        sprint: None,
+    };
+    app.handle_event(AppEvent::JiraProjectLoaded {
+        request_id,
+        purpose: JiraLoadPurpose::Initial,
+        credentials,
+        result: JiraProjectLoadResult {
+            issues: Ok(board.issues.clone()),
+            board: Ok(board),
+            next_page_token: None,
+            fields: Ok(Vec::new()),
+            projects: Ok(Vec::new()),
+            users: Ok(Vec::new()),
+            current_user: Err(JiraError(String::from("not loaded"))),
+            populated_fields: None,
+            logs: Vec::new(),
+        },
+    });
+    app.dispatch(Action::Tabs(TabAction::Previous));
+
+    app.handle_key(key('m'), &KeyBindings::default());
+    app.handle_key(key('l'), &KeyBindings::default());
+    let effects = app.take_effects();
+    assert!(
+        effects
+            .into_iter()
+            .all(|effect| !matches!(effect, AppEffect::TransitionIssueStatus { .. }))
+    );
+
+    app.handle_key(key('m'), &KeyBindings::default());
+
+    assert!(app.take_effects().into_iter().any(|effect| matches!(
+        effect,
+        AppEffect::TransitionIssueStatus { issue_key, status, .. }
+            if issue_key == "KAN-1" && status == "Done"
+    )));
+}
+
+#[test]
 fn board_preserves_scroll_when_pane_is_temporarily_shrunk() {
     // A tall single-column board so the viewport must scroll vertically.
     let mut issues = Vec::new();
@@ -1910,4 +2202,3 @@ fn board_preserves_scroll_when_pane_is_temporarily_shrunk() {
          not anchored to the bottom"
     );
 }
-

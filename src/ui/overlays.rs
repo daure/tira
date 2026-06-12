@@ -253,7 +253,11 @@ fn section_lines<'a>(
 }
 
 pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
-    let items = keybindings.help_items(app.screen(), app.active_tab().title(), app.is_any_dropdown_open());
+    let items = keybindings.help_items_for_context(
+        app.screen(),
+        app.active_tab().title(),
+        app.help_context(),
+    );
     if items.is_empty() {
         return;
     }
@@ -269,8 +273,8 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
         .max()
         .unwrap_or(0);
     let content_width = binding_width + 2 + summary_width;
-    let width = area.width.min((content_width + 5) as u16).max(48);
-    let height = area.height.min(20).max(12);
+    let width = area.width.min((content_width + 9) as u16).max(64);
+    let height = area.height.min(26).max(16);
     let inner = Dialog::new("Shortcuts", width, height)
         .border_style(Style::default().fg(app.theme().border_fg()))
         .y_offset(area.height.saturating_sub(height) / 2)
@@ -358,10 +362,7 @@ pub fn render_help_dialog(frame: &mut Frame<'_>, area: Rect, app: &App, keybindi
     ));
 
     let scroll_u16 = scroll as u16;
-    frame.render_widget(
-        Paragraph::new(lines).scroll((scroll_u16, 0)),
-        list_area,
-    );
+    frame.render_widget(Paragraph::new(lines).scroll((scroll_u16, 0)), list_area);
 
     if total_lines > viewport {
         scrollbar::render_range(
@@ -495,10 +496,10 @@ pub fn render_notifications(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// the query string (from `?` on) stays unhighlighted.
 fn command_log_entry_lines(entry: &CommandLogEntry, app: &App, width: u16) -> Vec<Line<'static>> {
     let theme = app.theme();
-    let status_style = if entry.status == "ERR" {
-        Style::default().fg(theme.error_fg())
-    } else {
+    let status_style = if command_log_status_succeeded(entry.status.as_str()) {
         Style::default().fg(theme.success_fg())
+    } else {
+        Style::default().fg(theme.error_fg())
     };
     let path_style = Style::default()
         .fg(theme.selected_alt_fg())
@@ -561,6 +562,12 @@ fn command_log_entry_lines(entry: &CommandLogEntry, app: &App, width: u16) -> Ve
         }
     }
     lines
+}
+
+fn command_log_status_succeeded(status: &str) -> bool {
+    status
+        .parse::<u16>()
+        .is_ok_and(|code| (200..400).contains(&code))
 }
 
 /// Pushes the `[start, end)` slice of `chars` as styled spans, splitting at

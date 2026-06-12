@@ -491,32 +491,4 @@ impl App {
         self.request_children_batch(to_fetch);
         self.pending_reload_seamless = true;
     }
-
-    /// Refreshes the children of the selected tree node in place, keeping the
-    /// stale subtree visible (greyed) until the fresh set arrives so the node
-    /// never collapses or jumps. Does nothing when the selection has no loaded
-    /// children (or there is no selection); only `Shift+R` reloads the whole
-    /// list.
-    pub(crate) fn reload_node(&mut self) {
-        if self.active_tab() != ApplicationTab::List || self.view != ListView::Browse {
-            return;
-        }
-        let Some(node_id) = self.filtered_tree.selected_item_id().map(str::to_owned) else {
-            return;
-        };
-        // Refresh the node and any open descendant subtrees in place, in
-        // parallel. `begin_soft_reload` marks each as loading without dropping
-        // its children and returns the ids to refetch.
-        let mut targets = self.filtered_tree.expanded_descendant_ids(&node_id);
-        targets.insert(node_id.clone());
-        let to_fetch = self.filtered_tree.begin_soft_reload(&targets);
-        if to_fetch.is_empty() {
-            return;
-        }
-        self.status = format!("Reloading {node_id}");
-        for parent in &to_fetch {
-            self.soft_reload_parents.insert(parent.clone());
-        }
-        self.request_children_batch(to_fetch);
-    }
 }

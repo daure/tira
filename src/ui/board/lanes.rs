@@ -33,6 +33,7 @@ pub(super) struct BoardLayoutItem {
     pub(super) key: String,
     pub(super) y_start: usize,
     pub(super) y_end: usize,
+    pub(super) card_y_start: usize,
 }
 
 pub(super) fn generate_rendered_board(
@@ -120,6 +121,7 @@ pub(super) fn generate_rendered_board(
                 };
                 render_columns_block(
                     &mut rendered,
+                    app,
                     data,
                     issues_by_key,
                     &section,
@@ -163,6 +165,7 @@ pub(super) fn generate_rendered_board(
 
         render_columns_block(
             &mut rendered,
+            app,
             data,
             issues_by_key,
             lane,
@@ -209,6 +212,7 @@ fn push_heading(
             key,
             y_start,
             y_end,
+            card_y_start: y_start,
         });
     }
     rendered.headings.push(BoardHeading {
@@ -220,6 +224,7 @@ fn push_heading(
 
 fn render_columns_block(
     rendered: &mut RenderedBoard,
+    app: &App,
     data: &BoardData,
     issues_by_key: &BTreeMap<&str, &IssueSummary>,
     lane: &BoardSwimlaneSummary,
@@ -261,7 +266,9 @@ fn render_columns_block(
         for issue in col_issues {
             let card_selected = selected_key == Some(issue.key.as_str());
             let card_width = column_width.saturating_sub(4);
-            let lines_for_card = issue_card_lines(issue, card_selected, theme, card_width, search);
+            let card_moving = app.is_board_ticket_moving(&issue.key);
+            let lines_for_card =
+                issue_card_lines(issue, card_selected, card_moving, theme, card_width, search);
             let card_h = lines_for_card.len();
             card_positions.push((issue.key.clone(), current_local_y, current_local_y + card_h));
             for line in lines_for_card {
@@ -310,6 +317,7 @@ fn render_columns_block(
                 key: board_empty_cell_key(&lane.name, *c_idx),
                 y_start: header_y_start,
                 y_end: columns_y_start + 2,
+                card_y_start: columns_y_start + 1,
             });
             continue;
         }
@@ -330,6 +338,7 @@ fn render_columns_block(
                 key: key.clone(),
                 y_start,
                 y_end,
+                card_y_start,
             });
         }
     }
@@ -378,11 +387,20 @@ fn render_columns_block(
         let title_text = format!(" {name}{suffix}");
         let title_len = title_text.chars().count();
         let fill_count = inner.saturating_sub(title_len);
-        let top_border_str = format!(
-            "{top_left}{title_text}{}{top_right}",
-            fill_char.repeat(fill_count)
-        );
-        col_lines.push(Line::from(Span::styled(top_border_str, border_style)));
+        let text_style = if column_selected {
+            Style::default()
+                .fg(theme.accent_fg())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted_fg())
+        };
+        let fill_str = fill_char.repeat(fill_count);
+        let top_right_str = format!("{fill_str}{top_right}");
+        col_lines.push(Line::from(vec![
+            Span::styled(top_left.to_owned(), border_style),
+            Span::styled(title_text, text_style),
+            Span::styled(top_right_str, border_style),
+        ]));
 
         let mut padded_card_lines = col_card_lines;
         while padded_card_lines.len() < max_inner_len {

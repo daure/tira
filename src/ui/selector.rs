@@ -95,8 +95,9 @@ pub fn render_single_select<T>(
                 // them — otherwise the shortcut is pushed past the right edge
                 // and clipped.
                 let label_row_width = match &shortcut {
-                    Some(shortcut) => (options_area.width as usize)
-                        .saturating_sub(shortcut.chars().count() + 1),
+                    Some(shortcut) => {
+                        (options_area.width as usize).saturating_sub(shortcut.chars().count() + 1)
+                    }
                     None => options_area.width as usize,
                 };
                 let mut spans = style::single_select_dropdown_spans(

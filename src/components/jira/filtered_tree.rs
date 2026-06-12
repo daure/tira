@@ -221,6 +221,11 @@ impl JiraFilteredTreeState {
             .update_item_field(issue_key, "assignee", assignee_name);
     }
 
+    pub fn update_status(&mut self, issue_key: &str, status: String, status_id: Option<String>) {
+        self.filtered_tree
+            .update_item_status(issue_key, status, status_id);
+    }
+
     pub fn set_available_columns(&mut self, columns: Vec<JiraIssueColumn>) {
         if !columns.is_empty() {
             self.available_columns = columns

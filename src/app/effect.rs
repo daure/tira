@@ -66,6 +66,20 @@ pub enum AppEffect {
         assignee: Option<UserSummary>,
         credentials: JiraCredentials,
     },
+    TransitionIssueStatus {
+        request_id: u64,
+        issue_key: String,
+        status: String,
+        status_id: Option<String>,
+        credentials: JiraCredentials,
+    },
+    RankIssue {
+        request_id: u64,
+        issue_key: String,
+        rank_before: Option<String>,
+        rank_after: Option<String>,
+        credentials: JiraCredentials,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +138,18 @@ pub enum AppEvent {
         request_id: u64,
         issue_key: String,
         assignee: Option<UserSummary>,
+        result: Result<CommandLogEntry, (JiraError, CommandLogEntry)>,
+    },
+    IssueStatusChanged {
+        request_id: u64,
+        issue_key: String,
+        status: String,
+        status_id: Option<String>,
+        result: Result<Vec<CommandLogEntry>, (JiraError, Vec<CommandLogEntry>)>,
+    },
+    IssueRanked {
+        request_id: u64,
+        issue_key: String,
         result: Result<CommandLogEntry, (JiraError, CommandLogEntry)>,
     },
 }

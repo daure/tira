@@ -60,7 +60,6 @@ fn run(
                 _ => {}
             }
             spawn_effects(&mut app, &event_tx);
-            last_tick = Instant::now();
         }
     }
 
@@ -244,6 +243,52 @@ fn spawn_effects(app: &mut App, event_tx: &mpsc::Sender<AppEvent>) {
                     });
                 });
             }
+            AppEffect::TransitionIssueStatus {
+                request_id,
+                issue_key,
+                status,
+                status_id,
+                credentials,
+            } => {
+                let tx = event_tx.clone();
+                thread::spawn(move || {
+                    let result = jira::transition_issue_to_status(
+                        &credentials,
+                        issue_key.as_str(),
+                        status.as_str(),
+                        status_id.as_deref(),
+                    );
+                    let _ = tx.send(AppEvent::IssueStatusChanged {
+                        request_id,
+                        issue_key,
+                        status,
+                        status_id,
+                        result,
+                    });
+                });
+            }
+            AppEffect::RankIssue {
+                request_id,
+                issue_key,
+                rank_before,
+                rank_after,
+                credentials,
+            } => {
+                let tx = event_tx.clone();
+                thread::spawn(move || {
+                    let result = jira::rank_issue(
+                        &credentials,
+                        issue_key.as_str(),
+                        rank_before.as_deref(),
+                        rank_after.as_deref(),
+                    );
+                    let _ = tx.send(AppEvent::IssueRanked {
+                        request_id,
+                        issue_key,
+                        result,
+                    });
+                });
+            }
             AppEffect::SaveTheme(name) => {
                 let tx = event_tx.clone();
                 thread::spawn(move || {
@@ -300,8 +345,9 @@ fn load_jira_project_data(
     let board_handle = thread::spawn(move || jira::load_project_board(&board_credentials));
 
     let field_summaries = fields_handle.join().expect("jira fields thread panicked");
-    let (populated_fields, populated_log) =
-        populated_handle.join().expect("jira populated fields thread panicked");
+    let (populated_fields, populated_log) = populated_handle
+        .join()
+        .expect("jira populated fields thread panicked");
     let projects = projects_handle
         .join()
         .expect("jira projects thread panicked");

@@ -22,11 +22,11 @@ mod layout;
 mod text;
 mod toolbar;
 
+use crate::ui::layout::slice_line;
 use filter::board_issue_matches_filter;
 use heading::sticky_headings;
-use lanes::{RenderedBoard, generate_rendered_board};
+use lanes::{BoardHeading, RenderedBoard, generate_rendered_board};
 use layout::ColumnLayout;
-use crate::ui::layout::slice_line;
 use toolbar::{details_trigger_text, render_details_trigger, render_filter, render_group_trigger};
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBindings) {
@@ -35,9 +35,14 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .areas(area);
-    let group_width = (app.board_grouping().label().len() as u16 + 9).max(16);
+    let group_width = ((keybindings.board_group_label().chars().count()
+        + app.board_grouping().label().chars().count()
+        + 9) as u16)
+        .max(16);
     let details_text = details_trigger_text(app);
-    let details_width = details_text.chars().count() as u16 + 2;
+    let details_width = (keybindings.board_details_label().chars().count()
+        + details_text.chars().count()
+        + 3) as u16;
     if crate::ui::layout::toolbar_is_collapsed(top_area.width) {
         let hint_width = keybindings.shortcuts_hint_width();
         let [filter_area, hint_area] = Layout::default()
@@ -59,8 +64,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
             ])
             .areas(top_area);
         render_filter(frame, filter_area, app, keybindings);
-        render_details_trigger(frame, details_area, app, &details_text);
-        render_group_trigger(frame, group_area, app);
+        render_details_trigger(frame, details_area, app, keybindings, &details_text);
+        render_group_trigger(frame, group_area, app, keybindings);
     }
 
     let [main_content_area, _, scrollbar_area] = Layout::default()
@@ -201,16 +206,26 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
 
     let mut sel_y_start = 0;
     let mut sel_y_end = 0;
+    let mut sel_card_y_start = 0;
     if let Some(target_key) = selected_key_or_group
         && let Some(item) = rendered.layout.iter().find(|item| item.key == *target_key)
     {
         sel_y_start = item.y_start;
         sel_y_end = item.y_end;
+        sel_card_y_start = item.card_y_start;
     }
 
     let total_lines = rendered.lines.len();
     let viewport_height = board_area.height as usize;
-    let v_offset = resolve_vertical_offset(app, viewport_height, total_lines, sel_y_start, sel_y_end);
+    let v_offset = resolve_vertical_offset(
+        app,
+        &rendered.headings,
+        viewport_height,
+        total_lines,
+        sel_y_start,
+        sel_y_end,
+        sel_card_y_start,
+    );
 
     let strip_width = columns.strip_width();
     let h_offset = resolve_horizontal_offset(app, &columns, board_area.width, strip_width);
@@ -261,10 +276,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, keybindings: &KeyBin
 /// mutability — must run once per frame, before reading `v_scroll`.
 fn resolve_vertical_offset(
     app: &App,
+    headings: &[BoardHeading],
     viewport_height: usize,
     total_lines: usize,
-    sel_y_start: usize,
+    _sel_y_start: usize,
     sel_y_end: usize,
+    sel_card_y_start: usize,
 ) -> usize {
     let max_v = total_lines.saturating_sub(viewport_height);
     let board = app.board();
@@ -283,10 +300,23 @@ fn resolve_vertical_offset(
     if is_committed {
         let mut scroll_offset = board.scroll_offset.get();
         if !board.manual_v_scroll.get() {
-            if sel_y_start < scroll_offset {
-                scroll_offset = sel_y_start;
+            let n_sticky = sticky_headings(headings, scroll_offset).len();
+            if sel_card_y_start < scroll_offset + n_sticky {
+                scroll_offset = sel_card_y_start.saturating_sub(n_sticky);
+                let n_sticky_new = sticky_headings(headings, scroll_offset).len();
+                if sel_card_y_start < scroll_offset + n_sticky_new {
+                    scroll_offset = sel_card_y_start.saturating_sub(n_sticky_new);
+                }
             } else if sel_y_end > scroll_offset + viewport_height {
                 scroll_offset = sel_y_end.saturating_sub(viewport_height);
+                let n_sticky_new = sticky_headings(headings, scroll_offset).len();
+                if sel_card_y_start < scroll_offset + n_sticky_new {
+                    scroll_offset = sel_card_y_start.saturating_sub(n_sticky_new);
+                    let n_sticky_new2 = sticky_headings(headings, scroll_offset).len();
+                    if sel_card_y_start < scroll_offset + n_sticky_new2 {
+                        scroll_offset = sel_card_y_start.saturating_sub(n_sticky_new2);
+                    }
+                }
             }
         }
         scroll_offset = scroll_offset.min(max_v);
@@ -332,7 +362,9 @@ fn resolve_horizontal_offset(
     h_anim.set_target(f64::from(h_target));
     // Snap on resize, mirroring the vertical handling above.
     if app.board().last_h_dims.get() != Some((board_width, strip_width)) {
-        app.board().last_h_dims.set(Some((board_width, strip_width)));
+        app.board()
+            .last_h_dims
+            .set(Some((board_width, strip_width)));
         h_anim.snap_to(f64::from(h_target));
     }
     (h_anim.current().round() as u16).min(max_h)

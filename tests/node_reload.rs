@@ -2,7 +2,7 @@ mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Duration;
-use tira::services::jira::{IssueSummary, JiraError, JiraLoadResult};
+use tira::services::jira::{IssueSummary, JiraError, JiraLoadResult, TimelineData};
 use tira::{
     App, AppEffect, AppEvent, JiraLoadPurpose, JiraProjectLoadResult, KeyBindings,
     config::JiraCredentials,
@@ -28,8 +28,15 @@ fn issue_with_children(key: &str, summary: &str, kind: &str, has_children: bool)
 fn loaded_app(issues: Vec<IssueSummary>) -> App {
     let credentials = credentials();
     let mut app = App::from_credentials(credentials.clone());
-    let effect = app.take_effects().remove(0);
-    let AppEffect::LoadJiraProject { request_id, .. } = effect else {
+    let effects = app.take_effects();
+    let timeline_request_id = effects.iter().find_map(|effect| match effect {
+        AppEffect::LoadTimeline { request_id, .. } => Some(*request_id),
+        _ => None,
+    });
+    let Some(request_id) = effects.iter().find_map(|effect| match effect {
+        AppEffect::LoadJiraProject { request_id, .. } => Some(*request_id),
+        _ => None,
+    }) else {
         panic!("expected initial Jira load effect");
     };
     app.handle_event(AppEvent::JiraProjectLoaded {
@@ -48,6 +55,13 @@ fn loaded_app(issues: Vec<IssueSummary>) -> App {
             logs: Vec::new(),
         },
     });
+    if let Some(request_id) = timeline_request_id {
+        app.handle_event(AppEvent::TimelineLoaded {
+            request_id,
+            timeline: Ok(TimelineData::default()),
+            logs: Vec::new(),
+        });
+    }
     app
 }
 
@@ -160,68 +174,15 @@ fn expand_and_load(
 }
 
 #[test]
-fn reload_node_refetches_children_of_selected_node() {
-    let bindings = KeyBindings::default();
-    let mut app = loaded_app(vec![issue_with_children("KAN-1", "Epic", "Epic", true)]);
-
-    expand_and_load(&mut app, "KAN-1", vec![child("KAN-2", "KAN-1")], &bindings);
-    assert_eq!(app.visible_issue_rows().len(), 2);
-
-    // Reload the selected node (the epic) with `r`.
-    app.handle_key(key('r'), &bindings);
-
-    // The stale child stays visible (greyed) while the node refreshes in place.
-    let rows = app.visible_issue_rows();
-    assert_eq!(
-        rows.len(),
-        2,
-        "subtree stays visible during in-place reload"
-    );
-    assert!(rows[0].loading, "node shows loading indicator");
-    assert!(rows[1].reloading, "stale child greyed while refreshing");
-
-    let parents = take_child_batch(&mut app);
-    assert_eq!(
-        parents
-            .iter()
-            .map(|(key, _)| key.as_str())
-            .collect::<Vec<_>>(),
-        vec!["KAN-1"],
-        "reload refetches the selected node"
-    );
-
-    // Deliver fresh children.
-    deliver_child_batch(
-        &mut app,
-        &parents,
-        vec![(
-            "KAN-1",
-            vec![child("KAN-3", "KAN-1"), child("KAN-4", "KAN-1")],
-        )],
-    );
-
-    let rows = app.visible_issue_rows();
-    assert_eq!(rows.len(), 3, "refreshed children appear");
-    assert!(!rows[0].loading, "spinner cleared after load");
-    let ids: Vec<&str> = rows
-        .iter()
-        .map(|row| app.issues()[row.item_index].id.as_str())
-        .collect();
-    assert_eq!(ids, vec!["KAN-1", "KAN-3", "KAN-4"]);
-}
-
-#[test]
-fn reload_node_on_leaf_does_nothing() {
+fn bare_r_does_not_reload_a_list_node() {
     let bindings = KeyBindings::default();
     let mut app = loaded_app(vec![issue_with_children("KAN-1", "Leaf", "Task", false)]);
 
     app.handle_key(key('r'), &bindings);
 
-    // A childless node has nothing to reload; `r` must not queue any work and
-    // must not trigger a full list reload (only Shift+R does that).
     assert!(
         app.take_effects().is_empty(),
-        "r on a childless node is a no-op"
+        "r on the list is no longer a node reload shortcut"
     );
 }
 
@@ -581,60 +542,6 @@ fn full_reload_holds_subtree_dimmed_until_roots_land_when_children_arrive_first(
     assert_eq!(rows.len(), 2, "subtree intact after the reload");
     assert!(!rows[0].loading, "node settles once the reload completes");
     assert!(!rows[1].reloading, "child no longer greyed");
-}
-
-#[test]
-fn node_reload_restores_expanded_grandchildren() {
-    let bindings = KeyBindings::default();
-    let mut app = loaded_app(vec![issue_with_children("KAN-1", "Epic", "Epic", true)]);
-    expand_and_load(
-        &mut app,
-        "KAN-1",
-        vec![parent_child("KAN-2", "KAN-1")],
-        &bindings,
-    );
-    // Expand the nested node KAN-2.
-    app.handle_key(key('j'), &bindings);
-    app.handle_key(
-        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-        &bindings,
-    );
-    deliver_children(&mut app, "KAN-2", vec![child("KAN-3", "KAN-2")]);
-    assert_eq!(app.visible_issue_rows().len(), 3);
-
-    // Reload KAN-1 (select it first); its subtree (including the expanded
-    // grandchild KAN-2) refreshes in place, in parallel.
-    app.handle_key(key('k'), &bindings);
-    assert_eq!(app.selected_issue_key(), Some("KAN-1"));
-    app.handle_key(key('r'), &bindings);
-
-    // KAN-1 and KAN-2 refetch together in one batch; deliver both.
-    let parents = take_child_batch(&mut app);
-    let names: std::collections::HashSet<&str> =
-        parents.iter().map(|(key, _)| key.as_str()).collect();
-    assert!(
-        names.contains("KAN-1") && names.contains("KAN-2"),
-        "node reload refreshes the open subtree in one batch"
-    );
-    deliver_child_batch(
-        &mut app,
-        &parents,
-        vec![
-            ("KAN-1", vec![parent_child("KAN-2", "KAN-1")]),
-            ("KAN-2", vec![child("KAN-3", "KAN-2")]),
-        ],
-    );
-
-    let ids: Vec<&str> = app
-        .visible_issue_rows()
-        .iter()
-        .map(|row| app.issues()[row.item_index].id.as_str())
-        .collect();
-    assert_eq!(
-        ids,
-        vec!["KAN-1", "KAN-2", "KAN-3"],
-        "grandchild subtree restored"
-    );
 }
 
 /// Drains the pending full-reload effect and delivers `issues` as the result.
